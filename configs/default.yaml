@@ -1,0 +1,77 @@
+# FocusParse default configuration.
+#
+# Model tiers and per-role assignment. Override at runtime via FOCUSPARSE_TIER_*
+# env vars (see .env.example and .claude/settings.json).
+
+tiers:
+  cheap:
+    provider: gemini
+    model: gemini-3.1-flash-preview
+    max_tokens: 4096
+    thinking_budget: 1024            # required for Gemini 2.5/3.x, else empty response
+  mid:
+    provider: anthropic
+    model: claude-haiku-4-5
+    max_tokens: 4096
+  frontier:
+    provider: openai
+    model: gpt-5.4
+    max_completion_tokens: 8192       # GPT-5.x requires this param name, not max_tokens
+
+roles:
+  planner: cheap
+  router: cheap
+  localizer_rerank: mid
+  reasoner: frontier
+  verifier: mid
+
+# Default budgets for `focus eval --agent focus`.
+# Override on the CLI: --budget tokens=120k,tool_calls=12,crops=8
+budget:
+  tokens: 120_000
+  tool_calls: 12
+  crops: 8
+  max_turns: 10
+  max_vlm_calls: 4
+
+# Per-stage escalation policy. When a step returns confidence < threshold, re-run
+# that step one tier up (mid → frontier, cheap → mid). Never escalates more than
+# one level, and never escalates more than one step per run.
+escalation:
+  confidence_threshold: 0.5
+  max_steps_escalated_per_run: 1
+
+# External endpoints.
+endpoints:
+  layout:
+    url: https://jqkx3k3gn4ciymvi.us-east-1.aws.endpoints.huggingface.cloud
+    # Shared with parser-bench — be a polite neighbor.
+    rate_limit_rps: 2
+    timeout_s: 180
+    retries: 3
+
+# Dataset source. `hf` streams from HuggingFace (default); `local` reads from a
+# local parser-bench clone at the path below.
+dataset:
+  source: hf
+  hf_repo: gabrielbo/parser-bench
+  revision: null                       # pin once benchmark stabilizes (FOCUSPARSE_DATASET_REVISION)
+  local_root: null                     # absolute path to a parser-bench checkout, or null
+
+# NFS (processed docs — mirrors parser-bench contract).
+nfs:
+  host: llama-nfs
+  remote_root: /home/osx-user/shared-experiments/llamacloud-bench-ci/data/parser-bench
+  rsync_flags: [-a, -z]                # archive + compress; no --delete, NFS is canonical
+
+# Cache root for crops, OCR, layout, and per-run trace assets.
+cache:
+  root: ./cache
+
+# Trace export defaults.
+traces:
+  schema_version: "1"
+  sft_filter:
+    min_coverage: 0.8                  # AgenticOCR dual threshold — coverage recall
+    min_iou: 0.3                       # AgenticOCR dual threshold — spatial IoU
+    require_correct: true              # for SFT; GRPO variant keeps incorrect examples

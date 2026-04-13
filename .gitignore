@@ -1,1 +1,25 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# env + secrets
 .env
+.env.local
+
+# data + run outputs (write-only sinks)
+results/
+data/
+traces_out/
+crops_cache/
+hf_cache/
+.hf_datasets_cache/
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/

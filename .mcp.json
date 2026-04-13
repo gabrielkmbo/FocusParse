@@ -7,6 +7,15 @@
         "clientId": "1601185624273.8899143856786",
         "callbackPort": 3118
       }
+    },
+    "huggingface": {
+      "command": "npx",
+      "args": ["-y", "@huggingface/mcp-server"],
+      "env": { "HF_TOKEN": "${HF_TOKEN}" }
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "${PWD}"]
     }
   }
 }
