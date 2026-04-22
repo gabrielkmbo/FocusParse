@@ -18,11 +18,12 @@ class QuestionEvent(BaseModel):
     question: str
     doc_id: str
     pages_available: int
+    domain: str | None = None  # "finance" | "datasheet" | None
 
 
 class PlanEvent(BaseModel):
     question_family: str
-    evidence_types: list[str]                  # e.g. ["chart", "legend", "footnote"]
+    evidence_types: list[str]  # e.g. ["chart", "legend", "footnote"]
     budget_class: Literal["easy_local", "multi_region", "cross_page", "highres_tiny"]
     routing_policy: Literal["text_first", "layout_first", "image_first", "hybrid"]
     max_tool_calls: int
@@ -31,9 +32,9 @@ class PlanEvent(BaseModel):
 
 
 class PageCandidate(BaseModel):
-    page: int                                  # 1-indexed
+    page: int  # 1-indexed
     score: float
-    reason_code: str                           # e.g. "ocr_keyword_match", "layout_chart_prior"
+    reason_code: str  # e.g. "ocr_keyword_match", "layout_chart_prior"
 
 
 class PagesEvent(BaseModel):
@@ -60,7 +61,7 @@ class EvidenceEvent(BaseModel):
 
 class AnswerEvent(BaseModel):
     answer: str
-    citations: list[str]                       # EvidencePacket.packet_id refs
+    citations: list[str]  # EvidencePacket.packet_id refs
     confidence: float = Field(ge=0.0, le=1.0)
     reasoning_summary: str | None = None
 
