@@ -315,3 +315,25 @@ def test_argparse_rejects_unknown_protocol(script_mod, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_hf_eval.py", "--protocol", "bogus"])
     with pytest.raises(SystemExit):
         script_mod._parse_args()
+
+
+# ---------------------------------------------------------------------------
+# _protocol_matches_agent — guardrail against nonsensical combos
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "agent,protocol,expected",
+    [
+        ("simple", "full_doc", True),
+        ("simple", "oracle_page", True),
+        ("simple", "oracle_crop", True),
+        ("simple", "focus_default", False),  # simple can't use focus protocol
+        ("focus", "focus_default", True),
+        ("focus", "full_doc", False),  # focus can't use baseline protocols
+        ("focus", "oracle_page", False),
+        ("focus", "oracle_crop", False),
+    ],
+)
+def test_protocol_matches_agent(script_mod, agent, protocol, expected):
+    assert script_mod._protocol_matches_agent(agent, protocol) is expected
