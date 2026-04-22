@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_STAGING = Path.home() / ".cache" / "focusparse" / "hf_staging"
 _REASONER_ROLE = "reasoner"
 
+_SIMPLE_PROTOCOLS = frozenset({"full_doc", "oracle_page", "oracle_crop"})
+_FOCUS_PROTOCOLS = frozenset({"focus_default"})
+
+
+def _protocol_matches_agent(agent: str, protocol: str) -> bool:
+    if agent == "focus":
+        return protocol in _FOCUS_PROTOCOLS
+    return protocol in _SIMPLE_PROTOCOLS
+
 
 def main() -> int:
     args = _parse_args()
@@ -43,16 +52,17 @@ def main() -> int:
             return 2
         os.environ[f"FOCUSPARSE_TIER_{role.upper()}"] = tier
 
-    if args.agent == "focus":
+    if not _protocol_matches_agent(args.agent, args.protocol):
         print(
-            "error: --agent focus requires Phase 2 of the main plan "
-            "(FocusWorkflow.run is still NotImplementedError).",
+            f"error: --agent {args.agent!r} is incompatible with --protocol "
+            f"{args.protocol!r}. Simple takes {sorted(_SIMPLE_PROTOCOLS)}; "
+            f"focus takes {sorted(_FOCUS_PROTOCOLS)}.",
             file=sys.stderr,
         )
         return 2
 
     # Deferred imports so --help works without heavy deps.
-    from focusparse.eval.harness import run_simple_eval
+    from focusparse.eval.harness import run_focus_eval, run_simple_eval
     from focusparse.eval.hf_loader import dataset_fingerprint, materialize_split
     from focusparse.eval.schemas import EvalRunResults, PerProtocolResults
     from focusparse.models.tiers import TierRouter
@@ -94,19 +104,35 @@ def main() -> int:
         if line.strip()
     ]
 
-    result = asyncio.run(
-        run_simple_eval(
-            examples,
-            backend_client=backend_client,
-            backend=reasoner.provider,
-            model=reasoner.model,
-            protocol=args.protocol,
-            output_dir=run_dir,
-            images_root=args.staging_dir,
-            limit=args.limit,
-            resume=args.resume,
+    if args.agent == "focus":
+        result = asyncio.run(
+            run_focus_eval(
+                examples,
+                backend_client=backend_client,
+                backend=reasoner.provider,
+                model=reasoner.model,
+                protocol=args.protocol,
+                output_dir=run_dir,
+                images_root=args.staging_dir,
+                limit=args.limit,
+                resume=args.resume,
+                config=config,
+            )
         )
-    )
+    else:
+        result = asyncio.run(
+            run_simple_eval(
+                examples,
+                backend_client=backend_client,
+                backend=reasoner.provider,
+                model=reasoner.model,
+                protocol=args.protocol,
+                output_dir=run_dir,
+                images_root=args.staging_dir,
+                limit=args.limit,
+                resume=args.resume,
+            )
+        )
 
     wrapped = _wrap_results(
         result,
