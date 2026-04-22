@@ -21,18 +21,19 @@ async def route_pages(
     question: QuestionEvent,
     plan: PlanEvent,
     *,
-    n_pages: int,
+    pages: list[int],
     top_k: int | None = None,
 ) -> PagesEvent:
-    """Skeleton retrieval: every page is a candidate.
+    """Skeleton retrieval: every available page is a candidate.
 
-    `n_pages` is the number of PNGs available for this example. The caller
-    gets it from `len(example.page_images)`. When `top_k` is set we truncate;
-    otherwise we return all pages so oracle-style protocols still work.
+    `pages` is the 1-indexed page numbers for which the caller actually has
+    PNGs on disk (typically `sorted(images_by_page.keys())` so real page
+    numbers flow through to the inspector). When `top_k` is set we truncate;
+    otherwise we return every page so oracle-style protocols still work.
     """
     del question, plan  # unused in skeleton
-    limit = n_pages if top_k is None else min(top_k, n_pages)
+    sliced = pages if top_k is None else pages[:top_k]
     candidates = [
-        PageCandidate(page=i + 1, score=1.0, reason_code="skeleton_all_pages") for i in range(limit)
+        PageCandidate(page=p, score=1.0, reason_code="skeleton_all_pages") for p in sliced
     ]
     return PagesEvent(candidates=candidates)

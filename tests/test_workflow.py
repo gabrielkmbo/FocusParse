@@ -229,11 +229,10 @@ async def test_focus_workflow_runs_end_to_end(tmp_path, parser_bench_submodule_p
     assert result.answer == "5.5"
 
     # Citation resolves back to the packet referenced — pkt_000 is the first
-    # region, which the skeleton router maps to page 1 (positional, since the
-    # filename-parsed page 3 is still the real page).
+    # region, which the skeleton router emits for the lowest real page number
+    # parsed from the filenames (page 3).
     assert len(result.citations) == 1
-    assert "page" in result.citations[0]
-    assert "bbox" in result.citations[0]
+    assert result.citations[0]["page"] == 3
     assert result.citations[0]["bbox"] == [0.0, 0.0, 1.0, 1.0]
 
     # Seven recorded steps, one per @step (plan, route_pages, localize,

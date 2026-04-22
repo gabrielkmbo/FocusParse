@@ -103,11 +103,15 @@ class FocusWorkflow:
             )
         )
 
+        # Build the page->image map up front so the router can route on real
+        # page numbers (parsed from filenames) rather than positional indices.
+        images_by_page = _images_by_page(example, images)
+
         # --- ROUTE_PAGES ---------------------------------------------------
         pages = await route_pages(
             question_event,
             plan,
-            n_pages=len(images),
+            pages=sorted(images_by_page.keys()),
         )
         recorder.record(
             TrajectoryStep(
@@ -132,7 +136,6 @@ class FocusWorkflow:
         )
 
         # --- INSPECT -------------------------------------------------------
-        images_by_page = _images_by_page(example, images)
         evidence = await inspect_regions(
             question_event,
             plan,
