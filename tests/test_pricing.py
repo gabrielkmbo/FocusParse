@@ -14,7 +14,7 @@ def test_compute_usd_known_openai_model():
 
 def test_compute_usd_gemini_flash_small_usage():
     # Flash is the cheap tier — pennies for the test workload.
-    usd = compute_usd("gemini", "gemini-3.1-flash-preview", tokens_in=10_000, tokens_out=2_000)
+    usd = compute_usd("gemini", "gemini-2.5-flash", tokens_in=10_000, tokens_out=2_000)
     assert usd is not None
     assert 0.0 < usd < 0.01
 
