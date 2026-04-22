@@ -16,9 +16,10 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from focusparse._parser_bench import BenchmarkExample
+if TYPE_CHECKING:
+    from focusparse._parser_bench import BenchmarkExample
 
 
 class BenchmarkLoader:
@@ -46,11 +47,11 @@ class BenchmarkLoader:
         cls,
         repo: str = "gabrielbo/parser-bench",
         revision: str | None = None,
-    ) -> "BenchmarkLoader":
+    ) -> BenchmarkLoader:
         return cls(source="hf", hf_repo=repo, revision=revision)
 
     @classmethod
-    def from_local(cls, parser_bench_root: Path | str) -> "BenchmarkLoader":
+    def from_local(cls, parser_bench_root: Path | str) -> BenchmarkLoader:
         return cls(source="local", local_root=parser_bench_root)
 
     # --- iteration -------------------------------------------------------
@@ -89,6 +90,8 @@ class BenchmarkLoader:
     # --- local disk ------------------------------------------------------
 
     def _iter_local(self, split: str, limit: int | None) -> Iterator[BenchmarkExample]:
+        from focusparse._parser_bench import BenchmarkExample as _BE
+
         if self.local_root is None:
             raise ValueError("local_root must be set for source='local'")
         jsonl = self.local_root / "data" / "benchmark" / f"{split}.jsonl"
@@ -105,7 +108,7 @@ class BenchmarkLoader:
                 line = line.strip()
                 if not line:
                     continue
-                ex = BenchmarkExample.model_validate_json(line)
+                ex = _BE.model_validate_json(line)
                 if ex.split is not None and str(ex.split) != split and ex.split != split:
                     continue
                 yield ex
@@ -120,6 +123,8 @@ def _row_to_example(row: dict[str, Any]) -> BenchmarkExample:
     The HF dataset embeds `supporting_bboxes` etc. as JSON strings (see
     parser-bench push_to_hf.py). Deserialize fields that need it.
     """
+    from focusparse._parser_bench import BenchmarkExample as _BE
+
     normalized = dict(row)
     for field_name in (
         "supporting_bboxes",
@@ -137,4 +142,4 @@ def _row_to_example(row: dict[str, Any]) -> BenchmarkExample:
                 normalized[field_name] = json.loads(value)
             except json.JSONDecodeError:
                 pass
-    return BenchmarkExample.model_validate(normalized)
+    return _BE.model_validate(normalized)

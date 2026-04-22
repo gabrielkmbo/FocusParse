@@ -41,13 +41,13 @@ Set in [`configs/default.yaml`](configs/default.yaml) under `tiers:` and `roles:
 
 Current defaults (tweak as pricing shifts — see `.claude/memory/MEMORY.md` for rationale):
 
-| Role | Tier | Provider:model |
-|---|---|---|
-| planner | cheap | gemini:gemini-3.1-flash-preview |
-| router | cheap | gemini:gemini-3.1-flash-preview |
-| localizer rerank | mid | anthropic:claude-haiku-4-5 |
-| reasoner | frontier | openai:gpt-5.4 |
-| verifier | mid | anthropic:claude-haiku-4-5 |
+| Role             | Tier     | Provider:model                  |
+| ---------------- | -------- | ------------------------------- |
+| planner          | cheap    | gemini:gemini-3.1-flash-preview |
+| router           | cheap    | gemini:gemini-3.1-flash-preview |
+| localizer rerank | mid      | anthropic:claude-haiku-4-5      |
+| reasoner         | frontier | openai:gpt-5.4                  |
+| verifier         | mid      | anthropic:claude-haiku-4-5      |
 
 Escalation is **per-stage** (one tier up on low confidence), never pipeline-wide.
 
@@ -67,14 +67,72 @@ llama-nfs:/home/osx-user/shared-experiments/llamacloud-bench-ci/data/parser-benc
 
 Use `focusparse.dataset.nfs.rsync_pull(doc_id)` to hydrate a processed doc locally; `rsync_push` to sync back. Helpers mirror parser-bench's rsync contract (macOS openrsync-safe, `-az` archive+compress, no `--delete`). Requires `llama-nfs` host alias in `~/.ssh/config`.
 
-## Repo layout (10-second tour)
+## Repo layout
 
-- `src/focusparse/pipeline/` — workflow `@step`s, one file per stage, 1:1 with the state machine in the plan.
-- `src/focusparse/tools/` — `FunctionTool` primitives. `inspect_region` has three modes: `image` / `element` / `region`. Do not add a fourth without updating the plan.
-- `src/focusparse/evidence/packet.py` — **the contract**: every reasoner call sees `EvidencePacket[]`, never raw pages.
-- `src/focusparse/eval/scoring.py` — wraps parser-bench's scorer, adds `score_evidence_reward` (lazy-answer penalty).
-- `src/focusparse/traces/export.py` — trajectory JSONL schema is **the interface with FocusTrain**. Bump `schema_version` for any field change and note it in `.claude/memory/MEMORY.md`.
-- `third_party/parser-bench/` — git submodule, read-only. Do not edit.
+```
+FocusParse/
+├── configs/
+│   └── default.yaml              # tiers, roles, budgets, endpoints, dataset, cache, traces
+├── plans/                        # authoritative design docs; newest plan is active
+├── scripts/                      # one-off entrypoints (reproduce_baselines, compare_tiers, export_traces, fetch_nfs_processed)
+├── src/focusparse/
+│   ├── cli/                      # `focus` typer app: status | eval | report | export-traces
+│   ├── pipeline/                 # workflow @step modules, 1:1 with the state machine
+│   │   ├── workflow.py           #   FocusWorkflow + SimpleBaselineAgent
+│   │   ├── events.py             #   typed events between steps (no dict payloads)
+│   │   └── {planner,router,localizer,inspector,expander,reasoner,verifier}.py
+│   ├── tools/                    # FunctionTool primitives (stay small and strong)
+│   │   ├── inspect_region.py     #   3 modes: image | element | region (no 4th without plan update)
+│   │   ├── run_python.py         #   sandboxed coding-zoom (subprocess + rlimit + import allowlist)
+│   │   ├── layout_detect.py      #   HF layout endpoint client; raises on stub responses
+│   │   └── {expand_context,get_text_layer,chart_to_table}.py
+│   ├── evidence/
+│   │   ├── packet.py             #   EvidencePacket — the contract the reasoner sees (never raw pages)
+│   │   └── graph.py
+│   ├── models/                   # backend clients + tier router
+│   │   ├── base.py               #   ModelClient protocol
+│   │   ├── tiers.py              #   TierRouter (per-stage escalation, capped per run)
+│   │   └── {anthropic,openai,gemini}.py
+│   ├── retrieval/                # text_index (sqlite FTS), visual_rerank (deferred, [visual-rerank] extra)
+│   ├── dataset/
+│   │   ├── loader.py             #   BenchmarkLoader — HF streaming + local JSONL
+│   │   └── nfs.py                #   llama-nfs rsync helpers
+│   ├── cache/store.py            # content-addressed disk cache (sha256 key over tool args)
+│   ├── eval/
+│   │   ├── harness.py            #   run_simple_eval / run_focus_eval
+│   │   ├── scoring.py            #   score_answer, page_recall, max_iou_over_alternates, score_evidence_reward
+│   │   ├── metrics.py            #   aggregate metrics (accuracy, evidence_reward_mean, lazy_answer_rate, usd_per_correct)
+│   │   └── report.py             #   HTML report (Phase 4)
+│   ├── traces/
+│   │   ├── recorder.py           #   TrajectoryRecorder — one RunTrace per example
+│   │   └── export.py             #   SFT-ready JSONL; schema_version = "1"
+│   ├── utils/config.py           # FocusConfig (YAML + FOCUSPARSE_TIER_* env overrides)
+│   └── _parser_bench.py          # file-path shim that loads parser-bench's schema.py without sys.path collision
+├── tests/
+│   └── fixtures/                 # tiny_datasheet.pdf + golden outputs
+├── third_party/parser-bench/     # git submodule, READ-ONLY
+├── .claude/
+│   ├── settings.json             # permissions, env (FOCUSPARSE_TIER_*), statusLine
+│   ├── agents/                   # project subagents: pipeline-engineer, tools-engineer, trace-exporter, eval-runner
+│   └── memory/MEMORY.md          # running agent-written context — read this on /init
+├── .mcp.json                     # project MCP servers (HF, filesystem)
+├── CLAUDE.md                     # this file
+├── README.md                     # product overview
+└── pyproject.toml                # uv-managed, py ≥ 3.11, ruff line-length 100
+```
+
+### Load-bearing contracts (don't break silently)
+
+- `src/focusparse/evidence/packet.py::EvidencePacket` — every reasoner call sees `list[EvidencePacket]`, never raw pages.
+- `src/focusparse/eval/scoring.py::score_evidence_reward` — lazy-answer penalty. Zero if no tool calls or no predicted bboxes.
+- `src/focusparse/traces/export.py::SCHEMA_VERSION` — interface with the future FocusTrain repo. Bump on any field change and log the migration in `.claude/memory/MEMORY.md`.
+- `src/focusparse/tools/inspect_region.py` — exactly 3 modes. A 4th mode needs a plan update first.
+- `third_party/parser-bench/` — submodule, read-only. Propose benchmark changes upstream in separate PRs.
+
+### Write-only sinks (gitignored)
+
+- `cache/` — content-addressed crops, OCR, layout responses. Safe to wipe; runs will repopulate.
+- `results/` — per-run output JSONs, HTML reports, trajectories.
 
 ## What not to do
 
@@ -100,18 +158,22 @@ Skip the changelog line for typos and single-line bugfixes. Agents: when you cha
 
 ## Common failure modes
 
-| Symptom | Likely cause |
-|---|---|
-| Whole-page crops only in a run | Layout endpoint stub fallback. Check `HF_TOKEN` and endpoint status. |
-| `Generated 0 candidate examples` | Dataset loader mismatch (schema drifted in parser-bench submodule); bump submodule SHA. |
-| Empty visible response from Gemini | Set `thinking_budget ≥ 1024`; Gemini 2.5/3.x otherwise spends all tokens on hidden reasoning. |
-| GPT-5.x "max_tokens not supported" error | Use `max_completion_tokens` (different param name than GPT-4.x). |
-| Multi-turn agent reports 0 tokens | Token usage not propagated from `TokenCountingHandler` — integration test catches this. |
+| Symptom                                  | Likely cause                                                                                  |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Whole-page crops only in a run           | Layout endpoint stub fallback. Check `HF_TOKEN` and endpoint status.                          |
+| `Generated 0 candidate examples`         | Dataset loader mismatch (schema drifted in parser-bench submodule); bump submodule SHA.       |
+| Empty visible response from Gemini       | Set `thinking_budget ≥ 1024`; Gemini 2.5/3.x otherwise spends all tokens on hidden reasoning. |
+| GPT-5.x "max_tokens not supported" error | Use `max_completion_tokens` (different param name than GPT-4.x).                              |
+| Multi-turn agent reports 0 tokens        | Token usage not propagated from `TokenCountingHandler` — integration test catches this.       |
 
 ## Changelog
 
 Newest first.
 
+- `2026-04-22` — Add `scripts/run_hf_matrix.py` + `tests/test_hf_matrix_merge.py` (Phase C of HF eval plan): sweep `simple × {full_doc,oracle_page,oracle_crop}` via subprocess to `run_hf_eval.py`, merge per-cell JSONs into `results/hf/matrix_summary.json` preserving existing keys. Phase B (focus agent) still blocked on `FocusWorkflow.run`.
+- `2026-04-22` — Add `scripts/run_hf_eval.py` + `src/focusparse/eval/schemas.py` + `tests/test_{eval_schemas,hf_eval_cli}.py` (Phase B of HF eval plan): single-config runner with `--tier-override`, deterministic `tier_sha8` filename, parser-bench-shaped `EvalRunResults` output. No `--backend` flag — reasoner comes from tier config.
+- `2026-04-22` — Add `src/focusparse/eval/hf_loader.py` (Phase A of HF eval plan): materialize `gabrielbo/parser-bench` validation split to `<staging>/benchmark.jsonl` + `data/processed/<doc>/images/`, plus `dataset_fingerprint()` for reproducibility.
+- `2026-04-22` — Add full repo-layout tree + load-bearing contracts + write-only sinks sections to CLAUDE.md.
 - `2026-04-13` — Initial scaffold: plan, `pyproject.toml`, `.claude/` config, `src/focusparse/` stubs, dataset loader, parser-bench submodule seam.
 
 ---

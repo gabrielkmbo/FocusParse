@@ -14,7 +14,6 @@ Phase 1 status:
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -32,6 +31,7 @@ console = Console()
 # ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
+
 
 @app.command()
 def status(short: bool = typer.Option(False, "--short", help="One-line summary")) -> None:
@@ -99,7 +99,14 @@ def status(short: bool = typer.Option(False, "--short", help="One-line summary")
     console.print(ds_table)
 
     # Submodule presence check
-    pb_schema = Path(__file__).resolve().parents[3] / "third_party" / "parser-bench" / "src" / "utils" / "schema.py"
+    pb_schema = (
+        Path(__file__).resolve().parents[3]
+        / "third_party"
+        / "parser-bench"
+        / "src"
+        / "utils"
+        / "schema.py"
+    )
     if pb_schema.exists():
         console.print("[green]parser-bench submodule: present[/green]")
     else:
@@ -113,6 +120,7 @@ def status(short: bool = typer.Option(False, "--short", help="One-line summary")
 # ---------------------------------------------------------------------------
 # eval
 # ---------------------------------------------------------------------------
+
 
 @app.command()
 def eval(  # noqa: A001 — command name intentionally shadows builtin
@@ -129,27 +137,142 @@ def eval(  # noqa: A001 — command name intentionally shadows builtin
     ),
     output_dir: Path = typer.Option(Path("results/runs"), help="Per-run output dir root"),
     export_traces_path: Path | None = typer.Option(None, "--export-traces", help="JSONL output"),
+    hf_staging: Path | None = typer.Option(
+        None,
+        "--hf-staging",
+        help="HF materialized staging root (e.g. ~/.cache/focusparse/hf_staging). "
+        "If set, eval loads from <staging>/benchmark.jsonl and resolves page_images "
+        "relative to this directory.",
+    ),
+    hf_revision: str | None = typer.Option(None, "--hf-revision"),
+    no_resume: bool = typer.Option(False, "--no-resume", help="Ignore prediction cache"),
 ) -> None:
     """Run an evaluation."""
     _ = _parse_kv(budget)
-    if agent == "simple":
+    if agent == "focus":
         typer.echo(
-            f"[focus eval] agent=simple backend={backend} model={model} "
-            f"protocol={protocol} split={split} limit={limit}"
-        )
-        typer.echo("Simple harness is wired to focusparse.eval.harness.run_simple_eval (Phase 1 final).")
-        raise NotImplementedError(
-            "Phase 1 final commit: implement run_simple_eval and call it here."
-        )
-    elif agent == "focus":
-        typer.echo(
-            f"[focus eval] agent=focus tier={tier} protocol={protocol} "
-            f"split={split} limit={limit}"
+            f"[focus eval] agent=focus tier={tier} protocol={protocol} split={split} limit={limit}"
         )
         raise NotImplementedError("Focus workflow wired in Phase 2.")
-    else:
+    if agent != "simple":
         typer.echo(f"Unknown agent: {agent!r}")
         raise typer.Exit(code=2)
+
+    typer.echo(
+        f"[focus eval] agent=simple backend={backend} model={model} "
+        f"protocol={protocol} split={split} limit={limit}"
+    )
+
+    run_dir = (
+        output_dir / f"simple_{backend}_{model.replace('/', '_')}_{protocol}_{int(time.time())}"
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    result = asyncio.run(
+        _run_simple_eval_cli(
+            backend=backend,
+            model=model,
+            protocol=protocol,
+            split=split,
+            limit=limit,
+            run_dir=run_dir,
+            hf_staging=hf_staging,
+            hf_revision=hf_revision,
+            resume=not no_resume,
+        )
+    )
+
+    agg = result["aggregate"]
+    table = Table(title=f"simple · {backend}:{model} · {protocol} · {split}[:{limit}]")
+    table.add_column("metric")
+    table.add_column("value")
+    table.add_row("n", str(agg.n))
+    table.add_row("accuracy", f"{agg.accuracy:.3f}")
+    table.add_row("page_recall_mean", f"{agg.page_recall_mean:.3f}")
+    table.add_row("bbox_iou_mean", f"{agg.bbox_iou_mean:.3f}")
+    table.add_row("evidence_reward_mean", f"{agg.evidence_reward_mean:.3f}")
+    table.add_row("lazy_answer_rate", f"{agg.lazy_answer_rate:.3f}")
+    table.add_row("usd_total", f"${agg.usd_total:.4f}")
+    table.add_row(
+        "usd_per_correct",
+        f"${agg.usd_per_correct:.4f}" if agg.usd_per_correct is not None else "n/a",
+    )
+    console.print(table)
+    console.print(f"[green]Wrote[/green] {run_dir / 'run.json'}")
+
+
+async def _run_simple_eval_cli(
+    *,
+    backend: str,
+    model: str,
+    protocol: str,
+    split: str,
+    limit: int,
+    run_dir: Path,
+    hf_staging: Path | None,
+    hf_revision: str | None,
+    resume: bool,
+) -> dict[str, Any]:
+    from focusparse.eval.harness import run_simple_eval
+    from focusparse.models.anthropic import AnthropicClient
+    from focusparse.models.gemini import GeminiClient
+    from focusparse.models.openai import OpenAIClient
+
+    if backend == "gemini":
+        client = GeminiClient(model=model)
+    elif backend == "openai":
+        client = OpenAIClient(model=model)
+    elif backend == "anthropic":
+        client = AnthropicClient(model=model)
+    else:
+        raise typer.BadParameter(f"Unknown backend: {backend!r}")
+
+    examples, images_root = _load_examples(split, limit, hf_staging, hf_revision)
+
+    return await run_simple_eval(
+        examples,
+        backend_client=client,
+        backend=backend,
+        model=model,
+        protocol=protocol,
+        output_dir=run_dir,
+        images_root=images_root,
+        limit=limit,
+        resume=resume,
+    )
+
+
+def _load_examples(
+    split: str,
+    limit: int,
+    hf_staging: Path | None,
+    hf_revision: str | None,
+):
+    """Return `(iterable_of_examples, images_root)` for the eval harness."""
+    from focusparse._parser_bench import BenchmarkExample
+
+    if hf_staging is not None:
+        # Materialized staging: <staging>/benchmark.jsonl + data/processed/...
+        from focusparse.eval.hf_loader import materialize_split
+
+        split_name = "validation" if split in ("test", "holdout") else split
+        jsonl_path, _ = materialize_split(
+            hf_staging, split=split_name, revision=hf_revision, limit=limit
+        )
+        images_root = hf_staging
+        examples = (
+            BenchmarkExample.model_validate_json(line)
+            for line in jsonl_path.read_text().splitlines()
+            if line.strip()
+        )
+        return examples, images_root
+
+    # Fallback: HF streaming via BenchmarkLoader — no local image paths.
+    from focusparse.dataset.loader import BenchmarkLoader
+
+    loader = BenchmarkLoader.from_hf(revision=hf_revision)
+    split_name = "validation" if split in ("test", "holdout") else split
+    return loader.iter_split(split_name, limit=limit), Path.cwd()
 
 
 def _parse_kv(s: str) -> dict[str, Any]:
@@ -176,8 +299,11 @@ def _parse_kv(s: str) -> dict[str, Any]:
 # report + export-traces (stubs)
 # ---------------------------------------------------------------------------
 
+
 @app.command()
-def report(run_dir: Path = typer.Argument(..., help="Path to a results/runs/<ts>/ directory")) -> None:
+def report(
+    run_dir: Path = typer.Argument(..., help="Path to a results/runs/<ts>/ directory"),
+) -> None:
     """Render an HTML report for a completed run."""
     raise NotImplementedError("focus report — wire in Phase 4")
 
@@ -198,6 +324,7 @@ def export_traces(
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     app()

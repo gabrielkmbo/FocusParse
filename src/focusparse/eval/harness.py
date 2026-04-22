@@ -1,32 +1,136 @@
 """Evaluation harness — runs a workflow across a benchmark slice.
 
-TODO(Phase 1 final): wire `simple` agent path (single-shot backend call per
-example) + scoring + metrics + cache of predictions. Matches parser-bench's
-`SimpleAgent` behavior on `full_doc | oracle_page | oracle_crop`.
+Phase 1 implements `run_simple_eval` (the reproducibility-gate path). Phase 2
+will add `run_focus_eval` for the full agentic workflow.
 
-TODO(Phase 2): wire `focus` agent (FocusWorkflow) path with trajectory capture.
+Per-example records include: answer_correct, page_recall, bbox_iou,
+evidence_reward, tokens_in/out, usd, latency, tool_calls, is_lazy. They
+aggregate 1:1 into `focusparse.eval.metrics.AggregateMetrics`.
+
+Prediction cache (`<output_dir>/predictions/<example_id>.json`) short-circuits
+re-runs on the same examples — the cache key is the example id; changing the
+question or the backend requires a new `output_dir`.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
+import os
+import time
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from focusparse._parser_bench import BenchmarkExample
+from focusparse.eval.metrics import AggregateMetrics, aggregate
+from focusparse.eval.scoring import (
+    max_iou_over_alternates,
+    page_recall,
+    score_answer,
+    score_evidence_reward,
+)
+from focusparse.models.base import ModelClient
+from focusparse.pipeline.workflow import SimpleBaselineAgent, WorkflowResult
+
+if TYPE_CHECKING:
+    from focusparse._parser_bench import BenchmarkExample
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 async def run_simple_eval(
     examples: Iterable[BenchmarkExample],
     *,
+    backend_client: ModelClient,
     backend: str,
     model: str,
     protocol: str,
     output_dir: Path,
+    images_root: Path,
     limit: int | None = None,
+    resume: bool = True,
 ) -> dict[str, Any]:
-    """Single-shot baseline. TODO: wire real backend calls."""
-    raise NotImplementedError("run_simple_eval — wire in Phase 1 final commit")
+    """Run the single-shot baseline over an iterable of examples.
+
+    Args:
+        examples: Pre-loaded iterable of `BenchmarkExample`.
+        backend_client: Instantiated `ModelClient` (gemini/openai/anthropic).
+        backend, model: Recorded in the run manifest for reproducibility.
+        protocol: One of `full_doc` | `oracle_page` | `oracle_crop`.
+        output_dir: Per-run directory. Created if absent. Predictions are
+            cached under `<output_dir>/predictions/`.
+        images_root: Root directory that `example.page_images` paths are
+            resolved against (staging root, usually).
+        limit: Max examples to score. `None` = run all.
+        resume: If True and a prediction cache hit exists, skip the API call.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pred_dir = output_dir / "predictions"
+    pred_dir.mkdir(parents=True, exist_ok=True)
+
+    agent = SimpleBaselineAgent(backend_client=backend_client, protocol=protocol)
+    per_example: list[dict[str, Any]] = []
+
+    started_at = time.time()
+    n = 0
+    for example in examples:
+        if limit is not None and n >= limit:
+            break
+        n += 1
+
+        cache_path = pred_dir / f"{_safe_id(example.id)}.json"
+        record: dict[str, Any] | None = None
+        if resume and cache_path.exists():
+            try:
+                record = json.loads(cache_path.read_text())
+                record["cache_hit"] = True
+            except (json.JSONDecodeError, OSError):
+                record = None
+
+        if record is None:
+            images = _prepare_images(example, protocol=protocol, images_root=images_root)
+            try:
+                result: WorkflowResult = await agent.run(example, images)
+                record = _score_and_record(example, result, protocol=protocol)
+                cache_path.write_text(json.dumps(record, default=str))
+            except Exception as exc:
+                logger.exception("Example %s failed: %s", example.id, exc)
+                record = _error_record(example, protocol=protocol, error=str(exc))
+
+        per_example.append(record)
+
+    aggregated: AggregateMetrics = aggregate(per_example)
+
+    run_manifest: dict[str, Any] = {
+        "agent": "simple",
+        "backend": backend,
+        "model": model,
+        "protocol": protocol,
+        "n_examples": n,
+        "limit": limit,
+        "started_at": started_at,
+        "ended_at": time.time(),
+        "aggregate": aggregated.model_dump(),
+        "env_snapshot": _env_snapshot(),
+    }
+    (output_dir / "run.json").write_text(json.dumps(run_manifest, default=str, indent=2))
+    (output_dir / "per_example.jsonl").write_text(
+        "\n".join(json.dumps(r, default=str) for r in per_example) + ("\n" if per_example else "")
+    )
+
+    return {
+        "manifest": run_manifest,
+        "aggregate": aggregated,
+        "per_example": per_example,
+        "output_dir": str(output_dir),
+    }
 
 
 async def run_focus_eval(
@@ -38,5 +142,204 @@ async def run_focus_eval(
     limit: int | None = None,
     export_traces: Path | None = None,
 ) -> dict[str, Any]:
-    """Lens-workflow eval. TODO: wire in Phase 2."""
+    """Lens-workflow eval. Wired in Phase 2."""
+    _ = (examples, tier_profile, budget, output_dir, limit, export_traces)
     raise NotImplementedError("run_focus_eval — wire in Phase 2")
+
+
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
+
+
+def _prepare_images(
+    example: BenchmarkExample,
+    *,
+    protocol: str,
+    images_root: Path,
+) -> list[Path]:
+    """Resolve + filter + (for oracle_crop) crop page images for one example."""
+    all_pages = [_resolve(images_root, p) for p in (example.page_images or [])]
+    supporting_pages = list(example.supporting_pages or [])
+
+    if protocol == "full_doc":
+        return all_pages
+
+    if protocol == "oracle_page":
+        # `page_images` is ordered by `supporting_pages` — take the same prefix.
+        if not supporting_pages:
+            return all_pages
+        return all_pages[: len(supporting_pages)]
+
+    if protocol == "oracle_crop":
+        return _make_oracle_crops(example, all_pages, images_root)
+
+    raise ValueError(f"Unknown protocol: {protocol!r}")
+
+
+def _resolve(images_root: Path, rel_or_abs: str) -> Path:
+    p = Path(rel_or_abs)
+    if p.is_absolute():
+        return p
+    return images_root / p
+
+
+def _make_oracle_crops(
+    example: BenchmarkExample,
+    all_pages: list[Path],
+    images_root: Path,
+) -> list[Path]:
+    """Crop each supporting page image to the union of its supporting bboxes.
+
+    Writes crops into `<images_root>/.oracle_crops/<example_id>/page_NN.png` so
+    re-runs hit disk cache. Coords in `BBox` are normalized [0, 1].
+    """
+    from PIL import Image
+
+    crop_dir = images_root / ".oracle_crops" / _safe_id(example.id)
+    crop_dir.mkdir(parents=True, exist_ok=True)
+
+    by_page: dict[int, list[Any]] = {}
+    for bbox in example.supporting_bboxes:
+        by_page.setdefault(int(bbox.page), []).append(bbox)
+
+    supporting_pages = list(example.supporting_pages or [])
+    crops: list[Path] = []
+    for idx, page_num in enumerate(supporting_pages):
+        if idx >= len(all_pages):
+            continue
+        src = all_pages[idx]
+        if not src.exists():
+            continue
+        boxes_on_page = by_page.get(int(page_num), [])
+        if not boxes_on_page:
+            crops.append(src)
+            continue
+
+        out_path = crop_dir / f"page_{int(page_num):04d}.png"
+        if not out_path.exists():
+            with Image.open(src) as img:
+                w, h = img.size
+                x0 = min(b.x0 for b in boxes_on_page)
+                y0 = min(b.y0 for b in boxes_on_page)
+                x1 = max(b.x1 for b in boxes_on_page)
+                y1 = max(b.y1 for b in boxes_on_page)
+                box_px = (
+                    max(0, int(x0 * w)),
+                    max(0, int(y0 * h)),
+                    min(w, int(x1 * w)),
+                    min(h, int(y1 * h)),
+                )
+                img.crop(box_px).save(out_path, format="PNG")
+        crops.append(out_path)
+    return crops
+
+
+def _score_and_record(
+    example: BenchmarkExample,
+    result: WorkflowResult,
+    *,
+    protocol: str,
+) -> dict[str, Any]:
+    """Score one prediction and flatten into a per-example record."""
+    from focusparse._parser_bench import BBox as _BBox
+
+    predicted_pages = [int(c["page"]) for c in result.citations if "page" in c]
+    predicted_bboxes: list[Any] = []
+    for c in result.citations:
+        bbox = c.get("bbox")
+        if not (isinstance(bbox, list) and len(bbox) == 4):
+            continue
+        try:
+            predicted_bboxes.append(
+                _BBox(
+                    page=int(c["page"]),
+                    x0=float(bbox[0]),
+                    y0=float(bbox[1]),
+                    x1=float(bbox[2]),
+                    y1=float(bbox[3]),
+                )
+            )
+        except (TypeError, ValueError, KeyError):
+            continue
+
+    answer = score_answer(result.answer, example)
+    recall = page_recall(predicted_pages, [int(p) for p in (example.supporting_pages or [])])
+    iou = max_iou_over_alternates(predicted_bboxes, example)
+    tool_calls = sum(
+        1 for step in result.trace.steps if step.action == "tool_call" or step.tool is not None
+    )
+    evidence = score_evidence_reward(
+        prediction_text=result.answer,
+        predicted_pages=predicted_pages,
+        predicted_bboxes=predicted_bboxes,
+        tool_calls=[{"tool": s.tool} for s in result.trace.steps if s.tool is not None],
+        example=example,
+        largest_crop_area_ratio=0.0,
+    )
+    is_lazy = int(tool_calls == 0 or not predicted_bboxes)
+
+    return {
+        "example_id": example.id,
+        "protocol": protocol,
+        "answer_pred": result.answer,
+        "answer_gold": example.answer,
+        "answer_correct": answer,
+        "page_recall": recall,
+        "bbox_iou": iou,
+        "evidence_reward": evidence,
+        "is_lazy": is_lazy,
+        "tool_calls": tool_calls,
+        "tokens_in": result.telemetry.get("tokens_in", 0),
+        "tokens_out": result.telemetry.get("tokens_out", 0),
+        "usd": result.telemetry.get("usd") or 0.0,
+        "latency_ms": result.telemetry.get("latency_ms", 0),
+        "citations": result.citations,
+        "cache_hit": False,
+    }
+
+
+def _error_record(example: BenchmarkExample, *, protocol: str, error: str) -> dict[str, Any]:
+    return {
+        "example_id": example.id,
+        "protocol": protocol,
+        "error": error,
+        "answer_pred": None,
+        "answer_gold": example.answer,
+        "answer_correct": 0.0,
+        "page_recall": 0.0,
+        "bbox_iou": 0.0,
+        "evidence_reward": 0.0,
+        "is_lazy": 1,
+        "tool_calls": 0,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "usd": 0.0,
+        "latency_ms": 0,
+        "citations": [],
+        "cache_hit": False,
+    }
+
+
+def _safe_id(example_id: str) -> str:
+    """Filesystem-safe stem for an example id. Short sha fallback for oddly-shaped ids."""
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in example_id)
+    if len(safe) > 120 or not safe:
+        return hashlib.sha1(example_id.encode("utf-8")).hexdigest()[:16]
+    return safe
+
+
+def _env_snapshot() -> dict[str, Any]:
+    """Capture just enough env state to diagnose a run later."""
+    return {
+        "has_openai_key": bool(os.environ.get("OPENAI_API_KEY")),
+        "has_anthropic_key": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "has_gemini_key": bool(
+            os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        ),
+        "has_hf_token": bool(os.environ.get("HF_TOKEN")),
+        "tier_overrides": {k: v for k, v in os.environ.items() if k.startswith("FOCUSPARSE_TIER_")},
+    }
+
+
+__all__ = ["run_simple_eval", "run_focus_eval"]
