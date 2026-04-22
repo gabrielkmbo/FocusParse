@@ -6,9 +6,9 @@
 tiers:
   cheap:
     provider: gemini
-    model: gemini-3.1-flash-preview
+    model: gemini-2.5-flash
     max_tokens: 4096
-    thinking_budget: 1024            # required for Gemini 2.5/3.x, else empty response
+    thinking_budget: 1024 # required for Gemini 2.5/3.x, else empty response
   mid:
     provider: anthropic
     model: claude-haiku-4-5
@@ -16,7 +16,7 @@ tiers:
   frontier:
     provider: openai
     model: gpt-5.4
-    max_completion_tokens: 8192       # GPT-5.x requires this param name, not max_tokens
+    max_completion_tokens: 8192 # GPT-5.x requires this param name, not max_tokens
 
 roles:
   planner: cheap
@@ -55,14 +55,14 @@ endpoints:
 dataset:
   source: hf
   hf_repo: gabrielbo/parser-bench
-  revision: null                       # pin once benchmark stabilizes (FOCUSPARSE_DATASET_REVISION)
-  local_root: null                     # absolute path to a parser-bench checkout, or null
+  revision: null # pin once benchmark stabilizes (FOCUSPARSE_DATASET_REVISION)
+  local_root: null # absolute path to a parser-bench checkout, or null
 
 # NFS (processed docs — mirrors parser-bench contract).
 nfs:
   host: llama-nfs
   remote_root: /home/osx-user/shared-experiments/llamacloud-bench-ci/data/parser-bench
-  rsync_flags: [-a, -z]                # archive + compress; no --delete, NFS is canonical
+  rsync_flags: [-a, -z] # archive + compress; no --delete, NFS is canonical
 
 # Cache root for crops, OCR, layout, and per-run trace assets.
 cache:
@@ -72,6 +72,6 @@ cache:
 traces:
   schema_version: "1"
   sft_filter:
-    min_coverage: 0.8                  # AgenticOCR dual threshold — coverage recall
-    min_iou: 0.3                       # AgenticOCR dual threshold — spatial IoU
-    require_correct: true              # for SFT; GRPO variant keeps incorrect examples
+    min_coverage: 0.8 # AgenticOCR dual threshold — coverage recall
+    min_iou: 0.3 # AgenticOCR dual threshold — spatial IoU
+    require_correct: true # for SFT; GRPO variant keeps incorrect examples
