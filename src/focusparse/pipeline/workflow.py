@@ -219,17 +219,32 @@ class FocusWorkflow:
         )
 
         # --- VERIFY --------------------------------------------------------
-        verdict = await verify_answer(question_event, evidence, answer_event)
+        verifier_client = self._client_for("verifier")
+        verdict, verify_response = await verify_answer(
+            question_event,
+            evidence,
+            answer_event,
+            backend_client=verifier_client,
+        )
         recorder.record(
             TrajectoryStep(
                 step_index=6,
                 stage="verify",
-                tier="skeleton",
-                action="deterministic",
+                tier=("mid" if verify_response is not None else "skeleton"),
+                action=("llm_call" if verify_response is not None else "deterministic"),
                 args={
                     "next_action": verdict.next_action,
                     "supported": verdict.supported,
                 },
+                obs_summary=(
+                    verify_response.text[:200]
+                    if verify_response is not None and verify_response.text
+                    else None
+                ),
+                tokens_in=(verify_response.tokens_in if verify_response is not None else 0),
+                tokens_out=(verify_response.tokens_out if verify_response is not None else 0),
+                latency_ms=(verify_response.latency_ms if verify_response is not None else 0),
+                usd=(verify_response.usd if verify_response is not None else None),
                 confidence=verdict.confidence,
             )
         )
