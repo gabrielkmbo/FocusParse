@@ -329,17 +329,21 @@ async def test_focus_workflow_survives_zero_pages(tmp_path, parser_bench_submodu
 
 
 class _FakeTierRouter:
-    """Routes a fixed planner client; raises on any other role."""
+    """Routes role-scoped clients from a supplied dict. Any role not in the
+    dict returns None (the workflow treats None as "deterministic fallback"
+    for that stage)."""
 
-    def __init__(self, planner_client):
-        self._planner_client = planner_client
+    def __init__(self, clients: dict[str, Any] | None = None, **kwargs):
+        # Allow either `_FakeTierRouter({"planner": c})` or
+        # `_FakeTierRouter(planner=c, verifier=c2)`.
+        merged: dict[str, Any] = dict(clients or {})
+        merged.update(kwargs)
+        self._clients = merged
         self.calls: list[str] = []
 
     def client_for(self, role: str, *, escalate: bool = False):
         self.calls.append(role)
-        if role == "planner":
-            return self._planner_client
-        raise AssertionError(f"unexpected role={role!r}")
+        return self._clients.get(role)
 
 
 async def test_focus_workflow_routes_planner_through_tier_router(
@@ -359,7 +363,7 @@ async def test_focus_workflow_routes_planner_through_tier_router(
         tokens_out=20,
     )
     reasoner_client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
-    tier_router = _FakeTierRouter(planner_client)
+    tier_router = _FakeTierRouter(planner=planner_client)
     workflow = FocusWorkflow(backend_client=reasoner_client, tier_router=tier_router)
     example = _make_example()
     images = [
@@ -368,9 +372,9 @@ async def test_focus_workflow_routes_planner_through_tier_router(
     ]
     result = await workflow.run(example, images, protocol="focus")
 
-    # Planner was called exactly once through the tier router, and the plan
-    # step records its tokens / cost / latency.
-    assert tier_router.calls == ["planner"]
+    # Router was consulted for every role-scoped stage (planner + verifier).
+    # Verifier returns None → verify step stays deterministic; planner wins.
+    assert tier_router.calls == ["planner", "verifier"]
     assert len(planner_client.calls) == 1
     plan_steps = [s for s in result.trace.steps if s.stage == "plan"]
     assert len(plan_steps) == 1
@@ -383,6 +387,42 @@ async def test_focus_workflow_routes_planner_through_tier_router(
     # Reasoner still answered correctly downstream.
     assert result.answer == "5.5"
     assert len(result.citations) == 1
+
+
+async def test_focus_workflow_routes_verifier_through_tier_router(
+    tmp_path, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+
+    reasoner_client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    verifier_client = _FakeClient(
+        '{"supported": false, "reason": "cited bbox covers the wrong row", '
+        '"next_action": "retry_localization", "confidence": 0.72}',
+        tokens_in=140,
+        tokens_out=35,
+    )
+    tier_router = _FakeTierRouter(verifier=verifier_client)
+    workflow = FocusWorkflow(backend_client=reasoner_client, tier_router=tier_router)
+    example = _make_example()
+    images = [tmp_path / "datasheet-A_page_0003_300dpi.png"]
+    result = await workflow.run(example, images, protocol="focus")
+
+    # Verifier was called once through the tier router, and the verify step
+    # records its telemetry.
+    assert "verifier" in tier_router.calls
+    assert len(verifier_client.calls) == 1
+    verify_steps = [s for s in result.trace.steps if s.stage == "verify"]
+    assert len(verify_steps) == 1
+    step = verify_steps[0]
+    assert step.action == "llm_call"
+    assert step.tier == "mid"
+    assert step.tokens_in == 140
+    assert step.tokens_out == 35
+    assert step.args["next_action"] == "retry_localization"
+    assert step.args["supported"] is False
+    # Workflow still terminates after one pass — the retry loop lands later.
+    assert result.answer == "5.5"
 
 
 async def test_focus_workflow_plan_step_deterministic_when_no_tier_router(
