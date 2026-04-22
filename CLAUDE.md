@@ -41,13 +41,13 @@ Set in [`configs/default.yaml`](configs/default.yaml) under `tiers:` and `roles:
 
 Current defaults (tweak as pricing shifts — see `.claude/memory/MEMORY.md` for rationale):
 
-| Role             | Tier     | Provider:model                  |
-| ---------------- | -------- | ------------------------------- |
-| planner          | cheap    | gemini:gemini-3.1-flash-preview |
-| router           | cheap    | gemini:gemini-3.1-flash-preview |
-| localizer rerank | mid      | anthropic:claude-haiku-4-5      |
-| reasoner         | frontier | openai:gpt-5.4                  |
-| verifier         | mid      | anthropic:claude-haiku-4-5      |
+| Role             | Tier     | Provider:model             |
+| ---------------- | -------- | -------------------------- |
+| planner          | cheap    | gemini:gemini-2.5-flash    |
+| router           | cheap    | gemini:gemini-2.5-flash    |
+| localizer rerank | mid      | anthropic:claude-haiku-4-5 |
+| reasoner         | frontier | openai:gpt-5.4             |
+| verifier         | mid      | anthropic:claude-haiku-4-5 |
 
 Escalation is **per-stage** (one tier up on low confidence), never pipeline-wide.
 
@@ -170,6 +170,7 @@ Skip the changelog line for typos and single-line bugfixes. Agents: when you cha
 
 Newest first.
 
+- `2026-04-22` — Replace stale cheap-tier model name `gemini-3.1-flash-preview` (404s on real API) with `gemini-2.5-flash` (current stable flash). Updates `configs/default.yaml`, `src/focusparse/eval/pricing.py` (pricing $0.30 in / $2.50 out per 1M tokens), `tests/test_pricing.py`, and the CLAUDE.md tier table. Default `uv run focus eval` and `scripts/run_hf_eval.py --agent focus` now route the planner to a real Gemini endpoint without needing `--tier-override planner=mid`.
 - `2026-04-22` — Phase 2 sub-phase 2c: replace deterministic planner with a cheap-tier LLM call that classifies `question_family`, `evidence_types`, `budget_class`, `routing_policy` from the question text + domain. `plan_question` now returns `tuple[PlanEvent, ModelResponse | None]` so the plan `TrajectoryStep` attributes tokens/cost. `FocusWorkflow` gains `_client_for(role)` which resolves role-scoped clients via `tier_router`; falls back to deterministic when no router is wired. `run_focus_eval` + `scripts/run_hf_eval.py` thread `tier_router` through. Added `tests/test_planner.py` (15 tests, submodule-free) + workflow integration tests for the tier_router path.
 - `2026-04-22` — Fix router/inspector page alignment: `route_pages` now takes `pages: list[int]` instead of positional `n_pages: int` so real page numbers parsed from filenames flow to the inspector; previously the skeleton router emitted pages [1..N] while `_images_by_page` keyed on filename-derived pages, so inspector lookups missed and the reasoner ran blind. Unblocks smoke tests of `--agent focus`.
 - `2026-04-22` — Phase D of HF eval plan: wire `run_focus_eval` harness (mirrors `run_simple_eval`'s contract, drives `FocusWorkflow` over all pages) and un-gate `--agent focus` in `scripts/run_hf_eval.py`. Added `scripts/run_hf_eval.py::_protocol_matches_agent` guardrail (simple takes `full_doc|oracle_page|oracle_crop`; focus takes `focus_default`). `scripts/run_hf_matrix.py --phase b` now runnable end-to-end. Tests: `tests/test_focus_harness.py` + CLI validation in `tests/test_hf_eval_cli.py`.
