@@ -65,6 +65,18 @@ class FocusWorkflow:
         self.cache = cache
         self.tools = tools
 
+    def _client_for(self, role: str) -> ModelClient | None:
+        """Resolve a role-scoped client via `tier_router`, else return None.
+
+        Used by non-reasoner stages that may or may not have a cheap/mid-tier
+        client wired. The reasoner still uses `self.backend_client` directly
+        so existing `FocusWorkflow(backend_client=...)` call sites keep
+        working without a tier router.
+        """
+        if self.tier_router is None:
+            return None
+        return self.tier_router.client_for(role)
+
     async def run(
         self,
         example: BenchmarkExample,
@@ -79,27 +91,46 @@ class FocusWorkflow:
 
         doc_id = _infer_doc_id(example)
         pages_available = len(example.page_images or [])
+        domain = getattr(example, "domain", None)
+        domain_str = str(domain) if domain is not None else None
         question_event = QuestionEvent(
             example_id=example.id,
             question=example.question,
             doc_id=doc_id,
             pages_available=pages_available,
+            domain=domain_str,
         )
 
         budget = getattr(self.config, "budget", None) if self.config is not None else None
+        planner_client = self._client_for("planner")
 
         # --- PLAN ----------------------------------------------------------
-        plan = await plan_question(question_event, budget=budget)
+        plan, plan_response = await plan_question(
+            question_event,
+            budget=budget,
+            backend_client=planner_client,
+            domain=domain_str,
+        )
         recorder.record(
             TrajectoryStep(
                 step_index=0,
                 stage="plan",
-                tier="skeleton",
-                action="deterministic",
+                tier=("cheap" if plan_response is not None else "skeleton"),
+                action=("llm_call" if plan_response is not None else "deterministic"),
                 args={
                     "question_family": plan.question_family,
                     "routing_policy": plan.routing_policy,
+                    "budget_class": plan.budget_class,
                 },
+                obs_summary=(
+                    plan_response.text[:200]
+                    if plan_response is not None and plan_response.text
+                    else None
+                ),
+                tokens_in=(plan_response.tokens_in if plan_response is not None else 0),
+                tokens_out=(plan_response.tokens_out if plan_response is not None else 0),
+                latency_ms=(plan_response.latency_ms if plan_response is not None else 0),
+                usd=(plan_response.usd if plan_response is not None else None),
             )
         )
 
