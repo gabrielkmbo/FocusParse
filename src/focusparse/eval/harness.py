@@ -1,7 +1,8 @@
 """Evaluation harness — runs a workflow across a benchmark slice.
 
-Phase 1 implements `run_simple_eval` (the reproducibility-gate path). Phase 2
-will add `run_focus_eval` for the full agentic workflow.
+`run_simple_eval` runs the single-shot baseline (parser-bench reproducibility).
+`run_focus_eval` runs the agentic `FocusWorkflow` (Phase 2 skeleton wired —
+stages are deterministic placeholders with one real VLM call at the reasoner).
 
 Per-example records include: answer_correct, page_recall, bbox_iou,
 evidence_reward, tokens_in/out, usd, latency, tool_calls, is_lazy. They
@@ -31,7 +32,7 @@ from focusparse.eval.scoring import (
     score_evidence_reward,
 )
 from focusparse.models.base import ModelClient
-from focusparse.pipeline.workflow import SimpleBaselineAgent, WorkflowResult
+from focusparse.pipeline.workflow import FocusWorkflow, SimpleBaselineAgent, WorkflowResult
 
 if TYPE_CHECKING:
     from focusparse._parser_bench import BenchmarkExample
@@ -136,15 +137,97 @@ async def run_simple_eval(
 async def run_focus_eval(
     examples: Iterable[BenchmarkExample],
     *,
-    tier_profile: str,
-    budget: dict[str, int],
+    backend_client: ModelClient,
+    backend: str,
+    model: str,
+    protocol: str,
     output_dir: Path,
+    images_root: Path,
     limit: int | None = None,
-    export_traces: Path | None = None,
+    resume: bool = True,
+    config: Any = None,
 ) -> dict[str, Any]:
-    """Lens-workflow eval. Wired in Phase 2."""
-    _ = (examples, tier_profile, budget, output_dir, limit, export_traces)
-    raise NotImplementedError("run_focus_eval — wire in Phase 2")
+    """Run `FocusWorkflow` over an iterable of examples.
+
+    Mirrors `run_simple_eval`'s contract so `scripts/run_hf_eval.py` can route
+    to either without branching. The focus agent always sees *all* pages —
+    the protocol knob that matters for baselines (full_doc/oracle_page/
+    oracle_crop) is a simple-agent concept; for the agentic pipeline we pass
+    the full document and let the router do its job. `protocol` here is
+    recorded for provenance and defaults to `focus_default`.
+
+    Args:
+        examples: Pre-loaded iterable of `BenchmarkExample`.
+        backend_client: Reasoner `ModelClient` (resolved by caller from
+            `TierRouter.client_for("reasoner")`).
+        backend, model: Recorded in the run manifest for reproducibility.
+        protocol: Typically `focus_default`. Recorded in per-example rows.
+        output_dir, images_root, limit, resume: Same semantics as `run_simple_eval`.
+        config: Optional `FocusConfig` passed through to the workflow for
+            budget-aware planning. Skeleton workflow reads only `.budget`.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pred_dir = output_dir / "predictions"
+    pred_dir.mkdir(parents=True, exist_ok=True)
+
+    workflow = FocusWorkflow(backend_client=backend_client, config=config)
+    per_example: list[dict[str, Any]] = []
+
+    started_at = time.time()
+    n = 0
+    for example in examples:
+        if limit is not None and n >= limit:
+            break
+        n += 1
+
+        cache_path = pred_dir / f"{_safe_id(example.id)}.json"
+        record: dict[str, Any] | None = None
+        if resume and cache_path.exists():
+            try:
+                record = json.loads(cache_path.read_text())
+                record["cache_hit"] = True
+            except (json.JSONDecodeError, OSError):
+                record = None
+
+        if record is None:
+            # Focus agent always sees all pages — routing is its job.
+            images = [_resolve(images_root, p) for p in (example.page_images or [])]
+            try:
+                result: WorkflowResult = await workflow.run(example, images, protocol=protocol)
+                record = _score_and_record(example, result, protocol=protocol)
+                cache_path.write_text(json.dumps(record, default=str))
+            except Exception as exc:
+                logger.exception("Example %s failed: %s", example.id, exc)
+                record = _error_record(example, protocol=protocol, error=str(exc))
+
+        per_example.append(record)
+
+    aggregated: AggregateMetrics = aggregate(per_example)
+
+    run_manifest: dict[str, Any] = {
+        "agent": "focus",
+        "backend": backend,
+        "model": model,
+        "protocol": protocol,
+        "n_examples": n,
+        "limit": limit,
+        "started_at": started_at,
+        "ended_at": time.time(),
+        "aggregate": aggregated.model_dump(),
+        "env_snapshot": _env_snapshot(),
+    }
+    (output_dir / "run.json").write_text(json.dumps(run_manifest, default=str, indent=2))
+    (output_dir / "per_example.jsonl").write_text(
+        "\n".join(json.dumps(r, default=str) for r in per_example) + ("\n" if per_example else "")
+    )
+
+    return {
+        "manifest": run_manifest,
+        "aggregate": aggregated,
+        "per_example": per_example,
+        "output_dir": str(output_dir),
+    }
 
 
 # ---------------------------------------------------------------------------
