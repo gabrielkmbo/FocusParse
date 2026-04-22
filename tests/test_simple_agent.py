@@ -55,7 +55,7 @@ def test_parse_drops_malformed_citations():
     text = (
         '{"answer": "x", "citations": ['
         '{"page": 1, "bbox": [0, 0, 1, 1]}, '  # ok
-        '{"page": "two", "bbox": [0, 0, 1, 1]}, '  # page coerced to int
+        '{"page": "2", "bbox": [0, 0, 1, 1]}, '  # string-digit page coerced to int
         '{"page": 3, "bbox": [0, 0, 1]}, '  # too short — drop
         '{"page": 4}, '  # no bbox — drop
         '"raw string"]'  # not a dict — drop

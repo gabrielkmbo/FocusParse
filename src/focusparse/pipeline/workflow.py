@@ -1,13 +1,11 @@
-"""FocusWorkflow — the top-level workflows-py Workflow tying all stages together.
+"""FocusWorkflow — the top-level workflow tying all stages together.
 
-Phase 1 (this file): stub structure + Simple baseline runner (non-workflow) so
-we can reproduce parser-bench baselines before the state machine is built.
+Phase 2 skeleton (this file): `FocusWorkflow.run` wires the stages end-to-end
+using deterministic placeholders for plan / route_pages / propose_regions /
+inspect / expand_context / verify, with one real VLM call in the reasoner.
+Sub-phases 2c–2f progressively replace each placeholder.
 
-Phase 2 (later): implement @step methods for plan / route_pages / propose_regions /
-inspect / expand_context / answer / verify and wire them via typed events.
-
-TODO(Phase 2): replace `_placeholder_run` with real workflows-py @step methods.
-See https://github.com/run-llama/workflows-py for the Workflow + @step + Event API.
+`SimpleBaselineAgent` is the parser-bench reproducibility runner (unchanged).
 """
 
 from __future__ import annotations
@@ -18,7 +16,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from focusparse.evidence.packet import EvidencePacket
 from focusparse.models.base import ModelClient, ModelResponse
+from focusparse.pipeline.events import (
+    QuestionEvent,
+)
+from focusparse.pipeline.expander import expand_context
+from focusparse.pipeline.inspector import inspect_regions
+from focusparse.pipeline.localizer import propose_regions
+from focusparse.pipeline.planner import plan_question
+from focusparse.pipeline.reasoner import answer_from_evidence
+from focusparse.pipeline.router import route_pages
+from focusparse.pipeline.verifier import verify_answer
 from focusparse.traces.recorder import RunTrace, TrajectoryRecorder, TrajectoryStep
 
 if TYPE_CHECKING:
@@ -34,14 +43,23 @@ class WorkflowResult:
 
 
 class FocusWorkflow:
-    """The 6-stage lens workflow. Phase 2 target.
+    """The 6-stage lens workflow.
 
-    Usage (post-Phase-2):
-        workflow = FocusWorkflow(config=..., tier_router=..., cache=..., tools=...)
-        result = await workflow.run(example, protocol="focus")
+    Constructor accepts `backend_client` directly for Phase 2 skeleton. Later
+    sub-phases swap this for `tier_router.client_for(role)` once escalation
+    and per-stage tiering is wired.
     """
 
-    def __init__(self, *, config: Any, tier_router: Any, cache: Any, tools: Any) -> None:
+    def __init__(
+        self,
+        *,
+        backend_client: ModelClient,
+        config: Any = None,
+        tier_router: Any = None,
+        cache: Any = None,
+        tools: Any = None,
+    ) -> None:
+        self.backend_client = backend_client
         self.config = config
         self.tier_router = tier_router
         self.cache = cache
@@ -50,11 +68,220 @@ class FocusWorkflow:
     async def run(
         self,
         example: BenchmarkExample,
+        images: list[Path],
         *,
         protocol: str = "focus",
         output_dir: Path | None = None,
     ) -> WorkflowResult:
-        raise NotImplementedError("FocusWorkflow.run — wire in Phase 2")
+        del output_dir  # unused in skeleton
+        recorder = TrajectoryRecorder(example_id=example.id, question=example.question)
+        recorder.set_plan({"agent": "focus", "protocol": protocol, "n_images": len(images)})
+
+        doc_id = _infer_doc_id(example)
+        pages_available = len(example.page_images or [])
+        question_event = QuestionEvent(
+            example_id=example.id,
+            question=example.question,
+            doc_id=doc_id,
+            pages_available=pages_available,
+        )
+
+        budget = getattr(self.config, "budget", None) if self.config is not None else None
+
+        # --- PLAN ----------------------------------------------------------
+        plan = await plan_question(question_event, budget=budget)
+        recorder.record(
+            TrajectoryStep(
+                step_index=0,
+                stage="plan",
+                tier="skeleton",
+                action="deterministic",
+                args={
+                    "question_family": plan.question_family,
+                    "routing_policy": plan.routing_policy,
+                },
+            )
+        )
+
+        # --- ROUTE_PAGES ---------------------------------------------------
+        pages = await route_pages(
+            question_event,
+            plan,
+            n_pages=len(images),
+        )
+        recorder.record(
+            TrajectoryStep(
+                step_index=1,
+                stage="route_pages",
+                tier="skeleton",
+                action="deterministic",
+                args={"candidates": [pc.page for pc in pages.candidates]},
+            )
+        )
+
+        # --- PROPOSE_REGIONS ----------------------------------------------
+        regions = await propose_regions(question_event, plan, pages)
+        recorder.record(
+            TrajectoryStep(
+                step_index=2,
+                stage="localize",
+                tier="skeleton",
+                action="deterministic",
+                args={"n_regions": len(regions.candidates)},
+            )
+        )
+
+        # --- INSPECT -------------------------------------------------------
+        images_by_page = _images_by_page(example, images)
+        evidence = await inspect_regions(
+            question_event,
+            plan,
+            regions,
+            images_by_page=images_by_page,
+        )
+        recorder.record(
+            TrajectoryStep(
+                step_index=3,
+                stage="inspect",
+                tier="skeleton",
+                action="tool_call",
+                tool="skeleton_inspector",
+                args={"n_packets": len(evidence.packets)},
+            )
+        )
+
+        # --- EXPAND_CONTEXT -----------------------------------------------
+        evidence = await expand_context(evidence)
+        recorder.record(
+            TrajectoryStep(
+                step_index=4,
+                stage="expand_context",
+                tier="skeleton",
+                action="deterministic",
+                args={"n_packets": len(evidence.packets)},
+            )
+        )
+
+        # --- ANSWER --------------------------------------------------------
+        answer_event, reasoner_response = await answer_from_evidence(
+            question_event,
+            evidence,
+            backend_client=self.backend_client,
+        )
+        recorder.record(
+            TrajectoryStep(
+                step_index=5,
+                stage="answer",
+                tier="reasoner",
+                action="llm_call",
+                args={"n_packets": len(evidence.packets)},
+                obs_summary=(reasoner_response.text[:200] if reasoner_response.text else None),
+                tokens_in=reasoner_response.tokens_in,
+                tokens_out=reasoner_response.tokens_out,
+                latency_ms=reasoner_response.latency_ms,
+                usd=reasoner_response.usd,
+                confidence=answer_event.confidence,
+            )
+        )
+
+        # --- VERIFY --------------------------------------------------------
+        verdict = await verify_answer(question_event, evidence, answer_event)
+        recorder.record(
+            TrajectoryStep(
+                step_index=6,
+                stage="verify",
+                tier="skeleton",
+                action="deterministic",
+                args={
+                    "next_action": verdict.next_action,
+                    "supported": verdict.supported,
+                },
+                confidence=verdict.confidence,
+            )
+        )
+
+        # Convert packet-id citations back to {page, bbox} dicts.
+        citations = _citations_from_packets(answer_event.citations, evidence.packets)
+        trace = recorder.finalize(answer=answer_event.answer, citations=citations)
+
+        telemetry = _make_telemetry(reasoner_response)
+        return WorkflowResult(
+            answer=answer_event.answer,
+            citations=citations,
+            trace=trace,
+            telemetry=telemetry,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Helpers (pure, unit-testable)
+# ---------------------------------------------------------------------------
+
+
+def _infer_doc_id(example: BenchmarkExample) -> str:
+    """Best-effort doc id: prefer source_pdf stem, fall back to example id."""
+    src = getattr(example, "source_pdf", None)
+    if src:
+        return Path(src).stem
+    return example.id
+
+
+def _images_by_page(
+    example: BenchmarkExample,
+    images: list[Path],
+) -> dict[int, Path]:
+    """Map 1-indexed page number -> local PNG path.
+
+    We prefer parsing the page number from the filename (parser-bench layout
+    is `..._page_NNNN_300dpi.png`) so the map is robust to protocols that
+    reorder or filter pages. Falls back to positional index when the filename
+    doesn't match the pattern.
+    """
+    mapping: dict[int, Path] = {}
+    for idx, img in enumerate(images):
+        page = _page_number_from_filename(img.name)
+        if page is None:
+            page = idx + 1
+        mapping[page] = img
+    return mapping
+
+
+_PAGE_IN_FILENAME_RE = re.compile(r"_page_(\d+)")
+
+
+def _page_number_from_filename(name: str) -> int | None:
+    m = _PAGE_IN_FILENAME_RE.search(name)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def _citations_from_packets(
+    packet_ids: list[str],
+    packets: list[EvidencePacket],
+) -> list[dict[str, Any]]:
+    """Translate reasoner citation refs -> [{page, bbox: [x0,y0,x1,y1]}]."""
+    by_id = {p.packet_id: p for p in packets}
+    out: list[dict[str, Any]] = []
+    for pid in packet_ids:
+        pkt = by_id.get(pid)
+        if pkt is None:
+            continue
+        out.append({"page": pkt.page, "bbox": list(pkt.bbox_norm)})
+    return out
+
+
+def _make_telemetry(response: ModelResponse) -> dict[str, Any]:
+    return {
+        "tokens_in": response.tokens_in,
+        "tokens_out": response.tokens_out,
+        "usd": response.usd,
+        "latency_ms": response.latency_ms,
+        "raw_response_len": len(response.text or ""),
+    }
 
 
 # ---------------------------------------------------------------------------

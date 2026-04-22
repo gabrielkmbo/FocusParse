@@ -1,6 +1,9 @@
 """EXPAND_CONTEXT stage — attach linked neighbors to each evidence region.
 
-Phase 2 strategy:
+Phase 2 skeleton: identity pass-through. The real expander (sub-phase 2e)
+consults the evidence graph and attaches legend/footnote/caption neighbors.
+
+Phase 2e strategy:
   - For each inspected region, consult the evidence graph for known neighbors
     (legend, footnote, caption, header row).
   - For regions without graph data, heuristic margin-expand:
@@ -16,4 +19,5 @@ from focusparse.pipeline.events import EvidenceEvent
 
 
 async def expand_context(evidence: EvidenceEvent) -> EvidenceEvent:
-    raise NotImplementedError("expand_context — wire in Phase 2")
+    """Skeleton: pass packets through unchanged."""
+    return evidence

@@ -170,6 +170,7 @@ Skip the changelog line for typos and single-line bugfixes. Agents: when you cha
 
 Newest first.
 
+- `2026-04-22` — Phase 2 sub-phases 2a+2b: wire `FocusWorkflow.run` end-to-end with deterministic skeleton planner/router/localizer/inspector/expander/verifier + one real VLM call in the reasoner. Records 7 `TrajectoryStep`s per run, translates packet-id citations back to `{page, bbox}`, drops hallucinated packet refs. Added `tests/test_workflow.py` coverage.
 - `2026-04-22` — Add `scripts/run_hf_matrix.py` + `tests/test_hf_matrix_merge.py` (Phase C of HF eval plan): sweep `simple × {full_doc,oracle_page,oracle_crop}` via subprocess to `run_hf_eval.py`, merge per-cell JSONs into `results/hf/matrix_summary.json` preserving existing keys. Phase B (focus agent) still blocked on `FocusWorkflow.run`.
 - `2026-04-22` — Add `scripts/run_hf_eval.py` + `src/focusparse/eval/schemas.py` + `tests/test_{eval_schemas,hf_eval_cli}.py` (Phase B of HF eval plan): single-config runner with `--tier-override`, deterministic `tier_sha8` filename, parser-bench-shaped `EvalRunResults` output. No `--backend` flag — reasoner comes from tier config.
 - `2026-04-22` — Add `src/focusparse/eval/hf_loader.py` (Phase A of HF eval plan): materialize `gabrielbo/parser-bench` validation split to `<staging>/benchmark.jsonl` + `data/processed/<doc>/images/`, plus `dataset_fingerprint()` for reproducibility.
