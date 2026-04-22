@@ -178,6 +178,15 @@ def _page_num_from_hf_image_index(idx: int, row: dict) -> int:
     return idx + 1
 
 
+_HF_SPLIT_ALIASES = {"validation": "dev", "val": "dev"}
+
+
+def _normalize_split(value: str | None) -> str | None:
+    if not value:
+        return None
+    return _HF_SPLIT_ALIASES.get(value, value)
+
+
 def _row_to_example(row: dict, processed_root: Path):
     """Convert one HF row to a `BenchmarkExample` with resolvable paths.
 
@@ -237,7 +246,7 @@ def _row_to_example(row: dict, processed_root: Path):
         reasoning_chain=row.get("reasoning_chain"),
         evidence_page_spread=int(row.get("evidence_page_spread", 0)),
         adversarial_type=row.get("adversarial_type"),
-        split=row.get("split") or None,
+        split=_normalize_split(row.get("split")),
         original_bboxes=[],
     )
 
