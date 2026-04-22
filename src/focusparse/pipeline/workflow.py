@@ -77,6 +77,30 @@ class FocusWorkflow:
             return None
         return self.tier_router.client_for(role)
 
+    def _layout_endpoint_url(self) -> str | None:
+        """Resolve the layout endpoint URL from config, else let the tool default."""
+        endpoints = getattr(self.config, "endpoints", None) if self.config else None
+        if not endpoints:
+            return None
+        layout = endpoints.get("layout") if isinstance(endpoints, dict) else None
+        if layout is None:
+            return None
+        return getattr(layout, "url", None)
+
+    def _layout_cache_dir(self) -> Path | None:
+        """Resolve the on-disk cache dir for layout responses.
+
+        Defaults to `<config.cache.root>/layout`; returns None when no cache
+        config is present so tests + ephemeral runs stay uncached.
+        """
+        cache_cfg = getattr(self.config, "cache", None) if self.config else None
+        if cache_cfg is None:
+            return None
+        root = getattr(cache_cfg, "root", None)
+        if not root:
+            return None
+        return Path(root) / "layout"
+
     async def run(
         self,
         example: BenchmarkExample,
@@ -155,14 +179,33 @@ class FocusWorkflow:
         )
 
         # --- PROPOSE_REGIONS ----------------------------------------------
-        regions = await propose_regions(question_event, plan, pages)
+        layout_endpoint_url = self._layout_endpoint_url()
+        layout_cache_dir = self._layout_cache_dir()
+        regions = await propose_regions(
+            question_event,
+            plan,
+            pages,
+            images_by_page=images_by_page,
+            layout_endpoint_url=layout_endpoint_url,
+            cache_dir=layout_cache_dir,
+        )
+        # Count how many pages fell back to the skeleton region so traces can
+        # attribute localization failures without scraping per-candidate signals.
+        n_fallback_pages = sum(
+            1 for r in regions.candidates if "skeleton_full_page" in r.supporting_signals
+        )
         recorder.record(
             TrajectoryStep(
                 step_index=2,
                 stage="localize",
-                tier="skeleton",
+                tier=(
+                    "layout_detect" if n_fallback_pages < len(regions.candidates) else "skeleton"
+                ),
                 action="deterministic",
-                args={"n_regions": len(regions.candidates)},
+                args={
+                    "n_regions": len(regions.candidates),
+                    "n_fallback_pages": n_fallback_pages,
+                },
             )
         )
 

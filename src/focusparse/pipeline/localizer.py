@@ -1,49 +1,201 @@
-"""PROPOSE_REGIONS stage — deterministic fusion of layout + OCR + priors.
+"""PROPOSE_REGIONS stage — layout-driven region proposals with deterministic fallback.
 
-Phase 2 skeleton: emit one full-page region per candidate page. The real
-layout-driven localizer lands in sub-phase 2e once `tools/layout_detect.py`
-is wired.
+Phase 2 sub-phase 2e replaces the skeleton full-page placeholder with a call
+to the HF layout endpoint per candidate page. Detected boxes are translated
+into `RegionCandidate`s with normalized bboxes; any endpoint failure
+(`LayoutEndpointUnavailable` or `StubResponseError`) degrades to the old
+full-page skeleton region for *that page only*, so the workflow always has
+something to feed the inspector.
 
-v1 strategy:
-  - Layout detector boxes (HF endpoint via tools/layout_detect.py).
-  - OCR token anchors matching question keywords.
-  - Question-family priors (chart + legend + axis for axis_value_interpolation).
-  Optionally: cheap-tier LLM rerank when multiple close candidates exist.
+The localizer serializes its calls (one `await` per page) to respect the
+endpoint's ≤ 2 req/s shared-usage budget. It does NOT enforce a global rate
+limit across concurrent examples — that is the caller's concern.
 
-Output: `RegionsEvent` with a **ranked candidate set** per page, not a single bbox.
+Future sub-phases add OCR token anchors, question-family priors, and a
+cheap-tier LLM rerank for ambiguous pages. For now, the contract is: if
+layout_detect returns N boxes we emit N candidates, ranked by detector score.
 """
 
 from __future__ import annotations
 
+import io
+import logging
+from pathlib import Path
+
 from focusparse.pipeline.events import (
+    PageCandidate,
     PagesEvent,
     PlanEvent,
     QuestionEvent,
     RegionCandidate,
     RegionsEvent,
 )
+from focusparse.tools.layout_detect import (
+    LayoutEndpointUnavailable,
+    StubResponseError,
+    detect_layout,
+)
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_CONFIDENCE_THRESHOLD = 0.3
 
 
 async def propose_regions(
     question: QuestionEvent,
     plan: PlanEvent,
     pages: PagesEvent,
+    *,
+    images_by_page: dict[int, Path] | None = None,
+    layout_endpoint_url: str | None = None,
+    hf_token: str | None = None,
+    cache_dir: Path | None = None,
+    confidence_threshold: float = _DEFAULT_CONFIDENCE_THRESHOLD,
 ) -> RegionsEvent:
-    """Skeleton: full-page bbox per candidate page.
+    """Propose candidate regions per page, with deterministic fallback.
 
-    No layout detection, no OCR — just a deterministic (0,0,1,1) region per
-    page so the inspector has something to wrap into an `EvidencePacket`.
+    Args:
+        question / plan / pages: upstream events.
+        images_by_page: 1-indexed page number -> PNG path. When omitted (or a
+            page is missing), the full-page skeleton region is emitted for
+            that page so downstream stages never see an empty candidate set.
+        layout_endpoint_url: override the default HF layout endpoint.
+        hf_token: override the `$HF_TOKEN` env var.
+        cache_dir: where `detect_layout` persists responses. If None, no cache.
+        confidence_threshold: drop detector boxes below this score.
+
+    Returns:
+        A `RegionsEvent` with at least one candidate per page that was
+        successfully processed (either real boxes, or a skeleton fallback).
     """
-    del question, plan  # unused in skeleton
-    candidates = [
-        RegionCandidate(
-            region_id=f"r{i}_p{pc.page}",
-            page=pc.page,
-            bbox_norm=(0.0, 0.0, 1.0, 1.0),
-            region_type=None,
-            score=pc.score,
-            supporting_signals=["skeleton_full_page"],
-        )
-        for i, pc in enumerate(pages.candidates)
-    ]
+    del question, plan  # reserved for priors + LLM rerank in later sub-phases
+
+    candidates: list[RegionCandidate] = []
+    for pc in pages.candidates:
+        image_path = (images_by_page or {}).get(pc.page)
+        if image_path is None:
+            candidates.append(_skeleton_region(pc, signal="no_image_for_page"))
+            continue
+        if not Path(image_path).exists():
+            # Caller handed us a dangling path — don't fail the whole run,
+            # and don't burn a network call we already know will be useless.
+            candidates.append(_skeleton_region(pc, signal="image_missing"))
+            continue
+
+        try:
+            page_regions = await _detect_for_page(
+                pc,
+                image_path=image_path,
+                endpoint_url=layout_endpoint_url,
+                hf_token=hf_token,
+                cache_dir=cache_dir,
+                confidence_threshold=confidence_threshold,
+            )
+        except LayoutEndpointUnavailable as exc:
+            logger.warning(
+                "layout endpoint unavailable on page=%d (%s); emitting skeleton region",
+                pc.page,
+                exc,
+            )
+            candidates.append(_skeleton_region(pc, signal="layout_endpoint_down"))
+            continue
+        except StubResponseError as exc:
+            logger.warning(
+                "layout endpoint returned stub on page=%d (%s); emitting skeleton region",
+                pc.page,
+                exc,
+            )
+            candidates.append(_skeleton_region(pc, signal="layout_endpoint_stub"))
+            continue
+
+        if not page_regions:
+            # Endpoint returned no boxes above threshold — still give the
+            # inspector a region to crop. Mark the signal so traces carry why.
+            candidates.append(_skeleton_region(pc, signal="layout_no_boxes_above_threshold"))
+            continue
+
+        candidates.extend(page_regions)
+
     return RegionsEvent(candidates=candidates)
+
+
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
+
+
+async def _detect_for_page(
+    pc: PageCandidate,
+    *,
+    image_path: Path,
+    endpoint_url: str | None,
+    hf_token: str | None,
+    cache_dir: Path | None,
+    confidence_threshold: float,
+) -> list[RegionCandidate]:
+    """Call `detect_layout` on one page and translate the boxes to candidates."""
+    png_bytes = Path(image_path).read_bytes()
+    width, height = _png_dimensions(png_bytes)
+
+    out = await detect_layout(
+        png_bytes,
+        page=pc.page,
+        image_width=width,
+        image_height=height,
+        endpoint_url=endpoint_url,
+        hf_token=hf_token,
+        cache_dir=cache_dir,
+        confidence_threshold=confidence_threshold,
+    )
+
+    regions: list[RegionCandidate] = []
+    for idx, det in enumerate(out.boxes):
+        x0, y0, x1, y1 = det.bbox
+        bbox_norm = (
+            _clamp_unit(x0 / width),
+            _clamp_unit(y0 / height),
+            _clamp_unit(x1 / width),
+            _clamp_unit(y1 / height),
+        )
+        signals = ["layout_detect"]
+        if det.figure_class:
+            signals.append(f"figure_class={det.figure_class}")
+        regions.append(
+            RegionCandidate(
+                region_id=f"r{idx}_p{pc.page}",
+                page=pc.page,
+                bbox_norm=bbox_norm,
+                region_type=det.label or None,
+                # Blend page-level score and detector confidence so downstream
+                # ranking respects both "is this the right page?" and "is this
+                # a confident box?".
+                score=float(pc.score) * float(det.score),
+                supporting_signals=signals,
+            )
+        )
+    return regions
+
+
+def _skeleton_region(pc: PageCandidate, *, signal: str) -> RegionCandidate:
+    """Full-page fallback region when layout detection is unusable."""
+    return RegionCandidate(
+        region_id=f"r0_p{pc.page}",
+        page=pc.page,
+        bbox_norm=(0.0, 0.0, 1.0, 1.0),
+        region_type=None,
+        score=pc.score,
+        supporting_signals=["skeleton_full_page", signal],
+    )
+
+
+def _png_dimensions(png_bytes: bytes) -> tuple[int, int]:
+    """Return (width, height) of a PNG without touching disk a second time."""
+    # Deferred import: Pillow is in deps but keeping top-level imports lean.
+    from PIL import Image
+
+    with Image.open(io.BytesIO(png_bytes)) as img:
+        return int(img.width), int(img.height)
+
+
+def _clamp_unit(v: float) -> float:
+    return max(0.0, min(1.0, float(v)))
