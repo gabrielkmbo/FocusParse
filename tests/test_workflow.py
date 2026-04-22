@@ -326,3 +326,83 @@ async def test_focus_workflow_survives_zero_pages(tmp_path, parser_bench_submodu
     # Reasoner got called with zero images (packet list empty).
     assert len(client.calls) == 1
     assert client.calls[0]["n_images"] == 0
+
+
+class _FakeTierRouter:
+    """Routes a fixed planner client; raises on any other role."""
+
+    def __init__(self, planner_client):
+        self._planner_client = planner_client
+        self.calls: list[str] = []
+
+    def client_for(self, role: str, *, escalate: bool = False):
+        self.calls.append(role)
+        if role == "planner":
+            return self._planner_client
+        raise AssertionError(f"unexpected role={role!r}")
+
+
+async def test_focus_workflow_routes_planner_through_tier_router(
+    tmp_path, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+
+    # Planner returns a valid datasheet-family classification; reasoner then
+    # emits a normal packet-citation answer.
+    planner_client = _FakeClient(
+        '{"question_family": "min_typ_max_disambiguation", '
+        '"evidence_types": ["table", "footnote"], '
+        '"budget_class": "easy_local", '
+        '"routing_policy": "text_first"}',
+        tokens_in=90,
+        tokens_out=20,
+    )
+    reasoner_client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    tier_router = _FakeTierRouter(planner_client)
+    workflow = FocusWorkflow(backend_client=reasoner_client, tier_router=tier_router)
+    example = _make_example()
+    images = [
+        tmp_path / "datasheet-A_page_0003_300dpi.png",
+        tmp_path / "datasheet-A_page_0007_300dpi.png",
+    ]
+    result = await workflow.run(example, images, protocol="focus")
+
+    # Planner was called exactly once through the tier router, and the plan
+    # step records its tokens / cost / latency.
+    assert tier_router.calls == ["planner"]
+    assert len(planner_client.calls) == 1
+    plan_steps = [s for s in result.trace.steps if s.stage == "plan"]
+    assert len(plan_steps) == 1
+    assert plan_steps[0].action == "llm_call"
+    assert plan_steps[0].tier == "cheap"
+    assert plan_steps[0].tokens_in == 90
+    assert plan_steps[0].tokens_out == 20
+    assert plan_steps[0].args["question_family"] == "min_typ_max_disambiguation"
+    assert plan_steps[0].args["routing_policy"] == "text_first"
+    # Reasoner still answered correctly downstream.
+    assert result.answer == "5.5"
+    assert len(result.citations) == 1
+
+
+async def test_focus_workflow_plan_step_deterministic_when_no_tier_router(
+    tmp_path, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+
+    client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.7}')
+    workflow = FocusWorkflow(backend_client=client)  # no tier_router
+    example = _make_example()
+    images = [tmp_path / "datasheet-A_page_0003_300dpi.png"]
+    result = await workflow.run(example, images, protocol="focus")
+
+    # No tier_router → planner falls back to deterministic; action reflects that.
+    plan_steps = [s for s in result.trace.steps if s.stage == "plan"]
+    assert plan_steps[0].action == "deterministic"
+    assert plan_steps[0].tier == "skeleton"
+    assert plan_steps[0].tokens_in == 0
+    # Exactly one LLM call total — the reasoner. Planner did not hit the network.
+    llm_steps = [s for s in result.trace.steps if s.action == "llm_call"]
+    assert len(llm_steps) == 1
+    assert llm_steps[0].stage == "answer"
