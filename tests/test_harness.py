@@ -68,7 +68,7 @@ def _make_example(example_id: str, answer: str = "5.5"):
         reasoning_chain=None,
         evidence_page_spread=0,
         adversarial_type=None,
-        split="validation",
+        split="dev",
         original_bboxes=[],
     )
 
