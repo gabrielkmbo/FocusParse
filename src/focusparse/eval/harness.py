@@ -146,6 +146,7 @@ async def run_focus_eval(
     limit: int | None = None,
     resume: bool = True,
     config: Any = None,
+    tier_router: Any = None,
 ) -> dict[str, Any]:
     """Run `FocusWorkflow` over an iterable of examples.
 
@@ -165,13 +166,21 @@ async def run_focus_eval(
         output_dir, images_root, limit, resume: Same semantics as `run_simple_eval`.
         config: Optional `FocusConfig` passed through to the workflow for
             budget-aware planning. Skeleton workflow reads only `.budget`.
+        tier_router: Optional `TierRouter`. When provided, the workflow's
+            non-reasoner stages (currently: planner) resolve their clients
+            through it. When absent, those stages fall back to deterministic
+            placeholders.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     pred_dir = output_dir / "predictions"
     pred_dir.mkdir(parents=True, exist_ok=True)
 
-    workflow = FocusWorkflow(backend_client=backend_client, config=config)
+    workflow = FocusWorkflow(
+        backend_client=backend_client,
+        config=config,
+        tier_router=tier_router,
+    )
     per_example: list[dict[str, Any]] = []
 
     started_at = time.time()

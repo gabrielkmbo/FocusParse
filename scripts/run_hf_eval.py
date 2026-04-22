@@ -117,6 +117,7 @@ def main() -> int:
                 limit=args.limit,
                 resume=args.resume,
                 config=config,
+                tier_router=tier_router,
             )
         )
     else:
