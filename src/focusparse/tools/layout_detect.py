@@ -222,8 +222,13 @@ async def _post_with_retry(
             try:
                 resp = await client.post(endpoint, headers=headers, content=png_bytes)
                 if resp.status_code not in _RETRYABLE_STATUS:
-                    resp.raise_for_status()
-                    return resp.json()
+                    if resp.is_success:
+                        return resp.json()
+                    # Permanent failure — surface as LayoutEndpointUnavailable
+                    # so the localizer's one fallback path covers it.
+                    raise LayoutEndpointUnavailable(
+                        f"layout endpoint returned {resp.status_code}: {resp.text[:200]!r}"
+                    )
                 last_exc = httpx.HTTPStatusError(
                     f"{resp.status_code} on attempt {attempt}",
                     request=resp.request,
