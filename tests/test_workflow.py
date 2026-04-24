@@ -446,3 +446,130 @@ async def test_focus_workflow_plan_step_deterministic_when_no_tier_router(
     llm_steps = [s for s in result.trace.steps if s.action == "llm_call"]
     assert len(llm_steps) == 1
     assert llm_steps[0].stage == "answer"
+
+
+# ---------------------------------------------------------------------------
+# PDF text-layer wiring (Phase 3: get_text_layer → router)
+# ---------------------------------------------------------------------------
+
+
+def _write_pdf_for_workflow_test(path: Path, *, pages_text: dict[int, str]) -> Path:
+    """Write a multi-page PDF with the supplied per-page text.
+
+    Keys are 1-indexed so callers can mirror the BenchmarkExample's
+    `page_images` list.
+    """
+    import fitz
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open()
+    for page_idx in sorted(pages_text):
+        page = doc.new_page(width=600, height=800)
+        page.insert_text((50, 50), pages_text[page_idx], fontsize=12)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+async def test_focus_workflow_routes_through_fts_when_pdf_supplied(
+    tmp_path, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+
+    # The skeleton example has page_images for pages 3 and 7; build a PDF
+    # where pages 1..7 all exist, but only page 3 mentions the query term
+    # so FTS picks it and page 7 ends up in the no-match tail.
+    pdf_pages = {i: "unrelated filler content" for i in range(1, 8)}
+    pdf_pages[3] = "VCC maximum supply voltage rating is 5.5 volts"
+    pdf = _write_pdf_for_workflow_test(tmp_path / "datasheet-A.pdf", pages_text=pdf_pages)
+
+    client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.8}')
+    workflow = FocusWorkflow(backend_client=client)
+    example = _make_example()
+
+    images = [
+        tmp_path / "datasheet-A_page_0003_300dpi.png",
+        tmp_path / "datasheet-A_page_0007_300dpi.png",
+    ]
+    result = await workflow.run(example, images, protocol="focus", pdf_path=pdf)
+
+    route_step = next(s for s in result.trace.steps if s.stage == "route_pages")
+    assert route_step.tier == "text_fts"
+    # Page 3 has text "VCC ... max ... supply voltage"; page 7 has only
+    # filler, so page 3 should appear in the candidates and be ranked first.
+    candidates = route_step.args["candidates"]
+    assert 3 in candidates
+    # n_text_pages counts how many of the page universe had a non-empty
+    # native text layer — all 2 here.
+    assert route_step.args["n_text_pages"] == 2
+
+
+async def test_focus_workflow_skeleton_router_when_no_pdf_path(
+    tmp_path, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+
+    client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.7}')
+    workflow = FocusWorkflow(backend_client=client)
+    example = _make_example()
+    images = [tmp_path / "datasheet-A_page_0003_300dpi.png"]
+
+    # No pdf_path → router falls back to the skeleton path.
+    result = await workflow.run(example, images, protocol="focus")
+
+    route_step = next(s for s in result.trace.steps if s.stage == "route_pages")
+    assert route_step.tier == "skeleton"
+    assert route_step.args["n_text_pages"] == 0
+
+
+async def test_focus_workflow_skeleton_router_when_pdf_missing_on_disk(
+    tmp_path, parser_bench_submodule_present
+):
+    """Dangling pdf_path should degrade to skeleton, not crash the run."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+
+    client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.7}')
+    workflow = FocusWorkflow(backend_client=client)
+    example = _make_example()
+    images = [tmp_path / "datasheet-A_page_0003_300dpi.png"]
+
+    missing_pdf = tmp_path / "not-there.pdf"
+    result = await workflow.run(example, images, protocol="focus", pdf_path=missing_pdf)
+
+    route_step = next(s for s in result.trace.steps if s.stage == "route_pages")
+    assert route_step.tier == "skeleton"
+    # Run still produced an answer — the missing PDF didn't take the pipeline down.
+    assert result.answer == "5.5"
+
+
+async def test_focus_workflow_tolerates_out_of_range_pages_in_pdf(
+    tmp_path, parser_bench_submodule_present
+):
+    """PDF has fewer pages than page_images → out-of-range pages fall back quietly."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+
+    # PDF has only 2 pages; example expects page 3 + page 7.
+    pdf = _write_pdf_for_workflow_test(
+        tmp_path / "short.pdf",
+        pages_text={1: "page one", 2: "page two"},
+    )
+
+    client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.7}')
+    workflow = FocusWorkflow(backend_client=client)
+    example = _make_example()
+    images = [
+        tmp_path / "datasheet-A_page_0003_300dpi.png",
+        tmp_path / "datasheet-A_page_0007_300dpi.png",
+    ]
+    # Should still complete: pages 3 and 7 get empty-string text entries,
+    # which means FTS matches nothing, so the router returns the no-match
+    # fallback — the run keeps going.
+    result = await workflow.run(example, images, protocol="focus", pdf_path=pdf)
+    assert result.answer == "5.5"
+    route_step = next(s for s in result.trace.steps if s.stage == "route_pages")
+    assert route_step.tier == "text_fts"
+    assert route_step.args["n_text_pages"] == 0
