@@ -245,15 +245,28 @@ class FocusWorkflow:
             plan,
             regions,
             images_by_page=images_by_page,
+            pdf_path=pdf_path,
+            crop_cache_dir=self._role_cache_dir("crops"),
+            text_layer_cache_dir=self._text_layer_cache_dir(),
         )
+        # Packets that produced real tool output carry provenance.tool !=
+        # "skeleton_inspector_fallback", so traces can attribute degraded
+        # examples without looking at individual packet refs.
+        n_real_packets = sum(
+            1 for p in evidence.packets if p.provenance.tool != "skeleton_inspector_fallback"
+        )
+        inspect_tier = "deterministic" if pdf_path is not None else "skeleton"
         recorder.record(
             TrajectoryStep(
                 step_index=3,
                 stage="inspect",
-                tier="skeleton",
+                tier=inspect_tier,
                 action="tool_call",
-                tool="skeleton_inspector",
-                args={"n_packets": len(evidence.packets)},
+                tool="deterministic_inspector",
+                args={
+                    "n_packets": len(evidence.packets),
+                    "n_real_packets": n_real_packets,
+                },
             )
         )
 
