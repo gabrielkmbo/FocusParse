@@ -230,3 +230,146 @@ async def test_run_focus_eval_handles_backend_error(tmp_path, parser_bench_submo
     assert agg.accuracy == 0.0
     per = result["per_example"][0]
     assert per["error"].startswith("simulated")
+
+
+# ---------------------------------------------------------------------------
+# pdf_path resolution (sub-phase 2f end-to-end)
+# ---------------------------------------------------------------------------
+
+
+def _write_tiny_pdf(path: Path, pages_text: dict[int, str]) -> Path:
+    import fitz
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open()
+    for page_idx in sorted(pages_text):
+        page = doc.new_page(width=600, height=800)
+        page.insert_text((50, 50), pages_text[page_idx], fontsize=12)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+async def test_run_focus_eval_threads_pdf_path_when_file_present(
+    tmp_path, parser_bench_submodule_present
+):
+    """With pdfs_root and a real PDF, the route_pages step upgrades to
+    tier=text_fts and n_text_pages > 0."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    pdfs_root = tmp_path / "pdfs"
+    _write_tiny_pdf(
+        pdfs_root / "datasheet-A.pdf",
+        pages_text={1: "filler", 2: "filler", 3: "VCC maximum supply voltage rating"},
+    )
+
+    client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    result = await run_focus_eval(
+        [_make_example("ex-pdf")],
+        backend_client=client,
+        backend="fake",
+        model="fake-1",
+        protocol="focus_default",
+        output_dir=tmp_path / "run",
+        images_root=tmp_path,
+        limit=1,
+        pdfs_root=pdfs_root,
+    )
+    # Cached per-example payload should still parse; the trace isn't in the
+    # aggregate return, but the run completes (that's the main regression
+    # guard here). A deeper check on the tier="text_fts" path lives in
+    # tests/test_workflow.py where the workflow is instantiated directly.
+    assert result["aggregate"].n == 1
+
+
+async def test_run_focus_eval_falls_back_when_pdf_missing(tmp_path, parser_bench_submodule_present):
+    """pdfs_root set but the specific PDF is missing → skeleton router,
+    run still completes (no crash)."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    # pdfs_root exists but contains nothing for the example's source_pdf.
+    pdfs_root = tmp_path / "pdfs"
+    pdfs_root.mkdir()
+
+    client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.8}')
+    result = await run_focus_eval(
+        [_make_example("ex-nopdf")],
+        backend_client=client,
+        backend="fake",
+        model="fake-1",
+        protocol="focus_default",
+        output_dir=tmp_path / "run",
+        images_root=tmp_path,
+        limit=1,
+        pdfs_root=pdfs_root,
+    )
+    assert result["aggregate"].n == 1
+
+
+async def test_resolve_pdf_path_tries_nested_layout(tmp_path):
+    """parser-bench sometimes nests PDFs as <root>/<doc_stem>/<doc>.pdf."""
+    from focusparse._parser_bench import BBox, BenchmarkExample
+    from focusparse.eval.harness import _resolve_pdf_path
+
+    pdfs_root = tmp_path / "pdfs"
+    nested = pdfs_root / "doc-nested" / "doc-nested.pdf"
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b"%PDF-1.4\n")
+
+    example = BenchmarkExample(
+        id="ex-nested",
+        domain="datasheet",
+        source_pdf="doc-nested.pdf",
+        page_images=[],
+        question="q?",
+        answer="x",
+        answer_type="exact_match",
+        supporting_pages=[1],
+        supporting_bboxes=[BBox(page=1, x0=0, y0=0, x1=1, y1=1)],
+        alternate_bboxes=[],
+        evidence_relations=[],
+        multi_region_required=False,
+        requires_visual=False,
+        difficulty={"visual": 1, "reasoning": 1, "localization": 1},
+        question_family="single_value_lookup",
+        stress_type="none",
+        reasoning_chain=None,
+        evidence_page_spread=0,
+        adversarial_type=None,
+        split="dev",
+        original_bboxes=[],
+    )
+    resolved = _resolve_pdf_path(pdfs_root, example)
+    assert resolved == nested
+
+
+def test_resolve_pdf_path_returns_none_when_root_is_none(tmp_path):
+    from focusparse._parser_bench import BBox, BenchmarkExample
+    from focusparse.eval.harness import _resolve_pdf_path
+
+    example = BenchmarkExample(
+        id="ex-none",
+        domain="datasheet",
+        source_pdf="anything.pdf",
+        page_images=[],
+        question="q?",
+        answer="x",
+        answer_type="exact_match",
+        supporting_pages=[1],
+        supporting_bboxes=[BBox(page=1, x0=0, y0=0, x1=1, y1=1)],
+        alternate_bboxes=[],
+        evidence_relations=[],
+        multi_region_required=False,
+        requires_visual=False,
+        difficulty={"visual": 1, "reasoning": 1, "localization": 1},
+        question_family="single_value_lookup",
+        stress_type="none",
+        reasoning_chain=None,
+        evidence_page_spread=0,
+        adversarial_type=None,
+        split="dev",
+        original_bboxes=[],
+    )
+    assert _resolve_pdf_path(None, example) is None
