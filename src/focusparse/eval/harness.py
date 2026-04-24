@@ -204,7 +204,10 @@ async def run_focus_eval(
             images = [_resolve(images_root, p) for p in (example.page_images or [])]
             try:
                 result: WorkflowResult = await workflow.run(example, images, protocol=protocol)
-                record = _score_and_record(example, result, protocol=protocol)
+                image_dims = _image_dims_by_page(example, images)
+                record = _score_and_record(
+                    example, result, protocol=protocol, image_dims_by_page=image_dims
+                )
                 cache_path.write_text(json.dumps(record, default=str))
             except Exception as exc:
                 logger.exception("Example %s failed: %s", example.id, exc)
@@ -276,6 +279,39 @@ def _resolve(images_root: Path, rel_or_abs: str) -> Path:
     return images_root / p
 
 
+def _image_dims_by_page(
+    example: BenchmarkExample,
+    images: list[Path],
+) -> dict[int, tuple[int, int]]:
+    """Map 1-indexed page -> (width, height) for resolved page image paths.
+
+    Needed by the scoring layer to normalize pixel-space gold bboxes against
+    normalized [0,1] predicted bboxes. Missing/unreadable files are silently
+    omitted — scoring degrades gracefully to raw-coord IoU on that page.
+    """
+    import re
+
+    from PIL import Image
+
+    pat = re.compile(r"_page_(\d+)")
+    dims: dict[int, tuple[int, int]] = {}
+    for idx, img_path in enumerate(images):
+        if not img_path.exists():
+            continue
+        m = pat.search(img_path.name)
+        page = int(m.group(1)) if m else idx + 1
+        try:
+            with Image.open(img_path) as img:
+                dims[page] = (int(img.width), int(img.height))
+        except (OSError, ValueError):
+            continue
+    # Also index by the BenchmarkExample's supporting_pages order when the
+    # filename didn't carry a page number (older fixtures). No-op when the
+    # name regex above already found the page.
+    _ = example  # intentionally unused — reserved for future override logic
+    return dims
+
+
 def _make_oracle_crops(
     example: BenchmarkExample,
     all_pages: list[Path],
@@ -332,8 +368,14 @@ def _score_and_record(
     result: WorkflowResult,
     *,
     protocol: str,
+    image_dims_by_page: dict[int, tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
-    """Score one prediction and flatten into a per-example record."""
+    """Score one prediction and flatten into a per-example record.
+
+    `image_dims_by_page` forwards to scoring so pixel-space gold bboxes
+    and normalized [0,1] predicted bboxes compare correctly. Simple-agent
+    runs can omit it (VLM citations happen to be pixel-space).
+    """
     from focusparse._parser_bench import BBox as _BBox
 
     predicted_pages = [int(c["page"]) for c in result.citations if "page" in c]
@@ -357,7 +399,7 @@ def _score_and_record(
 
     answer = score_answer(result.answer, example)
     recall = page_recall(predicted_pages, [int(p) for p in (example.supporting_pages or [])])
-    iou = max_iou_over_alternates(predicted_bboxes, example)
+    iou = max_iou_over_alternates(predicted_bboxes, example, image_dims_by_page=image_dims_by_page)
     tool_calls = sum(
         1 for step in result.trace.steps if step.action == "tool_call" or step.tool is not None
     )
@@ -368,6 +410,7 @@ def _score_and_record(
         tool_calls=[{"tool": s.tool} for s in result.trace.steps if s.tool is not None],
         example=example,
         largest_crop_area_ratio=0.0,
+        image_dims_by_page=image_dims_by_page,
     )
     is_lazy = int(tool_calls == 0 or not predicted_bboxes)
 
