@@ -271,14 +271,26 @@ class FocusWorkflow:
         )
 
         # --- EXPAND_CONTEXT -----------------------------------------------
-        evidence = await expand_context(evidence)
+        evidence = await expand_context(
+            evidence,
+            regions=regions,
+            pdf_path=pdf_path,
+            crop_cache_dir=self._role_cache_dir("crops"),
+        )
+        n_with_neighbors = sum(1 for p in evidence.packets if p.linked_crop_refs)
+        n_neighbors = sum(len(p.linked_crop_refs) for p in evidence.packets)
+        expand_tier = "deterministic" if n_with_neighbors > 0 else "skeleton"
         recorder.record(
             TrajectoryStep(
                 step_index=4,
                 stage="expand_context",
-                tier="skeleton",
+                tier=expand_tier,
                 action="deterministic",
-                args={"n_packets": len(evidence.packets)},
+                args={
+                    "n_packets": len(evidence.packets),
+                    "n_with_neighbors": n_with_neighbors,
+                    "n_neighbors_attached": n_neighbors,
+                },
             )
         )
 
