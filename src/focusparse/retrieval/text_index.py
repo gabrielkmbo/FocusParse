@@ -35,9 +35,12 @@ class TextIndex:
 
     _SCHEMA_VERSION = 1
 
-    def __init__(self, doc_id: str, cache_dir: Path | str) -> None:
+    def __init__(self, doc_id: str, cache_dir: Path | str | None = None) -> None:
         self.doc_id = doc_id
-        self.cache_dir = Path(cache_dir)
+        # None means "don't persist to disk" — build in an in-memory sqlite
+        # so callers who don't care about cross-run caching don't pollute
+        # CWD with a stray `cache/` directory.
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self._db_path: Path | None = None
         self._conn: sqlite3.Connection | None = None
 
@@ -58,6 +61,17 @@ class TextIndex:
             # []-shaped results instead of raising.
             self._conn = sqlite3.connect(":memory:")
             self._init_schema(self._conn)
+            return
+
+        if self.cache_dir is None:
+            # Caller didn't ask for disk caching — build in memory.
+            self._conn = sqlite3.connect(":memory:")
+            self._init_schema(self._conn)
+            with self._conn:
+                self._conn.executemany(
+                    "INSERT INTO pages (page, content) VALUES (?, ?)",
+                    sorted((int(p), (t or "")) for p, t in pages_text.items()),
+                )
             return
 
         self.cache_dir.mkdir(parents=True, exist_ok=True)

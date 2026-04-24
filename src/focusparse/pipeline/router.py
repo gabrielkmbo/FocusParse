@@ -71,8 +71,10 @@ async def route_pages(
     if pages_text is None:
         return _skeleton_all_pages(pages, top_k=top_k)
 
-    cache_dir = text_index_cache_dir or Path("cache") / "text_index"
-    index = TextIndex(doc_id=question.doc_id, cache_dir=cache_dir)
+    # `text_index_cache_dir=None` → in-memory index. Callers that want
+    # cross-run persistence (FocusWorkflow with a configured cache root)
+    # pass an explicit path.
+    index = TextIndex(doc_id=question.doc_id, cache_dir=text_index_cache_dir)
     index.build(pages_text)
 
     hits_limit = top_k if top_k is not None else max(len(pages), _DEFAULT_TOP_K)
