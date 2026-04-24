@@ -28,6 +28,7 @@ from focusparse.pipeline.planner import plan_question
 from focusparse.pipeline.reasoner import answer_from_evidence
 from focusparse.pipeline.router import route_pages
 from focusparse.pipeline.verifier import verify_answer
+from focusparse.tools.get_text_layer import GetTextLayerInput, get_text_layer
 from focusparse.traces.recorder import RunTrace, TrajectoryRecorder, TrajectoryStep
 
 if TYPE_CHECKING:
@@ -93,13 +94,24 @@ class FocusWorkflow:
         Defaults to `<config.cache.root>/layout`; returns None when no cache
         config is present so tests + ephemeral runs stay uncached.
         """
+        return self._role_cache_dir("layout")
+
+    def _text_index_cache_dir(self) -> Path | None:
+        """Resolve the on-disk cache dir for per-doc FTS indexes."""
+        return self._role_cache_dir("text_index")
+
+    def _text_layer_cache_dir(self) -> Path | None:
+        """Resolve the on-disk cache dir for native PDF text-layer extracts."""
+        return self._role_cache_dir("text_layer")
+
+    def _role_cache_dir(self, name: str) -> Path | None:
         cache_cfg = getattr(self.config, "cache", None) if self.config else None
         if cache_cfg is None:
             return None
         root = getattr(cache_cfg, "root", None)
         if not root:
             return None
-        return Path(root) / "layout"
+        return Path(root) / name
 
     async def run(
         self,
@@ -108,6 +120,7 @@ class FocusWorkflow:
         *,
         protocol: str = "focus",
         output_dir: Path | None = None,
+        pdf_path: Path | None = None,
     ) -> WorkflowResult:
         del output_dir  # unused in skeleton
         recorder = TrajectoryRecorder(example_id=example.id, question=example.question)
@@ -161,20 +174,37 @@ class FocusWorkflow:
         # Build the page->image map up front so the router can route on real
         # page numbers (parsed from filenames) rather than positional indices.
         images_by_page = _images_by_page(example, images)
+        page_universe = sorted(images_by_page.keys())
 
         # --- ROUTE_PAGES ---------------------------------------------------
+        # Extract native text when the caller handed us a PDF. Pages with an
+        # empty native text layer still get an entry in pages_text (empty
+        # string) so the FTS index has a stable page universe; they just
+        # won't match any query.
+        pages_text = await _extract_pages_text(
+            pdf_path=pdf_path,
+            pages=page_universe,
+            cache_dir=self._text_layer_cache_dir(),
+        )
         pages = await route_pages(
             question_event,
             plan,
-            pages=sorted(images_by_page.keys()),
+            pages=page_universe,
+            pages_text=pages_text,
+            text_index_cache_dir=self._text_index_cache_dir(),
         )
+        n_text_pages = sum(1 for t in (pages_text or {}).values() if t)
+        route_tier = "text_fts" if pages_text else "skeleton"
         recorder.record(
             TrajectoryStep(
                 step_index=1,
                 stage="route_pages",
-                tier="skeleton",
+                tier=route_tier,
                 action="deterministic",
-                args={"candidates": [pc.page for pc in pages.candidates]},
+                args={
+                    "candidates": [pc.page for pc in pages.candidates],
+                    "n_text_pages": n_text_pages,
+                },
             )
         )
 
@@ -349,6 +379,45 @@ def _page_number_from_filename(name: str) -> int | None:
         return int(m.group(1))
     except ValueError:
         return None
+
+
+async def _extract_pages_text(
+    *,
+    pdf_path: Path | None,
+    pages: list[int],
+    cache_dir: Path | None,
+) -> dict[int, str] | None:
+    """Return per-page plain text for `pages`, or None when no PDF is supplied.
+
+    Pages whose native text layer is empty (scanned/image-only) come back
+    with an empty string rather than being omitted — the router wants a
+    stable page universe so `pages_text_no_matches` means "FTS matched
+    nothing" rather than "we forgot this page existed".
+
+    Silently returns None when `pdf_path` is None or missing on disk. We
+    deliberately don't propagate FileNotFoundError here: the workflow has
+    to keep running with a skeleton router in that case, not crash the run.
+    """
+    if pdf_path is None:
+        return None
+    resolved = Path(pdf_path)
+    if not resolved.exists():
+        return None
+
+    pages_text: dict[int, str] = {}
+    for page in pages:
+        try:
+            out = await get_text_layer(
+                GetTextLayerInput(doc_path=str(resolved), page=page),
+                cache_dir=cache_dir,
+            )
+        except (ValueError, FileNotFoundError):
+            # Out-of-range or race-y disappearance: keep the workflow alive,
+            # mark this page as empty so FTS still sees it in the universe.
+            pages_text[page] = ""
+            continue
+        pages_text[page] = out.text
+    return pages_text
 
 
 def _citations_from_packets(
