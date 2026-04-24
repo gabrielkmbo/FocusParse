@@ -69,6 +69,33 @@ _TEXT_REGION_TYPES = frozenset(
 # crop directly). Still get a crop; just no `element` mode pass.
 _VISUAL_REGION_TYPES = frozenset({"picture", "image", "chart", "figure"})
 
+# Map `plan.evidence_types` strings (planner vocabulary) to the region_type
+# labels RT-DETRv2 emits. Planner uses coarse types (figure, table, text);
+# detector uses fine labels (picture, table, section_header, etc.). This
+# bridges the two vocabularies so the ranker can boost matches.
+_EVIDENCE_TYPE_ALIASES: dict[str, frozenset[str]] = {
+    "figure": frozenset({"picture", "image", "chart", "figure", "diagram"}),
+    "chart": frozenset({"chart", "figure", "picture"}),
+    "diagram": frozenset({"picture", "figure", "image", "diagram"}),
+    "picture": frozenset({"picture", "image", "figure"}),
+    "image": frozenset({"picture", "image", "figure"}),
+    "table": frozenset({"table"}),
+    "text": frozenset(
+        {"text", "section_header", "section-header", "title", "list-item", "list_item"}
+    ),
+    "caption": frozenset({"caption"}),
+    "footnote": frozenset({"footnote"}),
+    "formula": frozenset({"formula"}),
+    "header": frozenset({"page-header", "section_header", "section-header", "title"}),
+    "footer": frozenset({"page-footer"}),
+}
+
+# Multiplicative boost applied to regions whose type matches any entry in
+# `plan.evidence_types`. 1.5 was chosen so a figure region with score ~0.6
+# can outrank a text region with score ~0.85 — which is the typical gap
+# RT-DETRv2 shows between confident text and confident figures.
+_EVIDENCE_TYPE_BOOST = 1.5
+
 _DEFAULT_MAX_CROPS = 8
 _MIN_TEXT_LAYER_CHARS = 4  # anything shorter is "basically empty"
 
@@ -108,7 +135,11 @@ async def inspect_regions(
     del question  # reserved for LLM-driven inspector step 2
 
     max_crops = plan.max_crops or _DEFAULT_MAX_CROPS
-    ranked = sorted(regions.candidates, key=lambda r: -r.score)[:max_crops]
+    boosted_types = _expand_evidence_types(plan.evidence_types)
+    ranked = sorted(
+        regions.candidates,
+        key=lambda r: -_rank_score(r, boosted_types),
+    )[:max_crops]
 
     packets: list[EvidencePacket] = []
     for idx, region in enumerate(ranked):
@@ -235,3 +266,52 @@ async def _inspect_one_region(
         ),
         confidence=confidence,
     )
+
+
+# ---------------------------------------------------------------------------
+# Ranking helpers
+# ---------------------------------------------------------------------------
+
+
+def _expand_evidence_types(evidence_types: list[str] | None) -> frozenset[str]:
+    """Turn planner-vocab `evidence_types` into a set of detector region_types.
+
+    `evidence_types` uses coarse labels (figure, table, text); the layout
+    endpoint emits fine labels (picture, table, section_header, caption).
+    `_EVIDENCE_TYPE_ALIASES` maps the former to the latter — so asking for
+    `["figure"]` boosts {picture, image, chart, figure, diagram}.
+
+    Unknown planner labels are dropped silently rather than matching
+    nothing; the alternative (literal match) would misfire whenever the
+    planner uses a word the detector doesn't.
+    """
+    if not evidence_types:
+        return frozenset()
+    expanded: set[str] = set()
+    for raw in evidence_types:
+        key = (raw or "").strip().lower()
+        if not key:
+            continue
+        aliases = _EVIDENCE_TYPE_ALIASES.get(key)
+        if aliases is None:
+            continue
+        expanded |= aliases
+    return frozenset(expanded)
+
+
+def _rank_score(region: RegionCandidate, boosted_types: frozenset[str]) -> float:
+    """Score used only for top-N selection; packet.confidence still carries
+    the raw detector score.
+
+    Applies a fixed multiplicative boost when a region's type matches any
+    requested evidence type. This lets a confident figure (score 0.6)
+    outrank a confident text region (score 0.85) when the planner asked
+    for figures — the core smoke-test observation this helper exists for.
+    """
+    base = float(region.score)
+    if not boosted_types:
+        return base
+    rtype = (region.region_type or "").lower()
+    if rtype and rtype in boosted_types:
+        return base * _EVIDENCE_TYPE_BOOST
+    return base
