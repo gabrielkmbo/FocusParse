@@ -7,7 +7,7 @@ def test_inspect_region_schema():
     from focusparse.tools.inspect_region import InspectRegionInput
 
     inp = InspectRegionInput(
-        doc_id="fake", page=3, bbox_norm=(0.1, 0.1, 0.4, 0.5), mode="element"
+        doc_path="/tmp/fake.pdf", page=3, bbox_norm=(0.1, 0.1, 0.4, 0.5), mode="element"
     )
     assert inp.mode == "element"
     assert inp.dpi == 300
