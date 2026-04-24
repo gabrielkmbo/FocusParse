@@ -14,6 +14,7 @@ __pycache__/
 # data + run outputs (write-only sinks)
 results/
 data/
+cache/
 traces_out/
 crops_cache/
 hf_cache/
