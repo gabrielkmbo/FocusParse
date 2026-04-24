@@ -54,6 +54,12 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default="focus_default",
     )
+    p.add_argument(
+        "--pdfs-root",
+        type=Path,
+        default=None,
+        help="Optional dir holding source PDFs. Enables FTS router text path.",
+    )
     return p.parse_args()
 
 
@@ -95,7 +101,10 @@ async def _run() -> int:
         config=config,
         tier_router=tier_router,
     )
-    result = await workflow.run(example, images, protocol=args.protocol)
+    pdf_path = _resolve_pdf(args.pdfs_root, example)
+    if pdf_path is not None:
+        logger.info("using PDF: %s (FTS router will fire)", pdf_path)
+    result = await workflow.run(example, images, protocol=args.protocol, pdf_path=pdf_path)
 
     _print_trajectory(result.trace)
     print()
@@ -131,6 +140,18 @@ def _load_example(bench_path: Path, example_id: str | None) -> Any | None:
 
 def _resolve_image(staging_dir: Path, rel: str) -> Path:
     return staging_dir / rel
+
+
+def _resolve_pdf(pdfs_root: Path | None, example: Any) -> Path | None:
+    if pdfs_root is None:
+        return None
+    src = getattr(example, "source_pdf", None)
+    if not src:
+        return None
+    for candidate in (pdfs_root / src, pdfs_root / Path(src).stem / src):
+        if candidate.exists():
+            return candidate
+    return None
 
 
 # ---------------------------------------------------------------------------

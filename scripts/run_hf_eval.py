@@ -118,6 +118,7 @@ def main() -> int:
                 resume=args.resume,
                 config=config,
                 tier_router=tier_router,
+                pdfs_root=args.pdfs_root,
             )
         )
     else:
@@ -180,6 +181,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--hf-split", default="validation")
     parser.add_argument("--hf-revision", default=None)
     parser.add_argument("--staging-dir", type=Path, default=_DEFAULT_STAGING)
+    parser.add_argument(
+        "--pdfs-root",
+        type=Path,
+        default=None,
+        help="Optional dir holding source PDFs. When set, the focus agent's "
+        "router queries a native text index per example; otherwise the "
+        "router falls back to the all-pages skeleton.",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("results/hf"))
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
