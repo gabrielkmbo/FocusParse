@@ -475,6 +475,246 @@ async def test_cache_dirs_are_forwarded_to_tools(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Evidence-type-aware ranking (smoke-test observation fix)
+# ---------------------------------------------------------------------------
+
+
+def _plan_with_evidence(evidence_types: list[str], max_crops: int = 3) -> PlanEvent:
+    return PlanEvent(
+        question_family="axis_value_interpolation",
+        evidence_types=evidence_types,
+        budget_class="easy_local",
+        routing_policy="image_first",
+        max_tool_calls=12,
+        max_crops=max_crops,
+        max_vlm_calls=4,
+    )
+
+
+async def test_figure_evidence_type_boosts_picture_over_text(tmp_path, monkeypatch):
+    """RT-DETRv2 scores text > picture on the raw signal; when plan asks for
+    figures, the inspector should still surface the picture first."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    regions = RegionsEvent(
+        candidates=[
+            # Confident text — base-score winner under plain sort
+            _region(
+                region_id="t1",
+                page=1,
+                bbox_norm=(0, 0, 0.5, 0.5),
+                region_type="text",
+                score=0.92,
+            ),
+            # Confident section header — second under plain sort
+            _region(
+                region_id="h1",
+                page=1,
+                bbox_norm=(0, 0.5, 0.5, 0.6),
+                region_type="section_header",
+                score=0.88,
+            ),
+            # A moderate-score picture — should be boosted to #1
+            _region(
+                region_id="p1",
+                page=1,
+                bbox_norm=(0.5, 0, 1.0, 1.0),
+                region_type="picture",
+                score=0.7,
+            ),
+        ]
+    )
+
+    plan = _plan_with_evidence(["figure"], max_crops=3)
+    ev = await inspect_regions(
+        _q(),
+        plan,
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+    )
+    # Picture (0.7 * 1.5 = 1.05) > text (0.92) > header (0.88).
+    assert [p.region_type for p in ev.packets] == ["picture", "text", "section_header"]
+
+
+async def test_table_evidence_type_boosts_table_regions(tmp_path, monkeypatch):
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="text",
+                page=1,
+                bbox_norm=(0, 0, 0.5, 0.5),
+                region_type="text",
+                score=0.9,
+            ),
+            _region(
+                region_id="tbl",
+                page=1,
+                bbox_norm=(0.5, 0.5, 1.0, 1.0),
+                region_type="table",
+                score=0.65,
+            ),
+        ]
+    )
+    plan = _plan_with_evidence(["table"], max_crops=2)
+    ev = await inspect_regions(
+        _q(), plan, regions, images_by_page={1: tmp_path / "p.png"}, pdf_path=pdf
+    )
+    # table (0.65 * 1.5 = 0.975) > text (0.9).
+    assert ev.packets[0].region_type == "table"
+
+
+async def test_no_evidence_types_preserves_base_ranking(tmp_path, monkeypatch):
+    """Empty/None evidence_types → no boost, raw score wins."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="text",
+                page=1,
+                bbox_norm=(0, 0, 0.5, 0.5),
+                region_type="text",
+                score=0.92,
+            ),
+            _region(
+                region_id="pic",
+                page=1,
+                bbox_norm=(0.5, 0, 1.0, 1.0),
+                region_type="picture",
+                score=0.7,
+            ),
+        ]
+    )
+    plan = _plan_with_evidence([], max_crops=2)
+    ev = await inspect_regions(
+        _q(), plan, regions, images_by_page={1: tmp_path / "p.png"}, pdf_path=pdf
+    )
+    # Without evidence_types boost, raw score ordering stands.
+    assert [p.region_type for p in ev.packets] == ["text", "picture"]
+
+
+async def test_unknown_evidence_type_is_noop(tmp_path, monkeypatch):
+    """Planner emits something the alias map doesn't know → no boost, no crash."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="text",
+                page=1,
+                bbox_norm=(0, 0, 0.5, 0.5),
+                region_type="text",
+                score=0.92,
+            ),
+            _region(
+                region_id="pic",
+                page=1,
+                bbox_norm=(0.5, 0, 1.0, 1.0),
+                region_type="picture",
+                score=0.7,
+            ),
+        ]
+    )
+    plan = _plan_with_evidence(["schmoo_plot"], max_crops=2)  # not a known alias
+    ev = await inspect_regions(
+        _q(), plan, regions, images_by_page={1: tmp_path / "p.png"}, pdf_path=pdf
+    )
+    assert [p.region_type for p in ev.packets] == ["text", "picture"]
+
+
+async def test_multiple_evidence_types_boost_each(tmp_path, monkeypatch):
+    """['figure', 'table'] should boost both picture and table regions."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="text",
+                page=1,
+                bbox_norm=(0, 0, 0.3, 0.3),
+                region_type="text",
+                score=0.95,
+            ),
+            _region(
+                region_id="tbl",
+                page=1,
+                bbox_norm=(0, 0.3, 0.3, 0.6),
+                region_type="table",
+                score=0.7,
+            ),
+            _region(
+                region_id="pic",
+                page=1,
+                bbox_norm=(0.5, 0, 1.0, 1.0),
+                region_type="picture",
+                score=0.65,
+            ),
+        ]
+    )
+    plan = _plan_with_evidence(["figure", "table"], max_crops=3)
+    ev = await inspect_regions(
+        _q(), plan, regions, images_by_page={1: tmp_path / "p.png"}, pdf_path=pdf
+    )
+    # Both boosted regions rank above text: table (1.05) > picture (0.975) > text (0.95).
+    assert [p.region_type for p in ev.packets] == ["table", "picture", "text"]
+
+
+async def test_packet_confidence_preserves_raw_score(tmp_path, monkeypatch):
+    """The boost is used for ranking only; packet.confidence keeps the raw
+    detector score so downstream consumers don't see an inflated number."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(
+        monkeypatch,
+        inspect_calls=inspect_calls,
+        text_calls=text_calls,
+        inspect_element_out=None,  # use default element behavior
+    )
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="pic",
+                page=1,
+                bbox_norm=(0, 0, 1, 1),
+                region_type="picture",
+                score=0.7,
+            )
+        ]
+    )
+    ev = await inspect_regions(
+        _q(),
+        _plan_with_evidence(["figure"], max_crops=1),
+        regions,
+        images_by_page={1: tmp_path / "p.png"},
+        pdf_path=pdf,
+    )
+    # Raw score 0.7 preserved — NOT 0.7 * 1.5 = 1.05.
+    assert ev.packets[0].confidence == pytest.approx(0.7)
+
+
 async def test_tool_errors_degrade_to_fallback_packet(tmp_path, monkeypatch):
     """When inspect_region and get_text_layer both raise, the packet is still
     emitted with skeleton_inspector_fallback provenance — the run keeps going."""
