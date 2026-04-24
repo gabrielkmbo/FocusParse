@@ -147,6 +147,7 @@ async def run_focus_eval(
     resume: bool = True,
     config: Any = None,
     tier_router: Any = None,
+    pdfs_root: Path | None = None,
 ) -> dict[str, Any]:
     """Run `FocusWorkflow` over an iterable of examples.
 
@@ -170,6 +171,11 @@ async def run_focus_eval(
             non-reasoner stages (currently: planner) resolve their clients
             through it. When absent, those stages fall back to deterministic
             placeholders.
+        pdfs_root: Optional directory where source PDFs live. When provided,
+            the harness resolves `pdfs_root / example.source_pdf` and passes
+            it to `FocusWorkflow.run(pdf_path=...)`, which feeds native text
+            into the FTS router. Missing files silently degrade to the
+            skeleton router — the run keeps going.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -202,8 +208,11 @@ async def run_focus_eval(
         if record is None:
             # Focus agent always sees all pages — routing is its job.
             images = [_resolve(images_root, p) for p in (example.page_images or [])]
+            pdf_path = _resolve_pdf_path(pdfs_root, example)
             try:
-                result: WorkflowResult = await workflow.run(example, images, protocol=protocol)
+                result: WorkflowResult = await workflow.run(
+                    example, images, protocol=protocol, pdf_path=pdf_path
+                )
                 image_dims = _image_dims_by_page(example, images)
                 record = _score_and_record(
                     example, result, protocol=protocol, image_dims_by_page=image_dims
@@ -277,6 +286,32 @@ def _resolve(images_root: Path, rel_or_abs: str) -> Path:
     if p.is_absolute():
         return p
     return images_root / p
+
+
+def _resolve_pdf_path(
+    pdfs_root: Path | None,
+    example: BenchmarkExample,
+) -> Path | None:
+    """Return the on-disk PDF for this example, or None.
+
+    Tries `<pdfs_root>/<source_pdf>` first, then `<pdfs_root>/<doc_stem>/
+    <source_pdf>` (parser-bench's nested layout). Returns None when no
+    `pdfs_root` is configured or neither location exists — the workflow
+    keeps running with a skeleton router.
+    """
+    if pdfs_root is None:
+        return None
+    src = getattr(example, "source_pdf", None)
+    if not src:
+        return None
+    candidate = pdfs_root / src
+    if candidate.exists():
+        return candidate
+    doc_stem = Path(src).stem
+    nested = pdfs_root / doc_stem / src
+    if nested.exists():
+        return nested
+    return None
 
 
 def _image_dims_by_page(
