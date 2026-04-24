@@ -12,15 +12,15 @@
 
 The 7 pipeline stages are intentionally unequal:
 
-| Stage              | Status                           | Priority                                                                |
-| ------------------ | -------------------------------- | ----------------------------------------------------------------------- |
-| plan               | real cheap-tier LLM              | **frozen**                                                              |
-| route_pages        | real FTS5 + BM25                 | frozen (fine once text source is wired)                                 |
-| **localize**       | real HF RT-DETRv2                | **main focus** — IoU + recall are ceiling-limited here                  |
-| **inspect**        | smart-deterministic (2g step 1)  | **main focus** — step 2 is the LLM-driven ReActAgent loop               |
-| **expand_context** | **still skeleton** (passthrough) | **main focus** — graph-aware neighbor attachment is the next big unlock |
-| answer             | real frontier-tier VLM           | frozen (quality is downstream of evidence we hand it)                   |
-| verify             | real mid-tier LLM                | frozen (structured output + retry-loop wiring done)                     |
+| Stage              | Status                               | Priority                                                       |
+| ------------------ | ------------------------------------ | -------------------------------------------------------------- |
+| plan               | real cheap-tier LLM                  | **frozen**                                                     |
+| route_pages        | real FTS5 + BM25                     | frozen (fine once text source is wired)                        |
+| **localize**       | real HF RT-DETRv2                    | **main focus** — IoU + recall are ceiling-limited here         |
+| **inspect**        | smart-deterministic (2g step 1)      | **main focus** — step 2 is the LLM-driven ReActAgent loop      |
+| **expand_context** | graph-aware neighbor attachment (2h) | **main focus** — tune neighbor taxonomy + adjacency heuristics |
+| answer             | real frontier-tier VLM               | frozen (quality is downstream of evidence we hand it)          |
+| verify             | real mid-tier LLM                    | frozen (structured output + retry-loop wiring done)            |
 
 Work lands in `src/focusparse/pipeline/{localizer,inspector,expander}.py` and `src/focusparse/tools/*` (especially `inspect_region`, future `expand_context`). Other pipeline files only change for cross-cutting refactors (typed events, tier router, trajectory schema). If you're about to "improve" the frozen stages mid-session, check in first — the answer is almost certainly "not yet."
 
@@ -78,6 +78,10 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 ## Changelog
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
+
+### 2026-04-24 — sub-phase 2h: graph-aware expand_context
+
+Replaced the passthrough expander with real neighbor attachment. For each packet, finds annotation-type regions (caption/footnote/section_header/title/page-header/page-footer) on the same page that overlap a padded bbox (8% default pad), ranks by vertical distance to packet center + score, caps at 4 per packet. Crops each via `inspect_region(mode='image')` and stamps `linked_crop_refs` / `linked_neighbor_types` on the packet. `expand_context:nN` tag appended to `provenance.args_hash`. Passthrough when `regions` or `pdf_path` is None — legacy one-arg shape still works. Tests: `tests/test_expander.py` (14). Suite 283. All three focus-stage skeletons (localize / inspect / expand_context) are now real.
 
 ### 2026-04-24 — inspector evidence-type-aware ranking
 
