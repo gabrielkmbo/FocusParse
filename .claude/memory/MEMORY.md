@@ -79,6 +79,10 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-04-24 — inspector evidence-type-aware ranking
+
+Fixed the smoke-test observation. `_expand_evidence_types()` maps planner-vocab ("figure", "table", "chart", "text", ...) to detector labels (picture/image/chart/section_header/...) via `_EVIDENCE_TYPE_ALIASES`; `_rank_score()` applies 1.5x boost to regions whose type matches `plan.evidence_types`. Confident picture (0.7) now beats confident text (0.92). Packet.confidence still carries raw score — boost is ranking-only. Smoke confirms: VLM now cites a picture region in the diagram area instead of a Section-header. Tests: 6 new in `tests/test_inspector.py` (17 total). Suite 269.
+
 ### 2026-04-24 — sub-phase 2g step 1: smart-deterministic inspector
 
 Replaced the skeleton inspector with a tool dispatcher. Per region: crop via `inspect_region(mode='image')`, then text-bearing regions with a PDF call `get_text_layer(bbox)` (native), falling back to `inspect_region(mode='element')` Tesseract on empty native text; visual regions (picture/chart) get crop only. Ranked by score, capped at `plan.max_crops`. Workflow forwards `pdf_path` + `cache/crops/` + `cache/text_layer/`. Tier upgrades to `deterministic` when PDF present. Tests: `tests/test_inspector.py` (11). **Step 2 (LLM-driven ReActAgent loop) deferred.** Full suite 263. Smoke observation: RT-DETRv2 ranks text > picture regions, so top-N by raw score can hide answer regions for figure-heavy questions — tune ranking next.
