@@ -19,7 +19,8 @@ if TYPE_CHECKING:
 # Answer scoring
 # ---------------------------------------------------------------------------
 
-def score_answer(prediction_text: str, example: "BenchmarkExample") -> float:
+
+def score_answer(prediction_text: str, example: BenchmarkExample) -> float:
     """Return 1.0 if the prediction matches the gold answer under the example's
     answer_type tolerance, else 0.0."""
     gold = (example.answer or "").strip()
@@ -73,6 +74,7 @@ def _score_numeric(pred: str, gold: str, tolerance: float | None) -> float:
 
 def _extract_float(text: str) -> float | None:
     import re
+
     m = re.search(r"-?\d+(?:\.\d+)?", text)
     if not m:
         return None
@@ -86,7 +88,8 @@ def _extract_float(text: str) -> float | None:
 # Localization scoring
 # ---------------------------------------------------------------------------
 
-def _bbox_iou(a: "BBox", b: "BBox") -> float:
+
+def _bbox_iou(a: BBox, b: BBox) -> float:
     if a.page != b.page:
         return 0.0
     x0 = max(a.x0, b.x0)
@@ -110,19 +113,70 @@ def page_recall(predicted_pages: list[int], gold_pages: list[int]) -> float:
     return len(pred & gold) / len(gold)
 
 
+def _to_unit_interval_bbox(
+    bbox: BBox,
+    image_dims_by_page: dict[int, tuple[int, int]] | None,
+) -> BBox:
+    """Return a copy of `bbox` in [0,1] coords.
+
+    Coordinate-space convention in FocusParse:
+      * focus-agent citations are normalized [0,1]
+      * parser-bench gold `supporting_bboxes` are absolute pixel coords at
+        the page image's render DPI (typically 300)
+
+    We autodetect by max coord: anything > 1.0 is treated as pixel-space.
+    When `image_dims_by_page` doesn't cover a page, the bbox is returned
+    unchanged — an imperfect fallback, but `_bbox_iou` then safely returns
+    0 for the mixed-space case instead of a misleading non-zero number.
+    """
+    max_coord = max(bbox.x0, bbox.y0, bbox.x1, bbox.y1)
+    if max_coord <= 1.0:
+        return bbox
+    if image_dims_by_page is None:
+        return bbox
+    dims = image_dims_by_page.get(bbox.page)
+    if dims is None:
+        return bbox
+
+    from focusparse._parser_bench import BBox
+
+    width, height = dims
+    if width <= 0 or height <= 0:
+        return bbox
+    return BBox(
+        page=bbox.page,
+        x0=bbox.x0 / width,
+        y0=bbox.y0 / height,
+        x1=bbox.x1 / width,
+        y1=bbox.y1 / height,
+    )
+
+
 def max_iou_over_alternates(
-    predicted_bboxes: list["BBox"],
-    example: "BenchmarkExample",
+    predicted_bboxes: list[BBox],
+    example: BenchmarkExample,
+    *,
+    image_dims_by_page: dict[int, tuple[int, int]] | None = None,
 ) -> float:
-    """Best IoU between any predicted bbox and any gold-or-alternate bbox."""
+    """Best IoU between any predicted bbox and any gold-or-alternate bbox.
+
+    Both sides are normalized to [0,1] via `_to_unit_interval_bbox` when
+    `image_dims_by_page` is provided, so predicted (normalized) and gold
+    (pixel-space) bboxes yield meaningful IoU. Without the dim map, we
+    fall through to raw-coord comparison (correct when both sides happen
+    to be in the same space — e.g. simple-agent runs where the VLM
+    returns pixel coords to match gold).
+    """
     from focusparse._parser_bench import BBox  # noqa: F401 — type only
 
     golds = list(example.supporting_bboxes) + list(example.alternate_bboxes)
     if not predicted_bboxes or not golds:
         return 0.0
+    norm_preds = [_to_unit_interval_bbox(p, image_dims_by_page) for p in predicted_bboxes]
+    norm_golds = [_to_unit_interval_bbox(g, image_dims_by_page) for g in golds]
     best = 0.0
-    for p in predicted_bboxes:
-        for g in golds:
+    for p in norm_preds:
+        for g in norm_golds:
             iou = _bbox_iou(p, g)
             if iou > best:
                 best = iou
@@ -133,14 +187,16 @@ def max_iou_over_alternates(
 # Evidence-reward (lazy-answer penalty)
 # ---------------------------------------------------------------------------
 
+
 def score_evidence_reward(
     *,
     prediction_text: str,
     predicted_pages: list[int],
-    predicted_bboxes: list["BBox"],
+    predicted_bboxes: list[BBox],
     tool_calls: list[dict[str, Any]],
-    example: "BenchmarkExample",
+    example: BenchmarkExample,
     largest_crop_area_ratio: float = 0.0,
+    image_dims_by_page: dict[int, tuple[int, int]] | None = None,
 ) -> float:
     """Evidence-grounded reward ∈ [0, 1].
 
@@ -148,12 +204,17 @@ def score_evidence_reward(
     any bbox — the "lazy correct" case. Otherwise, multiplicative combination of
     answer correctness × page recall × best IoU, minus a penalty for crops that
     are essentially the whole page (AgenticOCR-style "lazy full-page" flag).
+
+    `image_dims_by_page` forwards to `max_iou_over_alternates` for
+    coordinate-space normalization. Pass it whenever predicted and gold
+    bboxes are in different spaces (typical for the focus agent — predicted
+    is normalized [0,1], gold is pixel at render DPI).
     """
     if len(tool_calls) == 0 or len(predicted_bboxes) == 0:
         return 0.0
     answer = score_answer(prediction_text, example)
     pages = page_recall(predicted_pages, [b.page for b in example.supporting_bboxes])
-    iou = max_iou_over_alternates(predicted_bboxes, example)
+    iou = max_iou_over_alternates(predicted_bboxes, example, image_dims_by_page=image_dims_by_page)
     lazy_penalty = 0.2 if largest_crop_area_ratio > 0.6 else 0.0
     reward = answer * pages * iou - lazy_penalty
     return max(0.0, min(1.0, reward))
