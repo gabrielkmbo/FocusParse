@@ -431,11 +431,15 @@ def _make_oracle_crops(
                 y0 = min(b.y0 for b in boxes_on_page)
                 x1 = max(b.x1 for b in boxes_on_page)
                 y1 = max(b.y1 for b in boxes_on_page)
+                # parser-bench BBox is documented as pixel-space; older
+                # callers may pass normalized [0,1]. Detect by magnitude.
+                if max(x0, y0, x1, y1) <= 1.0:
+                    x0, y0, x1, y1 = x0 * w, y0 * h, x1 * w, y1 * h
                 box_px = (
-                    max(0, int(x0 * w)),
-                    max(0, int(y0 * h)),
-                    min(w, int(x1 * w)),
-                    min(h, int(y1 * h)),
+                    max(0, int(x0)),
+                    max(0, int(y0)),
+                    min(w, int(x1)),
+                    min(h, int(y1)),
                 )
                 img.crop(box_px).save(out_path, format="PNG")
         crops.append(out_path)
