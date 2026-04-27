@@ -41,11 +41,16 @@ if TYPE_CHECKING:
     from focusparse._parser_bench import BenchmarkExample
 
 
-# Default retry budget. The verifier loop runs at most this many extra
-# answer/verify cycles after the initial cascade. 2 is empirical: more
-# tends to thrash without changing the answer; fewer doesn't give the
-# `expand_context` action a chance to find legend/caption neighbors.
-_DEFAULT_MAX_RETRIES = 2
+# Default retry budget. The verifier loop is **opt-in by default** as of
+# the 2026-04-27 n=30 A/B (see MEMORY.md). With `max_retries=2` the loop
+# fired on 67% of examples but only 9% of retries flipped the verdict,
+# while diluting region_recall (-0.08), region_precision (-0.16), and
+# bbox_iou_mean (-0.08) — the `retry_localization` action lowers the
+# confidence threshold which surfaces noisier boxes. Items 4 (region
+# reranker) and 5 (evidence-graph expansion) attack the same problem
+# more surgically; flip the default back to a positive integer after
+# one of them shows a measurable improvement on a real validation slice.
+_DEFAULT_MAX_RETRIES = 0
 
 # Knobs the retry loop tweaks per action. Values match (and float as)
 # the localizer's / expander's defaults — initial passes use these,
@@ -283,16 +288,19 @@ class FocusWorkflow:
         )
 
         # --- RETRY LOOP ----------------------------------------------------
-        # The verifier acts as a controller, not just a judge. Each retry
-        # mutates one of (regions, evidence, escalation_hint) per the
-        # action and re-runs whatever depends on the change. `accept` and
-        # `abstain` terminate; `retries_used == max_retries` exhausts.
+        # The verifier acts as a controller, not just a judge. The initial
+        # verdict is always classified (accept / abstain / retry-of-some-kind).
+        # When the verdict needs a retry but `retries_used == max_retries`,
+        # we terminate as "exhausted". This shape keeps the initial-accept
+        # path working even when `max_retries=0` (the default since the
+        # 2026-04-27 n=30 A/B revealed the loop hurts more than it helps
+        # without a smarter retry mutation).
         initial_supported = verdict.supported
         retries_used = 0
-        loop_terminated = "accepted"  # default; mutated in the loop body
+        loop_terminated = ""  # set in the loop body before break
         escalation_hint: str | None = None
 
-        while retries_used < self.max_retries:
+        while True:
             action = verdict.next_action
             if action == "accept":
                 loop_terminated = "accepted"
@@ -309,6 +317,13 @@ class FocusWorkflow:
                     reasoning_summary=verdict.reason,
                 )
                 loop_terminated = "abstained"
+                break
+
+            # Verdict wants a retry of some kind. Honor the budget: when we
+            # can't retry, surface the current answer + flag exhaustion so
+            # the trace shows the verifier wasn't satisfied.
+            if retries_used >= self.max_retries:
+                loop_terminated = "exhausted"
                 break
 
             retries_used += 1
@@ -362,7 +377,8 @@ class FocusWorkflow:
                 escalation_hint = verdict.reason
             else:
                 # Unknown action (future verifier extension) — accept the
-                # current answer rather than thrash. Logged via tier.
+                # current answer rather than thrash. Trace shows the action
+                # via the verify step's args["next_action"].
                 loop_terminated = "accepted"
                 break
 
@@ -385,10 +401,6 @@ class FocusWorkflow:
                 step_counter=step_counter,
                 retry_attempt=retries_used,
             )
-        else:
-            # `while ... else` runs when the loop terminates by exhausting
-            # retries (no break). Final verdict still wasn't accept.
-            loop_terminated = "exhausted"
 
         # `loop_retry_helped`: did the retries flip the verdict from
         # unsupported → supported? Null when no retries fired (caller

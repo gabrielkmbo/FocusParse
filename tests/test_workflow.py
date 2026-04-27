@@ -678,9 +678,12 @@ async def test_loop_retry_localization_reruns_localize_inspect_expand_answer_ver
             _verdict_json(supported=True, next_action="accept"),
         ]
     )
+    # Default `max_retries=0` since the n=30 A/B; pin =2 here to exercise
+    # the loop path this test covers.
     workflow = FocusWorkflow(
         backend_client=reasoner,
         tier_router=_FakeTierRouter(verifier=verifier),
+        max_retries=2,
     )
 
     result = await workflow.run(
@@ -718,9 +721,12 @@ async def test_loop_expand_context_reruns_only_expand_answer_verify(
             _verdict_json(supported=True, next_action="accept"),
         ]
     )
+    # Default `max_retries=0` since the n=30 A/B; pin =2 here to exercise
+    # the loop path this test covers.
     workflow = FocusWorkflow(
         backend_client=reasoner,
         tier_router=_FakeTierRouter(verifier=verifier),
+        max_retries=2,
     )
     result = await workflow.run(
         _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
@@ -763,9 +769,12 @@ async def test_loop_escalate_reasoner_reruns_only_answer_verify(
             _verdict_json(supported=True, next_action="accept"),
         ]
     )
+    # Default `max_retries=0` since the n=30 A/B; pin =2 here to exercise
+    # the loop path this test covers.
     workflow = FocusWorkflow(
         backend_client=reasoner,
         tier_router=_FakeTierRouter(verifier=verifier),
+        max_retries=2,
     )
     result = await workflow.run(
         _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
@@ -797,9 +806,12 @@ async def test_loop_abstain_terminates_with_unanswerable(tmp_path, parser_bench_
             reason="no evidence for the question",
         )
     )
+    # Default `max_retries=0` since the n=30 A/B; pin =2 here to exercise
+    # the loop path this test covers.
     workflow = FocusWorkflow(
         backend_client=reasoner,
         tier_router=_FakeTierRouter(verifier=verifier),
+        max_retries=2,
     )
 
     result = await workflow.run(
@@ -888,9 +900,12 @@ async def test_loop_unknown_action_terminates_as_accepted(tmp_path, parser_bench
     # test below just confirms the bail-out path doesn't loop infinitely
     # when the verifier emits a quiet accept.
     verifier = _FakeClient(_verdict_json(supported=True, next_action="accept"))
+    # Default `max_retries=0` since the n=30 A/B; pin =2 here to exercise
+    # the loop path this test covers.
     workflow = FocusWorkflow(
         backend_client=reasoner,
         tier_router=_FakeTierRouter(verifier=verifier),
+        max_retries=2,
     )
     result = await workflow.run(
         _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
