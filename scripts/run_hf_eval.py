@@ -29,7 +29,16 @@ logger = logging.getLogger(__name__)
 _DEFAULT_STAGING = Path.home() / ".cache" / "focusparse" / "hf_staging"
 _REASONER_ROLE = "reasoner"
 
-_SIMPLE_PROTOCOLS = frozenset({"full_doc", "oracle_page", "oracle_crop"})
+_SIMPLE_PROTOCOLS = frozenset(
+    {
+        "full_doc",
+        "oracle_page",
+        "oracle_crop",
+        "tiled_2up",
+        "tiled_4up",
+        "tiled_8up",
+    }
+)
 _FOCUS_PROTOCOLS = frozenset({"focus_default"})
 
 
@@ -134,6 +143,7 @@ def main() -> int:
                 images_root=args.staging_dir,
                 limit=args.limit,
                 resume=args.resume,
+                pdfs_root=args.pdfs_root,
             )
         )
 
@@ -169,7 +179,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--protocol",
         required=True,
-        choices=["full_doc", "oracle_page", "oracle_crop", "focus_default"],
+        choices=[
+            "full_doc",
+            "oracle_page",
+            "oracle_crop",
+            "tiled_2up",
+            "tiled_4up",
+            "tiled_8up",
+            "focus_default",
+        ],
     )
     parser.add_argument(
         "--tier-override",

@@ -57,6 +57,7 @@ async def run_simple_eval(
     images_root: Path,
     limit: int | None = None,
     resume: bool = True,
+    pdfs_root: Path | None = None,
 ) -> dict[str, Any]:
     """Run the single-shot baseline over an iterable of examples.
 
@@ -97,7 +98,13 @@ async def run_simple_eval(
                 record = None
 
         if record is None:
-            images = _prepare_images(example, protocol=protocol, images_root=images_root)
+            images = _prepare_images(
+                example,
+                protocol=protocol,
+                images_root=images_root,
+                pdfs_root=pdfs_root,
+                tile_cache_dir=output_dir / "tiles",
+            )
             try:
                 result: WorkflowResult = await agent.run(example, images)
                 record = _score_and_record(example, result, protocol=protocol)
@@ -275,8 +282,19 @@ def _prepare_images(
     *,
     protocol: str,
     images_root: Path,
+    pdfs_root: Path | None = None,
+    tile_cache_dir: Path | None = None,
 ) -> list[Path]:
-    """Resolve + filter + (for oracle_crop) crop page images for one example."""
+    """Resolve + filter + (for oracle_crop / tiled_*) compose page images.
+
+    Tiled protocols (`tiled_2up` / `tiled_4up` / `tiled_8up`) compose the
+    gold supporting page(s) plus PDF-rendered noise pages into one
+    contact-sheet PNG, mirroring parser-bench's `prepare_tiled_images`.
+    Requires a PDF for noise-rendering when N > len(staged_pages); falls
+    back to staged-pages-only when no PDF is wired.
+    """
+    from focusparse.eval.tile import TILE_SIZES, prepare_tiled_images
+
     all_pages = [_resolve(images_root, p) for p in (example.page_images or [])]
     supporting_pages = list(example.supporting_pages or [])
 
@@ -291,6 +309,18 @@ def _prepare_images(
 
     if protocol == "oracle_crop":
         return _make_oracle_crops(example, all_pages, images_root)
+
+    if protocol in TILE_SIZES:
+        n_tile = TILE_SIZES[protocol]
+        cache_dir = tile_cache_dir or (images_root.parent / "tile_cache")
+        pdf_path = _resolve_pdf_path(pdfs_root, example) if pdfs_root else None
+        return prepare_tiled_images(
+            example,
+            n_tile,
+            staged_pages=all_pages,
+            pdf_path=pdf_path,
+            tile_cache_dir=cache_dir,
+        )
 
     raise ValueError(f"Unknown protocol: {protocol!r}")
 
