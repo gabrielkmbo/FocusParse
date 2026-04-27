@@ -19,7 +19,13 @@ from typing import TYPE_CHECKING, Any
 from focusparse.evidence.packet import EvidencePacket
 from focusparse.models.base import ModelClient, ModelResponse
 from focusparse.pipeline.events import (
+    AnswerEvent,
+    EvidenceEvent,
+    PagesEvent,
+    PlanEvent,
     QuestionEvent,
+    RegionsEvent,
+    VerdictEvent,
 )
 from focusparse.pipeline.expander import expand_context
 from focusparse.pipeline.inspector import inspect_regions
@@ -33,6 +39,23 @@ from focusparse.traces.recorder import RunTrace, TrajectoryRecorder, TrajectoryS
 
 if TYPE_CHECKING:
     from focusparse._parser_bench import BenchmarkExample
+
+
+# Default retry budget. The verifier loop runs at most this many extra
+# answer/verify cycles after the initial cascade. 2 is empirical: more
+# tends to thrash without changing the answer; fewer doesn't give the
+# `expand_context` action a chance to find legend/caption neighbors.
+_DEFAULT_MAX_RETRIES = 2
+
+# Knobs the retry loop tweaks per action. Values match (and float as)
+# the localizer's / expander's defaults — initial passes use these,
+# retries tighten or widen them.
+_DEFAULT_LAYOUT_CONFIDENCE_THRESHOLD = 0.3
+_LOCALIZATION_RETRY_FACTOR = 0.7  # multiplied each retry → more boxes surface
+
+_DEFAULT_ADJACENCY_PAD = 0.08
+_EXPAND_RETRY_FACTOR = 1.5  # multiplied each retry → wider neighbor net
+_MAX_ADJACENCY_PAD = 0.30  # cap so the pad stays meaningful
 
 
 @dataclass
@@ -59,12 +82,17 @@ class FocusWorkflow:
         tier_router: Any = None,
         cache: Any = None,
         tools: Any = None,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> None:
         self.backend_client = backend_client
         self.config = config
         self.tier_router = tier_router
         self.cache = cache
         self.tools = tools
+        # `max_retries` caps the verifier→retry loop. 0 reverts the workflow
+        # to the pre-2026-04-27 cascade (no loops); the default lets the
+        # verifier act as a controller, not just a judge.
+        self.max_retries = max_retries
 
     def _client_for(self, role: str) -> ModelClient | None:
         """Resolve a role-scoped client via `tier_router`, else return None.
@@ -125,6 +153,7 @@ class FocusWorkflow:
         del output_dir  # unused in skeleton
         recorder = TrajectoryRecorder(example_id=example.id, question=example.question)
         recorder.set_plan({"agent": "focus", "protocol": protocol, "n_images": len(images)})
+        step_counter = _StepCounter()
 
         doc_id = _infer_doc_id(example)
         pages_available = len(example.page_images or [])
@@ -150,7 +179,7 @@ class FocusWorkflow:
         )
         recorder.record(
             TrajectoryStep(
-                step_index=0,
+                step_index=step_counter.next(),
                 stage="plan",
                 tier=("cheap" if plan_response is not None else "skeleton"),
                 action=("llm_call" if plan_response is not None else "deterministic"),
@@ -177,10 +206,6 @@ class FocusWorkflow:
         page_universe = sorted(images_by_page.keys())
 
         # --- ROUTE_PAGES ---------------------------------------------------
-        # Extract native text when the caller handed us a PDF. Pages with an
-        # empty native text layer still get an entry in pages_text (empty
-        # string) so the FTS index has a stable page universe; they just
-        # won't match any query.
         pages_text = await _extract_pages_text(
             pdf_path=pdf_path,
             pages=page_universe,
@@ -197,7 +222,7 @@ class FocusWorkflow:
         route_tier = "text_fts" if pages_text else "skeleton"
         recorder.record(
             TrajectoryStep(
-                step_index=1,
+                step_index=step_counter.next(),
                 stage="route_pages",
                 tier=route_tier,
                 action="deterministic",
@@ -208,25 +233,214 @@ class FocusWorkflow:
             )
         )
 
-        # --- PROPOSE_REGIONS ----------------------------------------------
-        layout_endpoint_url = self._layout_endpoint_url()
-        layout_cache_dir = self._layout_cache_dir()
+        # --- LOCALIZE / INSPECT / EXPAND (initial pass) -------------------
+        confidence_threshold = _DEFAULT_LAYOUT_CONFIDENCE_THRESHOLD
+        adjacency_pad = _DEFAULT_ADJACENCY_PAD
+
+        regions = await self._run_localize(
+            question_event,
+            plan,
+            pages,
+            images_by_page=images_by_page,
+            confidence_threshold=confidence_threshold,
+            recorder=recorder,
+            step_counter=step_counter,
+        )
+        evidence = await self._run_inspect(
+            question_event,
+            plan,
+            regions,
+            images_by_page=images_by_page,
+            pdf_path=pdf_path,
+            recorder=recorder,
+            step_counter=step_counter,
+        )
+        evidence = await self._run_expand(
+            evidence,
+            regions=regions,
+            pdf_path=pdf_path,
+            adjacency_pad=adjacency_pad,
+            recorder=recorder,
+            step_counter=step_counter,
+        )
+
+        # --- ANSWER + VERIFY (initial pass) -------------------------------
+        answer_event, reasoner_response = await self._run_answer(
+            question_event,
+            evidence,
+            escalation_hint=None,
+            recorder=recorder,
+            step_counter=step_counter,
+        )
+        verifier_client = self._client_for("verifier")
+        verdict, verify_response = await self._run_verify(
+            question_event,
+            evidence,
+            answer_event,
+            backend_client=verifier_client,
+            recorder=recorder,
+            step_counter=step_counter,
+        )
+
+        # --- RETRY LOOP ----------------------------------------------------
+        # The verifier acts as a controller, not just a judge. Each retry
+        # mutates one of (regions, evidence, escalation_hint) per the
+        # action and re-runs whatever depends on the change. `accept` and
+        # `abstain` terminate; `retries_used == max_retries` exhausts.
+        initial_supported = verdict.supported
+        retries_used = 0
+        loop_terminated = "accepted"  # default; mutated in the loop body
+        escalation_hint: str | None = None
+
+        while retries_used < self.max_retries:
+            action = verdict.next_action
+            if action == "accept":
+                loop_terminated = "accepted"
+                break
+            if action == "abstain":
+                # Replace the answer with a typed abstention so downstream
+                # scoring (which checks for abstention keywords) can match.
+                from focusparse.pipeline.events import AnswerEvent as _AnswerEvent
+
+                answer_event = _AnswerEvent(
+                    answer="Unanswerable",
+                    citations=[],
+                    confidence=verdict.confidence,
+                    reasoning_summary=verdict.reason,
+                )
+                loop_terminated = "abstained"
+                break
+
+            retries_used += 1
+
+            if action == "retry_localization":
+                confidence_threshold *= _LOCALIZATION_RETRY_FACTOR
+                regions = await self._run_localize(
+                    question_event,
+                    plan,
+                    pages,
+                    images_by_page=images_by_page,
+                    confidence_threshold=confidence_threshold,
+                    recorder=recorder,
+                    step_counter=step_counter,
+                    retry_attempt=retries_used,
+                )
+                # Localization changed → packets are stale; re-run inspect+expand.
+                evidence = await self._run_inspect(
+                    question_event,
+                    plan,
+                    regions,
+                    images_by_page=images_by_page,
+                    pdf_path=pdf_path,
+                    recorder=recorder,
+                    step_counter=step_counter,
+                    retry_attempt=retries_used,
+                )
+                evidence = await self._run_expand(
+                    evidence,
+                    regions=regions,
+                    pdf_path=pdf_path,
+                    adjacency_pad=adjacency_pad,
+                    recorder=recorder,
+                    step_counter=step_counter,
+                    retry_attempt=retries_used,
+                )
+            elif action == "expand_context":
+                adjacency_pad = min(adjacency_pad * _EXPAND_RETRY_FACTOR, _MAX_ADJACENCY_PAD)
+                evidence = await self._run_expand(
+                    evidence,
+                    regions=regions,
+                    pdf_path=pdf_path,
+                    adjacency_pad=adjacency_pad,
+                    recorder=recorder,
+                    step_counter=step_counter,
+                    retry_attempt=retries_used,
+                )
+            elif action == "escalate_reasoner":
+                # No state change — just feed the verifier's reason into the
+                # next reasoner call so it knows what to address.
+                escalation_hint = verdict.reason
+            else:
+                # Unknown action (future verifier extension) — accept the
+                # current answer rather than thrash. Logged via tier.
+                loop_terminated = "accepted"
+                break
+
+            # Always re-run answer + verify after a retry. The new verdict
+            # decides whether the loop continues.
+            answer_event, reasoner_response = await self._run_answer(
+                question_event,
+                evidence,
+                escalation_hint=escalation_hint,
+                recorder=recorder,
+                step_counter=step_counter,
+                retry_attempt=retries_used,
+            )
+            verdict, verify_response = await self._run_verify(
+                question_event,
+                evidence,
+                answer_event,
+                backend_client=verifier_client,
+                recorder=recorder,
+                step_counter=step_counter,
+                retry_attempt=retries_used,
+            )
+        else:
+            # `while ... else` runs when the loop terminates by exhausting
+            # retries (no break). Final verdict still wasn't accept.
+            loop_terminated = "exhausted"
+
+        # `loop_retry_helped`: did the retries flip the verdict from
+        # unsupported → supported? Null when no retries fired (caller
+        # treats null as "not measured", same as the StageMetrics block).
+        loop_retry_helped: bool | None = None
+        if retries_used > 0:
+            loop_retry_helped = (not initial_supported) and verdict.supported
+
+        # Convert packet-id citations back to {page, bbox} dicts.
+        citations = _citations_from_packets(answer_event.citations, evidence.packets)
+        trace = recorder.finalize(answer=answer_event.answer, citations=citations)
+
+        telemetry = _make_telemetry(reasoner_response)
+        telemetry["retries_used"] = retries_used
+        telemetry["loop_terminated"] = loop_terminated
+        telemetry["loop_retry_helped"] = loop_retry_helped
+        return WorkflowResult(
+            answer=answer_event.answer,
+            citations=citations,
+            trace=trace,
+            telemetry=telemetry,
+        )
+
+    # -- per-stage runners (used by both initial cascade and retry loop) --
+
+    async def _run_localize(
+        self,
+        question_event: QuestionEvent,
+        plan: PlanEvent,
+        pages: PagesEvent,
+        *,
+        images_by_page: dict[int, Path],
+        confidence_threshold: float,
+        recorder: TrajectoryRecorder,
+        step_counter: _StepCounter,
+        retry_attempt: int = 0,
+    ) -> RegionsEvent:
         regions = await propose_regions(
             question_event,
             plan,
             pages,
             images_by_page=images_by_page,
-            layout_endpoint_url=layout_endpoint_url,
-            cache_dir=layout_cache_dir,
+            layout_endpoint_url=self._layout_endpoint_url(),
+            cache_dir=self._layout_cache_dir(),
+            confidence_threshold=confidence_threshold,
         )
-        # Count how many pages fell back to the skeleton region so traces can
-        # attribute localization failures without scraping per-candidate signals.
         n_fallback_pages = sum(
             1 for r in regions.candidates if "skeleton_full_page" in r.supporting_signals
         )
         recorder.record(
             TrajectoryStep(
-                step_index=2,
+                step_index=step_counter.next(),
                 stage="localize",
                 tier=(
                     "layout_detect" if n_fallback_pages < len(regions.candidates) else "skeleton"
@@ -235,11 +449,25 @@ class FocusWorkflow:
                 args={
                     "n_regions": len(regions.candidates),
                     "n_fallback_pages": n_fallback_pages,
+                    "confidence_threshold": confidence_threshold,
+                    "retry_attempt": retry_attempt,
                 },
             )
         )
+        return regions
 
-        # --- INSPECT -------------------------------------------------------
+    async def _run_inspect(
+        self,
+        question_event: QuestionEvent,
+        plan: PlanEvent,
+        regions: RegionsEvent,
+        *,
+        images_by_page: dict[int, Path],
+        pdf_path: Path | None,
+        recorder: TrajectoryRecorder,
+        step_counter: _StepCounter,
+        retry_attempt: int = 0,
+    ) -> EvidenceEvent:
         evidence = await inspect_regions(
             question_event,
             plan,
@@ -249,16 +477,13 @@ class FocusWorkflow:
             crop_cache_dir=self._role_cache_dir("crops"),
             text_layer_cache_dir=self._text_layer_cache_dir(),
         )
-        # Packets that produced real tool output carry provenance.tool !=
-        # "skeleton_inspector_fallback", so traces can attribute degraded
-        # examples without looking at individual packet refs.
         n_real_packets = sum(
             1 for p in evidence.packets if p.provenance.tool != "skeleton_inspector_fallback"
         )
         inspect_tier = "deterministic" if pdf_path is not None else "skeleton"
         recorder.record(
             TrajectoryStep(
-                step_index=3,
+                step_index=step_counter.next(),
                 stage="inspect",
                 tier=inspect_tier,
                 action="tool_call",
@@ -266,47 +491,77 @@ class FocusWorkflow:
                 args={
                     "n_packets": len(evidence.packets),
                     "n_real_packets": n_real_packets,
+                    "retry_attempt": retry_attempt,
                 },
             )
         )
+        return evidence
 
-        # --- EXPAND_CONTEXT -----------------------------------------------
-        evidence = await expand_context(
+    async def _run_expand(
+        self,
+        evidence: EvidenceEvent,
+        *,
+        regions: RegionsEvent,
+        pdf_path: Path | None,
+        adjacency_pad: float,
+        recorder: TrajectoryRecorder,
+        step_counter: _StepCounter,
+        retry_attempt: int = 0,
+    ) -> EvidenceEvent:
+        expanded = await expand_context(
             evidence,
             regions=regions,
             pdf_path=pdf_path,
             crop_cache_dir=self._role_cache_dir("crops"),
+            adjacency_pad=adjacency_pad,
         )
-        n_with_neighbors = sum(1 for p in evidence.packets if p.linked_crop_refs)
-        n_neighbors = sum(len(p.linked_crop_refs) for p in evidence.packets)
+        n_with_neighbors = sum(1 for p in expanded.packets if p.linked_crop_refs)
+        n_neighbors = sum(len(p.linked_crop_refs) for p in expanded.packets)
         expand_tier = "deterministic" if n_with_neighbors > 0 else "skeleton"
         recorder.record(
             TrajectoryStep(
-                step_index=4,
+                step_index=step_counter.next(),
                 stage="expand_context",
                 tier=expand_tier,
                 action="deterministic",
                 args={
-                    "n_packets": len(evidence.packets),
+                    "n_packets": len(expanded.packets),
                     "n_with_neighbors": n_with_neighbors,
                     "n_neighbors_attached": n_neighbors,
+                    "adjacency_pad": adjacency_pad,
+                    "retry_attempt": retry_attempt,
                 },
             )
         )
+        return expanded
 
-        # --- ANSWER --------------------------------------------------------
+    async def _run_answer(
+        self,
+        question_event: QuestionEvent,
+        evidence: EvidenceEvent,
+        *,
+        escalation_hint: str | None,
+        recorder: TrajectoryRecorder,
+        step_counter: _StepCounter,
+        retry_attempt: int = 0,
+    ) -> tuple[AnswerEvent, ModelResponse]:
         answer_event, reasoner_response = await answer_from_evidence(
             question_event,
             evidence,
             backend_client=self.backend_client,
+            escalation_hint=escalation_hint,
         )
         recorder.record(
             TrajectoryStep(
-                step_index=5,
+                step_index=step_counter.next(),
                 stage="answer",
                 tier="reasoner",
                 action="llm_call",
-                args={"n_packets": len(evidence.packets)},
+                args={
+                    "n_packets": len(evidence.packets),
+                    "retry_attempt": retry_attempt,
+                    "had_escalation_hint": bool(escalation_hint),
+                },
                 obs_summary=(reasoner_response.text[:200] if reasoner_response.text else None),
                 tokens_in=reasoner_response.tokens_in,
                 tokens_out=reasoner_response.tokens_out,
@@ -315,24 +570,35 @@ class FocusWorkflow:
                 confidence=answer_event.confidence,
             )
         )
+        return answer_event, reasoner_response
 
-        # --- VERIFY --------------------------------------------------------
-        verifier_client = self._client_for("verifier")
+    async def _run_verify(
+        self,
+        question_event: QuestionEvent,
+        evidence: EvidenceEvent,
+        answer_event: AnswerEvent,
+        *,
+        backend_client: ModelClient | None,
+        recorder: TrajectoryRecorder,
+        step_counter: _StepCounter,
+        retry_attempt: int = 0,
+    ) -> tuple[VerdictEvent, ModelResponse | None]:
         verdict, verify_response = await verify_answer(
             question_event,
             evidence,
             answer_event,
-            backend_client=verifier_client,
+            backend_client=backend_client,
         )
         recorder.record(
             TrajectoryStep(
-                step_index=6,
+                step_index=step_counter.next(),
                 stage="verify",
                 tier=("mid" if verify_response is not None else "skeleton"),
                 action=("llm_call" if verify_response is not None else "deterministic"),
                 args={
                     "next_action": verdict.next_action,
                     "supported": verdict.supported,
+                    "retry_attempt": retry_attempt,
                 },
                 obs_summary=(
                     verify_response.text[:200]
@@ -346,23 +612,29 @@ class FocusWorkflow:
                 confidence=verdict.confidence,
             )
         )
-
-        # Convert packet-id citations back to {page, bbox} dicts.
-        citations = _citations_from_packets(answer_event.citations, evidence.packets)
-        trace = recorder.finalize(answer=answer_event.answer, citations=citations)
-
-        telemetry = _make_telemetry(reasoner_response)
-        return WorkflowResult(
-            answer=answer_event.answer,
-            citations=citations,
-            trace=trace,
-            telemetry=telemetry,
-        )
+        return verdict, verify_response
 
 
 # ---------------------------------------------------------------------------
 # Helpers (pure, unit-testable)
 # ---------------------------------------------------------------------------
+
+
+class _StepCounter:
+    """Monotonic step_index counter shared across the cascade + retry loop.
+
+    Replaces the hardcoded `step_index=0..6` from the pre-loop workflow.
+    Every `TrajectoryStep` gets a unique index so retry steps don't
+    overwrite the indices of the initial pass.
+    """
+
+    def __init__(self) -> None:
+        self._n = 0
+
+    def next(self) -> int:
+        idx = self._n
+        self._n += 1
+        return idx
 
 
 def _infer_doc_id(example: BenchmarkExample) -> str:
