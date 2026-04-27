@@ -31,7 +31,18 @@ _DEFAULT_OUTPUT_DIR = Path("results/hf")
 _DEFAULT_STAGING = Path.home() / ".cache" / "focusparse" / "hf_staging"
 _RUN_EVAL_SCRIPT = Path(__file__).resolve().parent / "run_hf_eval.py"
 
-_PHASE_A_PROTOCOLS = ("full_doc", "oracle_page", "oracle_crop")
+# Simple-agent protocols. Aligns with parser-bench's 5-protocol matrix
+# (`tiled_2up`, `tiled_4up`, `tiled_8up`, `oracle_page`, `oracle_crop`)
+# plus our `full_doc` legacy single-pass-baseline. Set via --simple-protocols
+# at the CLI; this is the default when `--phase a` is selected.
+_PHASE_A_PROTOCOLS = (
+    "full_doc",
+    "oracle_page",
+    "oracle_crop",
+    "tiled_2up",
+    "tiled_4up",
+    "tiled_8up",
+)
 
 # Tier profiles for Phase B. Each value is a {role: tier} dict that gets turned
 # into repeated --tier-override args. `balanced` is the config default (no
@@ -66,6 +77,7 @@ def main() -> int:
     run_specs = _build_specs(
         phases=args.phase,
         focus_tiers=args.focus_tiers,
+        simple_protocols=args.simple_protocols,
     )
     if not run_specs:
         logger.error("No specs to run — did you pass --phase?")
@@ -84,6 +96,7 @@ def main() -> int:
             limit=args.limit,
             hf_revision=args.hf_revision,
             resume=args.resume,
+            pdfs_root=args.pdfs_root,
         )
         logger.info("$ %s", " ".join(str(c) for c in cmd))
         subprocess.run(cmd, check=True)
@@ -123,7 +136,16 @@ def _parse_args() -> argparse.Namespace:
         action="append",
         choices=["a", "b"],
         default=[],
-        help="Repeatable. `a` = simple × 3 protocols, `b` = focus × tier profiles.",
+        help="Repeatable. `a` = simple × N protocols (default: full_doc + 3 "
+        "tiled + 2 oracle), `b` = focus × tier profiles.",
+    )
+    parser.add_argument(
+        "--simple-protocols",
+        default=None,
+        help=(
+            "Comma-separated subset of simple-agent protocols. "
+            f"Default: {','.join(_PHASE_A_PROTOCOLS)}. Only consulted with --phase a."
+        ),
     )
     parser.add_argument(
         "--focus-tiers",
@@ -132,6 +154,13 @@ def _parse_args() -> argparse.Namespace:
             "Comma-separated subset of {cheap_only, balanced, frontier}. "
             "Only consulted when --phase b is selected."
         ),
+    )
+    parser.add_argument(
+        "--pdfs-root",
+        type=Path,
+        default=None,
+        help="Optional dir of source PDFs. Required for tiled protocols' "
+        "noise-page rendering and the focus agent's FTS router.",
     )
     parser.add_argument("--hf-revision", default=None)
     parser.add_argument("--limit", type=int, default=None)
@@ -150,10 +179,20 @@ def _parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 
-def _build_specs(*, phases: list[str], focus_tiers: str) -> list[dict[str, Any]]:
+def _build_specs(
+    *,
+    phases: list[str],
+    focus_tiers: str,
+    simple_protocols: str | None = None,
+) -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
     if "a" in phases:
-        for protocol in _PHASE_A_PROTOCOLS:
+        protocols = (
+            tuple(p.strip() for p in simple_protocols.split(",") if p.strip())
+            if simple_protocols
+            else _PHASE_A_PROTOCOLS
+        )
+        for protocol in protocols:
             specs.append({"agent": "simple", "protocol": protocol})
     if "b" in phases:
         requested = [t.strip() for t in focus_tiers.split(",") if t.strip()]
@@ -180,6 +219,7 @@ def _build_cmd(
     limit: int | None,
     hf_revision: str | None,
     resume: bool,
+    pdfs_root: Path | None = None,
 ) -> list[str]:
     cmd: list[str] = [
         sys.executable,
@@ -193,6 +233,8 @@ def _build_cmd(
         "--staging-dir",
         str(staging_dir),
     ]
+    if pdfs_root is not None:
+        cmd += ["--pdfs-root", str(pdfs_root)]
     if limit is not None:
         cmd += ["--limit", str(limit)]
     if hf_revision:

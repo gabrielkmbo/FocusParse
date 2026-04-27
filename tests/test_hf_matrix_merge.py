@@ -221,9 +221,28 @@ def test_merge_cell_focus_with_profile_nests_under_labeled_group(matrix_mod):
 
 def test_build_specs_phase_a_only(matrix_mod):
     specs = matrix_mod._build_specs(phases=["a"], focus_tiers="balanced")
-    assert [s["protocol"] for s in specs] == ["full_doc", "oracle_page", "oracle_crop"]
+    # Default Phase A now covers parser-bench's 5 protocols + our `full_doc`.
+    expected = [
+        "full_doc",
+        "oracle_page",
+        "oracle_crop",
+        "tiled_2up",
+        "tiled_4up",
+        "tiled_8up",
+    ]
+    assert [s["protocol"] for s in specs] == expected
     assert all(s["agent"] == "simple" for s in specs)
     assert all("tier_profile" not in s for s in specs)
+
+
+def test_build_specs_phase_a_with_subset_protocols(matrix_mod):
+    """`--simple-protocols` subsets Phase A to a comma-separated list."""
+    specs = matrix_mod._build_specs(
+        phases=["a"],
+        focus_tiers="balanced",
+        simple_protocols="oracle_crop,tiled_4up",
+    )
+    assert [s["protocol"] for s in specs] == ["oracle_crop", "tiled_4up"]
 
 
 def test_build_specs_phase_b_expands_focus_tiers(matrix_mod):
@@ -236,8 +255,11 @@ def test_build_specs_phase_b_expands_focus_tiers(matrix_mod):
 
 def test_build_specs_phase_a_and_b(matrix_mod):
     specs = matrix_mod._build_specs(phases=["a", "b"], focus_tiers="balanced")
-    assert len(specs) == 4
-    assert [s["agent"] for s in specs] == ["simple", "simple", "simple", "focus"]
+    # Default phase A = 6 simple specs + phase B balanced = 1 focus.
+    assert len(specs) == 7
+    agents = [s["agent"] for s in specs]
+    assert agents.count("simple") == 6
+    assert agents.count("focus") == 1
 
 
 def test_build_specs_rejects_unknown_tier_profile(matrix_mod):
