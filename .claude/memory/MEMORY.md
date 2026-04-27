@@ -79,6 +79,12 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-04-27 — Phase 2 SOTA-leverage plan + page-score bug surfaced
+
+Real-document smoke (loaded `dat-Arm_EE382N_4-0001` from HF parser-bench, pulled the source PDF from `llama-nfs:.../raw/datasheets/`) confirmed all 7 stages fire end-to-end with real LLM/HF/tool calls. Surfaced a real bug: when sqlite FTS5's BM25 returns 0.0 for a single-document index match, `pc.score=0.0` propagates through `localizer.py` (`region.score = pc.score * det.score`) zeroing every region's rank, killing the inspector's evidence-type boost.
+
+User shared a 12-item SOTA-leverage list (DocLens / AgenticOCR / FinRAGBench-V inspired). Categorized in `plans/2026-04-27-phase2-sota-leverage.md` + `.claude/memory/project_roadmap.md` (mirror at user-level). Phase 2 tail = (1) page-score fix → (2) **stage-level metrics + diff_runs harness — pulled forward from Phase 4 per user directive** → (3) verifier→retry loop → (4) region reranker → (5) evidence-graph expansion. Items 3-5 don't ship without a positive delta on the metric they were supposed to improve. Phase 3 (multi-scale packets, run_python workbench, chart/table specialists) and Phase 4+ (page navigator visual recall, answer sampling, unanswerable protocol, learned policy, hard-negative mining) remain in the roadmap.
+
 ### 2026-04-24 — sub-phase 2h: graph-aware expand_context
 
 Replaced the passthrough expander with real neighbor attachment. For each packet, finds annotation-type regions (caption/footnote/section_header/title/page-header/page-footer) on the same page that overlap a padded bbox (8% default pad), ranks by vertical distance to packet center + score, caps at 4 per packet. Crops each via `inspect_region(mode='image')` and stamps `linked_crop_refs` / `linked_neighbor_types` on the packet. `expand_context:nN` tag appended to `provenance.args_hash`. Passthrough when `regions` or `pdf_path` is None — legacy one-arg shape still works. Tests: `tests/test_expander.py` (14). Suite 283. All three focus-stage skeletons (localize / inspect / expand_context) are now real.
