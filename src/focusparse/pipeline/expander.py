@@ -31,6 +31,11 @@ from pathlib import Path
 
 from focusparse.evidence.packet import EvidencePacket, PacketProvenance
 from focusparse.pipeline.events import EvidenceEvent, RegionCandidate, RegionsEvent
+from focusparse.pipeline.evidence_graph import (
+    extract_figure_class,
+    find_graph_neighbors,
+    has_graph_entry,
+)
 from focusparse.tools.inspect_region import InspectRegionInput, inspect_region
 
 logger = logging.getLogger(__name__)
@@ -97,19 +102,43 @@ async def expand_context(
     new_packets: list[EvidencePacket] = []
     for packet in evidence.packets:
         candidates_on_page = regions_by_page.get(packet.page, [])
-        neighbors = _pick_neighbors(
-            packet,
-            candidates_on_page,
-            max_n=max_neighbors_per_packet,
-            pad=adjacency_pad,
-        )
-        if not neighbors:
+        # Find the matching RegionCandidate so we can read figure_class +
+        # expansion_hints (populated by item 4's reranker).
+        primary_region = _match_primary_region(packet, candidates_on_page)
+
+        # Try graph walker first when the primary's region_type has a
+        # typed entry; falls back to spatial-overlap when the graph
+        # doesn't cover this type.
+        figure_class = extract_figure_class(primary_region) if primary_region else None
+        graph_matches: list[tuple[RegionCandidate, str]] = []
+        if has_graph_entry(packet.region_type, figure_class):
+            hints = primary_region.expansion_hints if primary_region else None
+            graph_matches = find_graph_neighbors(
+                primary_region or _synth_primary_from_packet(packet),
+                candidates_on_page,
+                expansion_hints=hints,
+            )[:max_neighbors_per_packet]
+
+        if graph_matches:
+            neighbors_with_role: list[tuple[RegionCandidate, str]] = list(graph_matches)
+        else:
+            # Fallback: original spatial-overlap heuristic for unknown
+            # primary types or when the graph found nothing.
+            spatial = _pick_neighbors(
+                packet,
+                candidates_on_page,
+                max_n=max_neighbors_per_packet,
+                pad=adjacency_pad,
+            )
+            neighbors_with_role = [(n, (n.region_type or "").lower() or "unknown") for n in spatial]
+
+        if not neighbors_with_role:
             new_packets.append(packet)
             continue
 
         linked_refs: list[str] = []
         linked_types: list[str] = []
-        for neighbor in neighbors:
+        for neighbor, role in neighbors_with_role:
             crop_ref = await _crop_neighbor(
                 neighbor,
                 pdf_path=pdf_path,
@@ -118,7 +147,10 @@ async def expand_context(
             if crop_ref is None:
                 continue
             linked_refs.append(crop_ref)
-            linked_types.append((neighbor.region_type or "").lower() or "unknown")
+            # Use the graph's semantic role (caption / title / footnote /
+            # legend / axis) when present; falls back to the raw region_type
+            # for spatial-heuristic matches.
+            linked_types.append(role)
 
         if not linked_refs:
             new_packets.append(packet)
@@ -212,6 +244,36 @@ def _bbox_equal(
     tol: float = 1e-6,
 ) -> bool:
     return all(abs(ai - bi) < tol for ai, bi in zip(a, b, strict=False))
+
+
+def _match_primary_region(
+    packet: EvidencePacket,
+    candidates: list[RegionCandidate],
+) -> RegionCandidate | None:
+    """Find the RegionCandidate the packet was built from.
+
+    Match by (page, bbox) since the inspector preserves both. Returns
+    None when no exact match — the graph walker then synthesizes a
+    minimal primary record from the packet alone (no expansion_hints,
+    no figure_class).
+    """
+    for r in candidates:
+        if r.page == packet.page and _bbox_equal(r.bbox_norm, packet.bbox_norm):
+            return r
+    return None
+
+
+def _synth_primary_from_packet(packet: EvidencePacket) -> RegionCandidate:
+    """Build a minimal RegionCandidate from a packet when the original
+    region wasn't found in the candidates list (e.g. the inspector
+    synthesized a fallback packet without a backing detection)."""
+    return RegionCandidate(
+        region_id=f"synth_{packet.packet_id}",
+        page=packet.page,
+        bbox_norm=packet.bbox_norm,
+        region_type=packet.region_type,
+        score=float(packet.confidence),
+    )
 
 
 # ---------------------------------------------------------------------------
