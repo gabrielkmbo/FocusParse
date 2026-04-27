@@ -79,6 +79,37 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-04-27 — Phase 2 item 3 default reverted: n=30 A/B says loop hurts
+
+The plan's hard rule (`plans/2026-04-27-phase2-sota-leverage.md:269`) fired: the verifier→retry loop default flipped from `max_retries=2` back to `0` after a real validation A/B showed it hurts more than it helps. Run pair: `results/hf/ab-baseline-noloop/` (n=30, max_retries=0) vs `results/hf/ab-with-loop/` (n=30, max_retries=2), diffed via `scripts/diff_runs.py`. Headline regressions:
+
+```
+bbox_iou_mean             0.716 → 0.641   ↓bad
+region_recall             0.689 → 0.609   ↓bad
+region_precision          0.781 → 0.625   ↓bad
+verifier_caught_unsupp.   0.800 → 0.733   ↓bad
+loop.retry_helped_rate      —   → 0.091   (only 9% of retries helped)
+efficiency.answer.tokens  5979  → 13,300  (+123% cost)
+answer_correct            0.0   → 0.0     (both 0% — strict scoring vs VLM prose)
+```
+
+Diagnosis: `retry_localization` lowers `confidence_threshold` (× 0.7), surfacing noisier RT-DETRv2 boxes — dilutes top-N signal-to-noise rather than finding better regions. Wrong primitive. Items 4 (query-conditioned reranker) and 5 (evidence-graph expansion) attack the same target more surgically; flip the default back only after one shows a measurable improvement on n≥30.
+
+Also fixed a latent bug surfaced by the default change: the old `while retries_used < self.max_retries` skipped action classification entirely when `max_retries=0`, marking every example "exhausted" even when the initial verdict was "accept". Restructured to `while True` with explicit budget check after accept/abstain branches.
+
+Loop wiring stays in place — all 8 path tests pass, infrastructure correct. Just default-off until proven.
+
+Baseline aggregate (n=30, the new reference for items 4+):
+
+- `page_recall@1=1.000` (router perfect — though staging only stages gold pages, so this is trivial; full-doc staging will stress this)
+- `region_recall=0.689`, `region_precision=0.781`, `bbox_iou_mean=0.716` — strong localization
+- `lazy_full_page_rate=0.067` — 7% lazy crops
+- `verifier_caught_unsupported_rate=0.800` — verifier correctly flags 80% of wrong answers
+- `answer_correct=0.000` — VLM prose ("About 50%") doesn't pass strict numeric tolerance against gold ("40%")
+- 7 PDFs sourced from `llama-nfs:.../raw/{datasheets,finance}/` via `scripts/source_pdfs_from_nfs.py` (1 finance PDF — `jpm_gtm_us_daily.pdf` — wasn't on NFS; those 2 examples skeleton-fall-back gracefully)
+
+The takeaway for items 4+: the localization stack is healthy and the verifier knows when answers are wrong. The bottleneck is downstream-of-evidence (VLM answer extraction under strict scoring). Item 4's reranker should improve `region_precision` / `lazy_full_page_rate` by pruning the top-N to question-relevant boxes; item 5's evidence graph should improve `cited_evidence_completeness` by attaching the right neighbor types.
+
 ### 2026-04-27 — Phase 2 item 3 shipped: verifier→retry control-flow loop
 
 The verifier finally acts as a controller, not just a judge. `FocusWorkflow.run` consumes `verdict.next_action` and re-enters the appropriate stages: `retry_localization` re-runs localize + inspect + expand + answer + verify with a tightened `confidence_threshold` (0.7× per retry); `expand_context` re-runs only expand + answer + verify with a widened `adjacency_pad` (1.5× per retry, capped at 0.30); `escalate_reasoner` re-runs only answer + verify with the verifier's reason as an `escalation_hint` to the reasoner; `abstain` replaces the answer with "Unanswerable" + the verifier's reason as `reasoning_summary`. `accept` is the only happy-path terminator; `max_retries=2` default cap (`max_retries=0` disables the loop, preserving pre-loop behavior).
