@@ -34,16 +34,33 @@ async def answer_from_evidence(
     evidence: EvidenceEvent,
     *,
     backend_client: ModelClient,
+    escalation_hint: str | None = None,
 ) -> tuple[AnswerEvent, ModelResponse]:
     """One VLM call over the packet images. Returns parsed answer + raw response.
 
     The raw `ModelResponse` comes back alongside the `AnswerEvent` so the
     workflow can attribute tokens and cost to the reasoner step.
+
+    `escalation_hint`, when provided, is prepended to the prompt as the
+    verifier's reason for rejecting the previous answer. This is how the
+    `verifier→retry→escalate_reasoner` control-flow loop tells the
+    reasoner "your last try was unsupported; here's why" without changing
+    the evidence packets. Pass it from the workflow's retry handler; pass
+    None for first-attempt and routine answer calls.
     """
     packet_list = "\n".join(
         f"- {p.packet_id}: page {p.page}, bbox {p.bbox_norm}" for p in evidence.packets
     )
+    hint_block = ""
+    if escalation_hint:
+        hint_block = (
+            "Your previous answer was rejected by the verifier with this reason:\n"
+            f"{escalation_hint}\n\n"
+            "Re-read the evidence packets carefully and produce an answer that "
+            "addresses the verifier's concern.\n\n"
+        )
     prompt = (
+        f"{hint_block}"
         f"Question: {question.question}\n\n"
         f"Available evidence packets:\n{packet_list}\n\n"
         "Answer using only these packets."
