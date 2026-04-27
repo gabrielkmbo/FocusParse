@@ -110,16 +110,19 @@ async def test_propose_regions_emits_one_candidate_per_detected_box(tmp_path, mo
     # Normalization: (100, 200, 500, 1000) / (1000, 2000) -> (0.1, 0.1, 0.5, 0.5)
     assert r1.bbox_norm == (0.1, 0.1, 0.5, 0.5)
     assert r1.region_type == "text"
-    # Score blends page (0.8) * detector (0.9) = 0.72
-    assert r1.score == pytest.approx(0.72)
-    assert r1.supporting_signals == ["layout_detect"]
+    # Score is detector-only (decoupled from page score on 2026-04-27).
+    assert r1.score == pytest.approx(0.9)
+    assert "layout_detect" in r1.supporting_signals
+    # Page-routing reason_code carried over for trace attribution.
+    assert "page_routing=layout_prior" in r1.supporting_signals
 
     # Second box spans the full width but only the bottom half.
     assert r2.bbox_norm == (0.0, 0.6, 1.0, 1.0)
     assert r2.region_type == "picture"
-    assert r2.score == pytest.approx(0.8 * 0.7)
+    assert r2.score == pytest.approx(0.7)
     assert "layout_detect" in r2.supporting_signals
     assert "figure_class=bar_chart" in r2.supporting_signals
+    assert "page_routing=layout_prior" in r2.supporting_signals
 
     # Dimensions get piped through from the on-disk PNG, not guessed.
     assert calls[0]["image_width"] == 1000
@@ -313,8 +316,10 @@ async def test_propose_regions_is_per_page_independent(tmp_path, monkeypatch):
     assert len(regions.candidates) == 2
     r1 = next(r for r in regions.candidates if r.page == 1)
     r2 = next(r for r in regions.candidates if r.page == 2)
-    assert r1.supporting_signals == ["layout_detect"]
+    assert "layout_detect" in r1.supporting_signals
+    assert "page_routing=layout_prior" in r1.supporting_signals
     assert "layout_endpoint_down" in r2.supporting_signals
+    assert "page_routing=layout_prior" in r2.supporting_signals
 
 
 async def test_propose_regions_legacy_shape_with_no_images_by_page(monkeypatch):
@@ -333,3 +338,71 @@ async def test_propose_regions_legacy_shape_with_no_images_by_page(monkeypatch):
     assert [r.page for r in regions.candidates] == [5, 6]
     assert all(r.bbox_norm == (0.0, 0.0, 1.0, 1.0) for r in regions.candidates)
     assert all("skeleton_full_page" in r.supporting_signals for r in regions.candidates)
+
+
+# ---------------------------------------------------------------------------
+# Decoupled scoring (regression guard for the 2026-04-27 page-score bug)
+# ---------------------------------------------------------------------------
+
+
+async def test_propose_regions_score_independent_of_page_score(tmp_path, monkeypatch):
+    """Page score 0.0 (sqlite FTS5 single-doc match) used to zero every
+    region. Now `region.score == det.score` regardless of `pc.score`.
+    """
+    png_path = _write_tiny_png(tmp_path / "p1.png", width=1000, height=1000)
+
+    async def _fake_detect(png_bytes, *, page, image_width, image_height, **kwargs):
+        return LayoutDetectionOutput(
+            page=page,
+            width=image_width,
+            height=image_height,
+            boxes=[
+                DetectedBox(label="picture", bbox=(0.0, 0.0, 500.0, 500.0), score=0.85),
+                DetectedBox(label="text", bbox=(500.0, 500.0, 1000.0, 1000.0), score=0.6),
+            ],
+        )
+
+    monkeypatch.setattr("focusparse.pipeline.localizer.detect_layout", _fake_detect)
+
+    # The smoke-bug scenario: route_pages emitted score=0.0 but reason=text_fts_match.
+    pages_event = PagesEvent(
+        candidates=[PageCandidate(page=1, score=0.0, reason_code="text_fts_match")]
+    )
+
+    regions = await propose_regions(
+        _question(),
+        _plan(),
+        pages_event,
+        images_by_page={1: png_path},
+    )
+    assert len(regions.candidates) == 2
+    scores = sorted(r.score for r in regions.candidates)
+    # Detector scores survive intact — no longer zeroed by pc.score=0.
+    assert scores == pytest.approx([0.6, 0.85])
+    # Routing signal still recorded for trace attribution.
+    assert all("page_routing=text_fts_match" in r.supporting_signals for r in regions.candidates)
+
+
+async def test_skeleton_region_records_page_routing_signal(tmp_path, monkeypatch):
+    """The fallback path must also stamp the page-routing reason code so traces
+    can distinguish a stub from a layout-down match."""
+    png_path = _write_tiny_png(tmp_path / "p1.png")
+
+    async def _fake_detect(png_bytes, **kwargs):
+        raise LayoutEndpointUnavailable("simulated outage")
+
+    monkeypatch.setattr("focusparse.pipeline.localizer.detect_layout", _fake_detect)
+
+    pages_event = PagesEvent(
+        candidates=[PageCandidate(page=1, score=0.0, reason_code="text_fts_no_matches")]
+    )
+    regions = await propose_regions(
+        _question(),
+        _plan(),
+        pages_event,
+        images_by_page={1: png_path},
+    )
+    r = regions.candidates[0]
+    assert "skeleton_full_page" in r.supporting_signals
+    assert "layout_endpoint_down" in r.supporting_signals
+    assert "page_routing=text_fts_no_matches" in r.supporting_signals
