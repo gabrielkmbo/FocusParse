@@ -79,6 +79,10 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-04-27 — Phase 2 item 1 shipped: decoupled localizer scoring
+
+`localizer.py:172` no longer multiplies `pc.score * det.score`. The router answers "which pages?" and the localizer answers "which boxes?"; mixing them via multiplication zeroed every region whenever sqlite FTS5 BM25 returned 0.0 (the single-doc-match degenerate case the smoke surfaced). `region.score = float(det.score)` directly. Page-routing signal (`page_routing=<reason_code>`) added to `supporting_signals` so traces still attribute regions to their routing source; same stamp on the skeleton fallback path. Verified on the smoke: 14 regions on page 50 now score 0.538-0.969 (was all 0.000), the inspector evidence-type boost can finally do its job. Tests: 2 new regression tests in `tests/test_localizer.py`. Suite 285. Item 2 (stage-level metrics + diff_runs.py harness) is the gate for items 3-5 per `plans/2026-04-27-phase2-sota-leverage.md`.
+
 ### 2026-04-27 — Phase 2 SOTA-leverage plan + page-score bug surfaced
 
 Real-document smoke (loaded `dat-Arm_EE382N_4-0001` from HF parser-bench, pulled the source PDF from `llama-nfs:.../raw/datasheets/`) confirmed all 7 stages fire end-to-end with real LLM/HF/tool calls. Surfaced a real bug: when sqlite FTS5's BM25 returns 0.0 for a single-document index match, `pc.score=0.0` propagates through `localizer.py` (`region.score = pc.score * det.score`) zeroing every region's rank, killing the inspector's evidence-type boost.
