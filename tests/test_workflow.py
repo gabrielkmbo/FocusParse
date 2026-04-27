@@ -235,13 +235,16 @@ async def test_focus_workflow_runs_end_to_end(tmp_path, parser_bench_submodule_p
     assert result.citations[0]["page"] == 3
     assert result.citations[0]["bbox"] == [0.0, 0.0, 1.0, 1.0]
 
-    # Seven recorded steps, one per @step (plan, route_pages, localize,
-    # inspect, expand_context, answer, verify).
+    # Eight recorded steps, one per @step. `rerank` was added in item 4
+    # (Phase 2 SOTA-leverage tail) between `localize` and `inspect`; it
+    # short-circuits to "skeleton" tier when no `localizer_rerank` client
+    # is wired (the case here — no tier_router).
     stages = [step.stage for step in result.trace.steps]
     assert stages == [
         "plan",
         "route_pages",
         "localize",
+        "rerank",
         "inspect",
         "expand_context",
         "answer",
@@ -306,7 +309,7 @@ async def test_focus_workflow_handles_non_json_reasoner_response(
     assert "5.5" in result.answer
     assert result.citations == []
     # But the workflow still records all 7 steps.
-    assert len(result.trace.steps) == 7
+    assert len(result.trace.steps) == 8  # 7 stages + rerank (item 4)
 
 
 async def test_focus_workflow_survives_zero_pages(tmp_path, parser_bench_submodule_present):
@@ -322,7 +325,7 @@ async def test_focus_workflow_survives_zero_pages(tmp_path, parser_bench_submodu
     assert result.answer == "Unanswerable"
     assert result.citations == []
     # Still 7 steps.
-    assert len(result.trace.steps) == 7
+    assert len(result.trace.steps) == 8  # 7 stages + rerank (item 4)
     # Reasoner got called with zero images (packet list empty).
     assert len(client.calls) == 1
     assert client.calls[0]["n_images"] == 0
@@ -372,9 +375,11 @@ async def test_focus_workflow_routes_planner_through_tier_router(
     ]
     result = await workflow.run(example, images, protocol="focus")
 
-    # Router was consulted for every role-scoped stage (planner + verifier).
-    # Verifier returns None → verify step stays deterministic; planner wins.
-    assert tier_router.calls == ["planner", "verifier"]
+    # Router was consulted for every role-scoped stage (planner + rerank +
+    # verifier — `rerank` was added in item 4 and asks for `localizer_rerank`).
+    # Verifier client + rerank client both return None here → those stages
+    # stay deterministic; only the planner routes through to a real client.
+    assert tier_router.calls == ["planner", "localizer_rerank", "verifier"]
     assert len(planner_client.calls) == 1
     plan_steps = [s for s in result.trace.steps if s.stage == "plan"]
     assert len(plan_steps) == 1
@@ -919,3 +924,105 @@ def _stage_counts(result) -> dict[str, int]:
     for s in result.trace.steps:
         counts[s.stage] = counts.get(s.stage, 0) + 1
     return counts
+
+
+# ---------------------------------------------------------------------------
+# Region reranker wiring (Phase 2 item 4)
+# ---------------------------------------------------------------------------
+
+
+async def test_focus_workflow_routes_rerank_through_tier_router(
+    tmp_path, parser_bench_submodule_present
+):
+    """When `localizer_rerank` is wired through the tier_router, the rerank
+    step records its tokens + tier, and the LLM is called once between
+    localize and inspect."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    # Skeleton inspector emits one packet per region (= one per regions
+    # candidate). The rerank LLM scores them; the wiring just needs to
+    # confirm the call happened.
+    rerank_client = _FakeClient(
+        '{"regions": [{"region_id": "r0_p3", "relevance": 0.85, "needed_for": "primary"}]}',
+        tokens_in=180,
+        tokens_out=50,
+    )
+    tier_router = _FakeTierRouter(localizer_rerank=rerank_client)
+    workflow = FocusWorkflow(backend_client=reasoner, tier_router=tier_router)
+    images = [tmp_path / "datasheet-A_page_0003_300dpi.png"]
+
+    result = await workflow.run(_make_example(), images, protocol="focus")
+
+    # Tier router was asked for localizer_rerank (and other roles).
+    assert "localizer_rerank" in tier_router.calls
+    # Rerank client was called exactly once with the structured prompt.
+    assert len(rerank_client.calls) == 1
+    assert "Question: What is the max supply voltage?" in rerank_client.calls[0]["prompt"]
+
+    # Trajectory has one rerank step in mid-tier mode.
+    rerank_steps = [s for s in result.trace.steps if s.stage == "rerank"]
+    assert len(rerank_steps) == 1
+    step = rerank_steps[0]
+    assert step.action == "llm_call"
+    assert step.tier == "mid"
+    assert step.tokens_in == 180
+    assert step.tokens_out == 50
+
+
+async def test_focus_workflow_rerank_step_is_skeleton_when_no_router(
+    tmp_path, parser_bench_submodule_present
+):
+    """Without a tier_router (or without a localizer_rerank client), the
+    rerank step still appears in the trajectory but at tier=skeleton with
+    zero tokens — keeps the step shape stable for trace consumers."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    workflow = FocusWorkflow(backend_client=client)  # no tier_router
+    images = [tmp_path / "datasheet-A_page_0003_300dpi.png"]
+    result = await workflow.run(_make_example(), images, protocol="focus")
+
+    rerank_steps = [s for s in result.trace.steps if s.stage == "rerank"]
+    assert len(rerank_steps) == 1
+    step = rerank_steps[0]
+    assert step.tier == "skeleton"
+    assert step.action == "deterministic"
+    assert step.tokens_in == 0
+
+
+async def test_focus_workflow_rerank_runs_on_localization_retry(
+    tmp_path, parser_bench_submodule_present
+):
+    """When `retry_localization` re-runs localize, the rerank should also
+    re-fire — the new region set deserves the same query-conditioned
+    scoring as the initial pass."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    rerank_client = _FakeClient(
+        '{"regions": [{"region_id": "r0_p3", "relevance": 0.5, "needed_for": "primary"}]}'
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(supported=False, next_action="retry_localization"),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(localizer_rerank=rerank_client, verifier=verifier),
+        max_retries=2,
+    )
+    images = [tmp_path / "datasheet-A_page_0003_300dpi.png"]
+    result = await workflow.run(_make_example(), images, protocol="focus")
+
+    stage_counts = _stage_counts(result)
+    # Initial pass + retry → localize + rerank both run twice.
+    assert stage_counts["localize"] == 2
+    assert stage_counts["rerank"] == 2
+    # Rerank LLM was called twice (once per localize pass).
+    assert len(rerank_client.calls) == 2
