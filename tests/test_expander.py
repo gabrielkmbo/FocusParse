@@ -235,6 +235,7 @@ async def test_caps_at_max_neighbors_per_packet(tmp_path, monkeypatch):
         regions=regions,
         pdf_path=tmp_path / "doc.pdf",
         max_neighbors_per_packet=2,
+        use_evidence_graph=True,  # graph walker exercised explicitly
     )
     assert len(out.packets[0].linked_crop_refs) == 2
 
@@ -271,6 +272,7 @@ async def test_graph_picks_highest_scoring_candidate_per_rule(tmp_path, monkeypa
         regions=regions,
         pdf_path=tmp_path / "doc.pdf",
         max_neighbors_per_packet=1,
+        use_evidence_graph=True,  # opt into the graph walker (default off)
     )
     assert len(out.packets[0].linked_crop_refs) == 1
     # The fake's crop_ref encodes the bbox; the higher-scored caption
@@ -451,6 +453,7 @@ async def test_graph_walker_attaches_typed_role_for_chart_caption(tmp_path, monk
         EvidenceEvent(packets=[figure]),
         regions=regions,
         pdf_path=tmp_path / "doc.pdf",
+        use_evidence_graph=True,  # opt into graph walker (default off)
     )
     # Graph rule says caption-below → role="caption", not the raw type.
     assert out.packets[0].linked_neighbor_types == ["caption"]
@@ -484,6 +487,7 @@ async def test_graph_walker_falls_back_to_spatial_for_unknown_primary(tmp_path, 
         EvidenceEvent(packets=[primary]),
         regions=regions,
         pdf_path=tmp_path / "doc.pdf",
+        use_evidence_graph=True,  # graph still falls through for unknown primary
     )
     # Spatial fallback uses raw region_type, not a graph role.
     assert out.packets[0].linked_neighbor_types == ["caption"]
@@ -533,6 +537,7 @@ async def test_graph_walker_uses_expansion_hints_from_reranker(tmp_path, monkeyp
         EvidenceEvent(packets=[figure]),
         regions=regions,
         pdf_path=tmp_path / "doc.pdf",
+        use_evidence_graph=True,  # opt into graph walker (default off)
     )
     types = out.packets[0].linked_neighbor_types
     # Both a caption and a title attach (one per rule).

@@ -69,6 +69,7 @@ async def expand_context(
     crop_cache_dir: Path | None = None,
     max_neighbors_per_packet: int = _DEFAULT_MAX_NEIGHBORS_PER_PACKET,
     adjacency_pad: float = _DEFAULT_ADJACENCY_PAD,
+    use_evidence_graph: bool = False,
 ) -> EvidenceEvent:
     """Attach annotation neighbors to each packet, or pass through unchanged.
 
@@ -106,12 +107,19 @@ async def expand_context(
         # expansion_hints (populated by item 4's reranker).
         primary_region = _match_primary_region(packet, candidates_on_page)
 
-        # Try graph walker first when the primary's region_type has a
-        # typed entry; falls back to spatial-overlap when the graph
-        # doesn't cover this type.
-        figure_class = extract_figure_class(primary_region) if primary_region else None
+        # Graph walker is opt-in (default off) since the n=30 A/B on
+        # 2026-04-27 showed it regressed region_recall (-0.113),
+        # bbox_iou (-0.056), and region_precision (-0.046) vs the
+        # spatial-overlap heuristic. Wiring + tests stay so we can
+        # opt in once the graph rules are tuned (likely culprits:
+        # too-strict directional constraints, too-narrow max_distance).
+        figure_class = (
+            extract_figure_class(primary_region)
+            if (use_evidence_graph and primary_region)
+            else None
+        )
         graph_matches: list[tuple[RegionCandidate, str]] = []
-        if has_graph_entry(packet.region_type, figure_class):
+        if use_evidence_graph and has_graph_entry(packet.region_type, figure_class):
             hints = primary_region.expansion_hints if primary_region else None
             graph_matches = find_graph_neighbors(
                 primary_region or _synth_primary_from_packet(packet),
