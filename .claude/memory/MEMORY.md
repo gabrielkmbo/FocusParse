@@ -79,6 +79,20 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-04-27 — Phase 2 item 2 shipped: stage-level metrics + diff_runs
+
+Pulled forward from Phase 4 per the user directive — items 3-5 don't ship without measurable A/B deltas, so metrics are the gate. New `src/focusparse/eval/stage_metrics.py` with pure-function `compute_stage_metrics(record, example, image_dims_by_page) -> StageMetrics` covering: routing (page_recall@{1,3,5}, page_precision@5, pages_inspected), localization (region_recall ≥50% coverage, region_precision, bbox_iou_max, lazy_full_page_rate >60%, duplicate_crop_rate IoU>0.7), evidence (cited_evidence_completeness + expansion_useful_rate left None — richer schema lands with item 5), reasoning (answer_correct, is_abstention keyword detect, is_correct_abstention, verifier_caught_unsupported), loop (loop_retries / loop_terminated / loop_retry_helped — defaults to "no_loop" baseline pre-item-3), per-stage efficiency (tokens / usd / latency / tool_calls, summed across multi-step instances).
+
+`aggregate_stage_metrics(list[StageMetrics]) -> AggregateStageMetrics` does mean-of-floats, rate-of-bools, sum-mean-of-efficiency, distribution-of-loop-terminated. None values excluded from means.
+
+Harness wiring: `_score_and_record` flattens `result.trace.steps` to a plain dict, copies telemetry, and stuffs `compute_stage_metrics(...)` into `record["stages"]`. New `_aggregate_stages` rehydrates per-example blocks and writes `stage_aggregate` to `run.json` + the harness return dict. Legacy cached predictions (no `stages` field) fall through to default StageMetrics so resume runs don't crash.
+
+`scripts/diff_runs.py` A/B harness: reads two run.json files (or wrappers), prints stage-by-stage deltas with direction labels (↑good / ↓bad / ↑bad / ↓good for lower-is-better metrics, tradeoff for efficiency / retries). `--format json` for CI piping; legacy fallback when `stage_aggregate` missing. Reference baseline captured at `results/hf/baseline-after-item2/focusparse_focus_focus_default_7d4b816d/run.json` (1 example, `dat-Arm_EE382N_4-0001`, with PDF). Item 3 diffs against this.
+
+Tests: 32 new in `tests/test_stage_metrics.py` (every metric + aggregate), 12 in `tests/test_diff_runs.py` (helpers + CLI subprocess), 3 in `tests/test_focus_harness.py` (per-example stages + run.json stage_aggregate + legacy resume). Suite: 285 → 332 passed.
+
+Real-baseline observation: `region_recall=1.0`, `region_precision=1.0`, `lazy_full_page_rate=0.0`, `verifier_caught_unsupported_rate=1.0`, `bbox_iou_mean=0.443` (cited region wider than gold), `answer_correct=0.0` (VLM still misreads the percentage). Localization ceiling for this example is hit; downstream items 3-5 will have to prove they help on accuracy / tokens / loop-termination distribution rather than localization (which is already maxed for this example).
+
 ### 2026-04-27 — Phase 2 item 1 shipped: decoupled localizer scoring
 
 `localizer.py:172` no longer multiplies `pc.score * det.score`. The router answers "which pages?" and the localizer answers "which boxes?"; mixing them via multiplication zeroed every region whenever sqlite FTS5 BM25 returned 0.0 (the single-doc-match degenerate case the smoke surfaced). `region.score = float(det.score)` directly. Page-routing signal (`page_routing=<reason_code>`) added to `supporting_signals` so traces still attribute regions to their routing source; same stamp on the skeleton fallback path. Verified on the smoke: 14 regions on page 50 now score 0.538-0.969 (was all 0.000), the inspector evidence-type boost can finally do its job. Tests: 2 new regression tests in `tests/test_localizer.py`. Suite 285. Item 2 (stage-level metrics + diff_runs.py harness) is the gate for items 3-5 per `plans/2026-04-27-phase2-sota-leverage.md`.
