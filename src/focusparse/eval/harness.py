@@ -31,6 +31,7 @@ from focusparse.eval.scoring import (
     score_answer,
     score_evidence_reward,
 )
+from focusparse.eval.stage_metrics import StageMetrics, aggregate_stage_metrics
 from focusparse.models.base import ModelClient
 from focusparse.pipeline.workflow import FocusWorkflow, SimpleBaselineAgent, WorkflowResult
 
@@ -108,6 +109,7 @@ async def run_simple_eval(
         per_example.append(record)
 
     aggregated: AggregateMetrics = aggregate(per_example)
+    stage_aggregate = _aggregate_stages(per_example)
 
     run_manifest: dict[str, Any] = {
         "agent": "simple",
@@ -119,6 +121,7 @@ async def run_simple_eval(
         "started_at": started_at,
         "ended_at": time.time(),
         "aggregate": aggregated.model_dump(),
+        "stage_aggregate": stage_aggregate.model_dump(),
         "env_snapshot": _env_snapshot(),
     }
     (output_dir / "run.json").write_text(json.dumps(run_manifest, default=str, indent=2))
@@ -129,6 +132,7 @@ async def run_simple_eval(
     return {
         "manifest": run_manifest,
         "aggregate": aggregated,
+        "stage_aggregate": stage_aggregate,
         "per_example": per_example,
         "output_dir": str(output_dir),
     }
@@ -225,6 +229,7 @@ async def run_focus_eval(
         per_example.append(record)
 
     aggregated: AggregateMetrics = aggregate(per_example)
+    stage_aggregate = _aggregate_stages(per_example)
 
     run_manifest: dict[str, Any] = {
         "agent": "focus",
@@ -236,6 +241,7 @@ async def run_focus_eval(
         "started_at": started_at,
         "ended_at": time.time(),
         "aggregate": aggregated.model_dump(),
+        "stage_aggregate": stage_aggregate.model_dump(),
         "env_snapshot": _env_snapshot(),
     }
     (output_dir / "run.json").write_text(json.dumps(run_manifest, default=str, indent=2))
@@ -246,6 +252,7 @@ async def run_focus_eval(
     return {
         "manifest": run_manifest,
         "aggregate": aggregated,
+        "stage_aggregate": stage_aggregate,
         "per_example": per_example,
         "output_dir": str(output_dir),
     }
@@ -449,7 +456,27 @@ def _score_and_record(
     )
     is_lazy = int(tool_calls == 0 or not predicted_bboxes)
 
-    return {
+    # Trace as a plain dict so the stage-metrics module can read it without
+    # depending on the workflow internals. Stages get summed across multi-
+    # step instances (the verifier-loop case) by `compute_stage_metrics`.
+    trace_dict = {
+        "steps": [
+            {
+                "stage": step.stage,
+                "tier": step.tier,
+                "action": step.action,
+                "tool": step.tool,
+                "args": step.args,
+                "tokens_in": step.tokens_in,
+                "tokens_out": step.tokens_out,
+                "usd": step.usd,
+                "latency_ms": step.latency_ms,
+            }
+            for step in result.trace.steps
+        ]
+    }
+
+    record = {
         "example_id": example.id,
         "protocol": protocol,
         "answer_pred": result.answer,
@@ -466,7 +493,18 @@ def _score_and_record(
         "latency_ms": result.telemetry.get("latency_ms", 0),
         "citations": result.citations,
         "cache_hit": False,
+        "telemetry": dict(result.telemetry or {}),
+        "trace": trace_dict,
     }
+
+    # Stage-level metrics. Pulled forward from Phase 4 (2026-04-27) as the
+    # measurement gate for items 3-5 of the SOTA-leverage plan.
+    from focusparse.eval.stage_metrics import compute_stage_metrics
+
+    stages = compute_stage_metrics(record, example, image_dims_by_page=image_dims_by_page)
+    record["stages"] = stages.model_dump(mode="json")
+
+    return record
 
 
 def _error_record(example: BenchmarkExample, *, protocol: str, error: str) -> dict[str, Any]:
@@ -489,6 +527,30 @@ def _error_record(example: BenchmarkExample, *, protocol: str, error: str) -> di
         "citations": [],
         "cache_hit": False,
     }
+
+
+def _aggregate_stages(per_example: list[dict[str, Any]]):
+    """Aggregate the per-example `stages` blocks into one bundle.
+
+    Each per-example record carries a `stages` dict (set by
+    `_score_and_record`). We rehydrate them as `StageMetrics` so the
+    aggregator can do per-field means without re-typing every key.
+    Records that pre-date the `stages` field (older cached predictions)
+    fall through to the default `StageMetrics()` so resume runs don't
+    crash mid-aggregation — the aggregate just won't include them.
+    """
+    bundles: list[StageMetrics] = []
+    for r in per_example:
+        raw = r.get("stages")
+        if raw is None:
+            bundles.append(StageMetrics())
+            continue
+        try:
+            bundles.append(StageMetrics.model_validate(raw))
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("stage metrics deserialize failed for %s: %s", r.get("example_id"), exc)
+            bundles.append(StageMetrics())
+    return aggregate_stage_metrics(bundles)
 
 
 def _safe_id(example_id: str) -> str:
