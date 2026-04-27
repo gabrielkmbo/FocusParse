@@ -14,6 +14,16 @@ limit across concurrent examples — that is the caller's concern.
 Future sub-phases add OCR token anchors, question-family priors, and a
 cheap-tier LLM rerank for ambiguous pages. For now, the contract is: if
 layout_detect returns N boxes we emit N candidates, ranked by detector score.
+
+Scoring contract (decoupled, 2026-04-27): `RegionCandidate.score` is the
+detector confidence only, NOT a blend of page score × detector score.
+The router and the localizer answer different questions ("which pages?"
+vs "which boxes?") and mixing the two via multiplication zeroes every
+region when the router returns 0.0 — which sqlite FTS5's BM25 does for
+a single-document `text_fts_match`. The page-routing signal is preserved
+in `RegionCandidate.supporting_signals` (`page_routing=<reason_code>`)
+so the inspector / future rerank can re-introduce page weighting on a
+per-question basis.
 """
 
 from __future__ import annotations
@@ -157,7 +167,7 @@ async def _detect_for_page(
             _clamp_unit(x1 / width),
             _clamp_unit(y1 / height),
         )
-        signals = ["layout_detect"]
+        signals = ["layout_detect", f"page_routing={pc.reason_code}"]
         if det.figure_class:
             signals.append(f"figure_class={det.figure_class}")
         regions.append(
@@ -166,10 +176,14 @@ async def _detect_for_page(
                 page=pc.page,
                 bbox_norm=bbox_norm,
                 region_type=det.label or None,
-                # Blend page-level score and detector confidence so downstream
-                # ranking respects both "is this the right page?" and "is this
-                # a confident box?".
-                score=float(pc.score) * float(det.score),
+                # Score is the detector confidence only — decoupled from
+                # `pc.score`. The router's job is "which pages?"; the
+                # localizer's job is "which boxes?". Mixing them via
+                # multiplication zeroed every region whenever the router
+                # returned BM25 0.0 for a single-doc text_fts_match (the
+                # 2026-04-27 smoke bug). The page-routing signal is kept
+                # in `supporting_signals` so traces still show it.
+                score=float(det.score),
                 supporting_signals=signals,
             )
         )
@@ -177,14 +191,25 @@ async def _detect_for_page(
 
 
 def _skeleton_region(pc: PageCandidate, *, signal: str) -> RegionCandidate:
-    """Full-page fallback region when layout detection is unusable."""
+    """Full-page fallback region when layout detection is unusable.
+
+    Score stays at `pc.score`: a skeleton has no detector confidence to
+    score on, so the page-routing signal is the only thing left. The
+    inspector's evidence-type boost compares everything on the same
+    scale, so a low-pc.score skeleton naturally ranks below real
+    detections — which is exactly what we want.
+    """
     return RegionCandidate(
         region_id=f"r0_p{pc.page}",
         page=pc.page,
         bbox_norm=(0.0, 0.0, 1.0, 1.0),
         region_type=None,
         score=pc.score,
-        supporting_signals=["skeleton_full_page", signal],
+        supporting_signals=[
+            "skeleton_full_page",
+            signal,
+            f"page_routing={pc.reason_code}",
+        ],
     )
 
 
