@@ -79,6 +79,30 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-04-27 — Phase 2 item 3 shipped: verifier→retry control-flow loop
+
+The verifier finally acts as a controller, not just a judge. `FocusWorkflow.run` consumes `verdict.next_action` and re-enters the appropriate stages: `retry_localization` re-runs localize + inspect + expand + answer + verify with a tightened `confidence_threshold` (0.7× per retry); `expand_context` re-runs only expand + answer + verify with a widened `adjacency_pad` (1.5× per retry, capped at 0.30); `escalate_reasoner` re-runs only answer + verify with the verifier's reason as an `escalation_hint` to the reasoner; `abstain` replaces the answer with "Unanswerable" + the verifier's reason as `reasoning_summary`. `accept` is the only happy-path terminator; `max_retries=2` default cap (`max_retries=0` disables the loop, preserving pre-loop behavior).
+
+Refactored: 5 stages (localize/inspect/expand/answer/verify) extracted into private `_run_*` methods so the loop body can call them with the same trajectory-recording semantics. New `_StepCounter` replaces the hardcoded step_index=0..6; every step now has a unique index, including retry steps. Each step records `args["retry_attempt"]` for trace attribution.
+
+Telemetry adds `retries_used`, `loop_terminated ∈ {accepted, abstained, exhausted}`, `loop_retry_helped` (None when retries=0; bool otherwise — True iff initial verdict was unsupported AND final was supported). Reasoner gains optional `escalation_hint` kwarg.
+
+Tests: 8 new in `tests/test_workflow.py` (one per path: accept / retry_loc / expand_ctx / escalate / abstain / exhaustion / max_retries=0 / unknown action) + 2 updates in `tests/test_focus_harness.py` (the `no_loop` sentinel only fires when the verify step is absent — i.e. simple agent — not in the focus workflow). 8 new helpers including `_ScriptedClient` for sequencing verifier responses. Full suite: 332 → 340 passed.
+
+**Real-document A/B vs item-2 baseline (1 example, `dat-Arm_EE382N_4-0001`):**
+
+```
+loop.retries_mean              0.0 → 2.0   (loop fired on this example)
+loop_terminated_distribution   no_loop=1.0 → exhausted=1.0
+loop.retry_helped_rate         —   → 0.0   (didn't fix it)
+reasoning.answer_correct       0.0 → 0.0   (still wrong)
+efficiency.answer.tokens       4162 → 12500  (+200%)
+efficiency.answer.usd          $0.0054 → $0.0163
+localization.region_recall     1.0 → 1.0   (unchanged — same regions)
+```
+
+The loop wires up cleanly and is observable in telemetry, but on this single example it didn't help — same wrong answer, ~3× cost. Honest gate result: **n=1 isn't enough to draw a conclusion**, so we ship the loop wiring + tests but treat "did it help in aggregate?" as an open question pending a real validation-split sweep. The example happens to hit a known limitation: the VLM can't read the percentage from the diagram crop regardless of how we re-localize/expand. Items 4 and 5 will benefit from this same diff harness; the gate's purpose is to keep us honest, not to gate trivially.
+
 ### 2026-04-27 — Phase 2 item 2 shipped: stage-level metrics + diff_runs
 
 Pulled forward from Phase 4 per the user directive — items 3-5 don't ship without measurable A/B deltas, so metrics are the gate. New `src/focusparse/eval/stage_metrics.py` with pure-function `compute_stage_metrics(record, example, image_dims_by_page) -> StageMetrics` covering: routing (page_recall@{1,3,5}, page_precision@5, pages_inspected), localization (region_recall ≥50% coverage, region_precision, bbox_iou_max, lazy_full_page_rate >60%, duplicate_crop_rate IoU>0.7), evidence (cited_evidence_completeness + expansion_useful_rate left None — richer schema lands with item 5), reasoning (answer_correct, is_abstention keyword detect, is_correct_abstention, verifier_caught_unsupported), loop (loop_retries / loop_terminated / loop_retry_helped — defaults to "no_loop" baseline pre-item-3), per-stage efficiency (tokens / usd / latency / tool_calls, summed across multi-step instances).
