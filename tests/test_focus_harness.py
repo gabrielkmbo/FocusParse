@@ -373,3 +373,122 @@ def test_resolve_pdf_path_returns_none_when_root_is_none(tmp_path):
         original_bboxes=[],
     )
     assert _resolve_pdf_path(None, example) is None
+
+
+# ---------------------------------------------------------------------------
+# Stage-level metrics integration (Phase 2 item 2)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_focus_eval_emits_stages_block_per_example(
+    tmp_path, parser_bench_submodule_present
+):
+    """Every per-example record should carry a `stages` dict so downstream
+    A/B harness (`scripts/diff_runs.py`) can read it without re-computing."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    result = await run_focus_eval(
+        [_make_example("ex-stages")],
+        backend_client=client,
+        backend="fake",
+        model="fake-1",
+        protocol="focus_default",
+        output_dir=tmp_path / "run",
+        images_root=tmp_path,
+        limit=1,
+    )
+    rec = result["per_example"][0]
+    assert "stages" in rec, "stages block missing from per-example record"
+    stages = rec["stages"]
+    # Top-level keys are present even when individual metrics are None.
+    for k in ("routing", "localization", "evidence", "reasoning", "loop", "efficiency_by_stage"):
+        assert k in stages
+    # Reasoning carries answer_correct echoed from the existing scoring path.
+    assert stages["reasoning"]["answer_correct"] == pytest.approx(rec["answer_correct"])
+    # Loop defaults to no_loop pre-item-3.
+    assert stages["loop"]["loop_terminated"] == "no_loop"
+
+
+async def test_run_focus_eval_writes_stage_aggregate_to_manifest(
+    tmp_path, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    await run_focus_eval(
+        [_make_example("ex-a"), _make_example("ex-b")],
+        backend_client=client,
+        backend="fake",
+        model="fake-1",
+        protocol="focus_default",
+        output_dir=tmp_path / "run",
+        images_root=tmp_path,
+        limit=2,
+    )
+    manifest = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert "stage_aggregate" in manifest
+    agg = manifest["stage_aggregate"]
+    assert agg["n"] == 2
+    # The keys are nested per stage block.
+    assert "reasoning" in agg
+    assert "answer_correct" in agg["reasoning"]
+    # Loop terminated distribution covers the 2 examples (both no_loop).
+    assert agg["loop_terminated_distribution"]["no_loop"] == pytest.approx(1.0)
+
+
+async def test_run_focus_eval_resume_handles_legacy_records_without_stages(
+    tmp_path, parser_bench_submodule_present
+):
+    """Cached predictions written before item 2 don't have a `stages` field.
+    The aggregate must not crash when it sees them; the missing stages
+    block falls through to a default StageMetrics."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    output_dir = tmp_path / "run"
+    pred_dir = output_dir / "predictions"
+    pred_dir.mkdir(parents=True)
+    # Write a legacy-shape cached prediction (no `stages`, no `trace`).
+    legacy = {
+        "example_id": "ex-legacy",
+        "protocol": "focus_default",
+        "answer_pred": "5.5",
+        "answer_gold": "5.5",
+        "answer_correct": 1.0,
+        "page_recall": 1.0,
+        "bbox_iou": 0.0,
+        "evidence_reward": 0.0,
+        "is_lazy": 0,
+        "tool_calls": 1,
+        "tokens_in": 100,
+        "tokens_out": 20,
+        "usd": 0.001,
+        "latency_ms": 50,
+        "citations": [],
+        "cache_hit": False,
+    }
+    (pred_dir / "ex-legacy.json").write_text(json.dumps(legacy))
+
+    # Resume: harness picks up the cached record and aggregates without crashing.
+    await run_focus_eval(
+        [_make_example("ex-legacy")],
+        backend_client=_FakeClient("ignored"),
+        backend="fake",
+        model="fake-1",
+        protocol="focus_default",
+        output_dir=output_dir,
+        images_root=tmp_path,
+        limit=1,
+        resume=True,
+    )
+    manifest = json.loads((output_dir / "run.json").read_text())
+    # Stage aggregate exists; legacy record contributed default StageMetrics.
+    assert manifest["stage_aggregate"]["n"] == 1
+    # Reasoning answer_correct defaults to 0.0 from the StageMetrics default
+    # (the legacy record's answer_correct=1.0 lives in the top-level field,
+    # not in `stages`). This is acceptable: legacy records don't break the
+    # aggregate; once they're re-scored they'll carry full stage data.
+    assert manifest["stage_aggregate"]["reasoning"]["answer_correct"] is not None
