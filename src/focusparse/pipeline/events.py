@@ -49,6 +49,14 @@ class RegionCandidate(BaseModel):
     score: float
     supporting_signals: list[str] = Field(default_factory=list)
     expansion_hints: list[str] = Field(default_factory=list)
+    # Item 4 (region reranker): query-conditioned relevance ∈ [0, 1] from
+    # the mid-tier rerank stage, and a coarse role telling the inspector +
+    # expander what this region is for (legend_binding, axis_reading,
+    # caption_context, footnote_adjustment, table_cell_lookup,
+    # header_disambiguation, primary). None when the rerank stage
+    # didn't run (no tier_router wired) or the rerank failed.
+    relevance: float | None = None
+    needed_for: str | None = None
 
 
 class RegionsEvent(BaseModel):
