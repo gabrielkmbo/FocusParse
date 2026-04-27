@@ -32,6 +32,7 @@ from focusparse.pipeline.inspector import inspect_regions
 from focusparse.pipeline.localizer import propose_regions
 from focusparse.pipeline.planner import plan_question
 from focusparse.pipeline.reasoner import answer_from_evidence
+from focusparse.pipeline.region_reranker import rerank_regions
 from focusparse.pipeline.router import route_pages
 from focusparse.pipeline.verifier import verify_answer
 from focusparse.tools.get_text_layer import GetTextLayerInput, get_text_layer
@@ -251,6 +252,15 @@ class FocusWorkflow:
             recorder=recorder,
             step_counter=step_counter,
         )
+        # Query-conditioned rerank between localize and inspect (Phase 2
+        # item 4). Skip path when no localizer_rerank tier is wired.
+        regions = await self._run_rerank(
+            question_event,
+            plan,
+            regions,
+            recorder=recorder,
+            step_counter=step_counter,
+        )
         evidence = await self._run_inspect(
             question_event,
             plan,
@@ -336,6 +346,16 @@ class FocusWorkflow:
                     pages,
                     images_by_page=images_by_page,
                     confidence_threshold=confidence_threshold,
+                    recorder=recorder,
+                    step_counter=step_counter,
+                    retry_attempt=retries_used,
+                )
+                # Re-rank the new region set so the retry's top-N is also
+                # query-conditioned, not just lower-confidence boxes.
+                regions = await self._run_rerank(
+                    question_event,
+                    plan,
+                    regions,
                     recorder=recorder,
                     step_counter=step_counter,
                     retry_attempt=retries_used,
@@ -467,6 +487,57 @@ class FocusWorkflow:
             )
         )
         return regions
+
+    async def _run_rerank(
+        self,
+        question_event: QuestionEvent,
+        plan: PlanEvent,
+        regions: RegionsEvent,
+        *,
+        recorder: TrajectoryRecorder,
+        step_counter: _StepCounter,
+        retry_attempt: int = 0,
+    ) -> RegionsEvent:
+        """Query-conditioned rerank — skip when no `localizer_rerank` client.
+
+        The reranker call falls through to a no-op when `tier_router` is
+        None or when `tier_router.client_for("localizer_rerank")` returns
+        None, so existing tests + harnesses that don't wire the rerank
+        tier still see the localizer's original ordering.
+        """
+        rerank_client = self._client_for("localizer_rerank")
+        reranked, response = await rerank_regions(
+            question_event,
+            plan,
+            regions,
+            backend_client=rerank_client,
+        )
+        # Surface n_scored so traces can attribute "did the reranker run
+        # and on how many regions?" without a packet body inspection.
+        n_scored = sum(1 for r in reranked.candidates if r.relevance is not None)
+        tier = "mid" if response is not None else "skeleton"
+        action = "llm_call" if response is not None else "deterministic"
+        recorder.record(
+            TrajectoryStep(
+                step_index=step_counter.next(),
+                stage="rerank",
+                tier=tier,
+                action=action,
+                args={
+                    "n_regions": len(reranked.candidates),
+                    "n_scored": n_scored,
+                    "retry_attempt": retry_attempt,
+                },
+                obs_summary=(
+                    response.text[:200] if response is not None and response.text else None
+                ),
+                tokens_in=(response.tokens_in if response is not None else 0),
+                tokens_out=(response.tokens_out if response is not None else 0),
+                latency_ms=(response.latency_ms if response is not None else 0),
+                usd=(response.usd if response is not None else None),
+            )
+        )
+        return reranked
 
     async def _run_inspect(
         self,
