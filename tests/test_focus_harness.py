@@ -407,8 +407,12 @@ async def test_run_focus_eval_emits_stages_block_per_example(
         assert k in stages
     # Reasoning carries answer_correct echoed from the existing scoring path.
     assert stages["reasoning"]["answer_correct"] == pytest.approx(rec["answer_correct"])
-    # Loop defaults to no_loop pre-item-3.
-    assert stages["loop"]["loop_terminated"] == "no_loop"
+    # Skeleton verifier (no tier_router wired here) accepts on first call,
+    # so the workflow loop terminates immediately as "accepted". The
+    # "no_loop" sentinel from item-2 only fires when the verify step is
+    # absent entirely — i.e., simple-agent runs.
+    assert stages["loop"]["loop_terminated"] == "accepted"
+    assert stages["loop"]["loop_retries"] == 0
 
 
 async def test_run_focus_eval_writes_stage_aggregate_to_manifest(
@@ -435,8 +439,9 @@ async def test_run_focus_eval_writes_stage_aggregate_to_manifest(
     # The keys are nested per stage block.
     assert "reasoning" in agg
     assert "answer_correct" in agg["reasoning"]
-    # Loop terminated distribution covers the 2 examples (both no_loop).
-    assert agg["loop_terminated_distribution"]["no_loop"] == pytest.approx(1.0)
+    # Loop terminated distribution covers the 2 examples (both accepted on
+    # the first verifier verdict — skeleton verifier always says accept).
+    assert agg["loop_terminated_distribution"]["accepted"] == pytest.approx(1.0)
 
 
 async def test_run_focus_eval_resume_handles_legacy_records_without_stages(

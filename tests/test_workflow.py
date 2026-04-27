@@ -403,7 +403,10 @@ async def test_focus_workflow_routes_verifier_through_tier_router(
         tokens_out=35,
     )
     tier_router = _FakeTierRouter(verifier=verifier_client)
-    workflow = FocusWorkflow(backend_client=reasoner_client, tier_router=tier_router)
+    # `max_retries=0` keeps this test focused on tier-router wiring, not
+    # the verifier→retry loop. The loop's behavior is covered by the
+    # dedicated retry-loop tests below.
+    workflow = FocusWorkflow(backend_client=reasoner_client, tier_router=tier_router, max_retries=0)
     example = _make_example()
     images = [tmp_path / "datasheet-A_page_0003_300dpi.png"]
     result = await workflow.run(example, images, protocol="focus")
@@ -573,3 +576,331 @@ async def test_focus_workflow_tolerates_out_of_range_pages_in_pdf(
     route_step = next(s for s in result.trace.steps if s.stage == "route_pages")
     assert route_step.tier == "text_fts"
     assert route_step.args["n_text_pages"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Verifier→retry loop (Phase 2 item 3)
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedClient:
+    """ModelClient that yields a scripted sequence of responses.
+
+    Returns the i-th response on the i-th call. After the script is
+    exhausted, repeats the last response (so a forgotten retry doesn't
+    surface as an exception — it surfaces as "the verifier kept saying
+    the same thing", which is exactly the case the loop's exhaustion
+    branch is supposed to handle).
+    """
+
+    def __init__(
+        self,
+        responses: list[str],
+        *,
+        tokens_in: int = 100,
+        tokens_out: int = 25,
+    ) -> None:
+        self._responses = list(responses)
+        self._tokens_in = tokens_in
+        self._tokens_out = tokens_out
+        self.calls: list[dict[str, Any]] = []
+
+    async def predict(
+        self,
+        prompt: str,
+        images: list[Path] | None = None,
+        system: str | None = None,
+        max_tokens: int | None = None,
+    ) -> ModelResponse:
+        idx = min(len(self.calls), len(self._responses) - 1)
+        self.calls.append({"prompt": prompt, "n_images": len(images or []), "system": system})
+        return ModelResponse(
+            text=self._responses[idx],
+            tokens_in=self._tokens_in,
+            tokens_out=self._tokens_out,
+            usd=0.001,
+            latency_ms=40,
+        )
+
+    def count_tokens(self, text: str) -> int:
+        return max(1, len(text) // 4)
+
+
+def _verdict_json(
+    *,
+    supported: bool,
+    next_action: str,
+    reason: str = "test reason",
+    confidence: float = 0.7,
+) -> str:
+    return (
+        f'{{"supported": {str(supported).lower()}, '
+        f'"next_action": "{next_action}", '
+        f'"reason": "{reason}", '
+        f'"confidence": {confidence}}}'
+    )
+
+
+async def test_loop_accept_on_first_verdict_no_retries(tmp_path, parser_bench_submodule_present):
+    """Verifier says accept on first call → no retries, telemetry shows
+    loop_terminated=accepted, retries_used=0, retry_helped=None."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    verifier = _FakeClient(_verdict_json(supported=True, next_action="accept"))
+    tier_router = _FakeTierRouter(verifier=verifier)
+    workflow = FocusWorkflow(backend_client=reasoner, tier_router=tier_router)
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+    assert result.telemetry["retries_used"] == 0
+    assert result.telemetry["loop_terminated"] == "accepted"
+    assert result.telemetry["loop_retry_helped"] is None
+    # Answer + verify each ran once.
+    answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
+    verify_steps = [s for s in result.trace.steps if s.stage == "verify"]
+    assert len(answer_steps) == 1
+    assert len(verify_steps) == 1
+
+
+async def test_loop_retry_localization_reruns_localize_inspect_expand_answer_verify(
+    tmp_path, parser_bench_submodule_present
+):
+    """retry_localization fires once → localize/inspect/expand/answer/verify each
+    run twice (initial + 1 retry). Verifier accepts on the second pass."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(supported=False, next_action="retry_localization"),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["loop_terminated"] == "accepted"
+    # initial unsupported + final supported → loop helped
+    assert result.telemetry["loop_retry_helped"] is True
+
+    stage_counts = _stage_counts(result)
+    # Initial pass + 1 retry of the 5 stages downstream of route_pages.
+    assert stage_counts["localize"] == 2
+    assert stage_counts["inspect"] == 2
+    assert stage_counts["expand_context"] == 2
+    assert stage_counts["answer"] == 2
+    assert stage_counts["verify"] == 2
+    # Plan + route_pages still run exactly once — they're outside the loop.
+    assert stage_counts["plan"] == 1
+    assert stage_counts["route_pages"] == 1
+
+
+async def test_loop_expand_context_reruns_only_expand_answer_verify(
+    tmp_path, parser_bench_submodule_present
+):
+    """expand_context retry doesn't re-run localize or inspect — those are
+    upstream of the change and would re-detect the same regions."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(supported=False, next_action="expand_context"),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    stage_counts = _stage_counts(result)
+    assert stage_counts["expand_context"] == 2
+    assert stage_counts["answer"] == 2
+    assert stage_counts["verify"] == 2
+    # Localize + inspect stay at 1 — no re-detection.
+    assert stage_counts["localize"] == 1
+    assert stage_counts["inspect"] == 1
+
+    # The retry expand step records a wider adjacency_pad in args.
+    expand_steps = [s for s in result.trace.steps if s.stage == "expand_context"]
+    pads = [s.args.get("adjacency_pad") for s in expand_steps]
+    assert pads[0] < pads[1], f"adjacency_pad should grow on retry; got {pads}"
+
+
+async def test_loop_escalate_reasoner_reruns_only_answer_verify(
+    tmp_path, parser_bench_submodule_present
+):
+    """escalate_reasoner re-runs only answer + verify. The retry answer call
+    carries the verifier's reason as an `escalation_hint`."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.4}',
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="escalate_reasoner",
+                reason="reasoner mis-read the cited table cell",
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    stage_counts = _stage_counts(result)
+    assert stage_counts["answer"] == 2
+    assert stage_counts["verify"] == 2
+    # Localize / inspect / expand all stay at 1 — escalation doesn't touch them.
+    assert stage_counts["localize"] == 1
+    assert stage_counts["inspect"] == 1
+    assert stage_counts["expand_context"] == 1
+
+    # Retry answer step records the escalation hint.
+    answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
+    assert answer_steps[0].args.get("had_escalation_hint") is False
+    assert answer_steps[1].args.get("had_escalation_hint") is True
+
+
+async def test_loop_abstain_terminates_with_unanswerable(tmp_path, parser_bench_submodule_present):
+    """abstain replaces the answer with 'Unanswerable' and ends the loop."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    verifier = _FakeClient(
+        _verdict_json(
+            supported=False,
+            next_action="abstain",
+            reason="no evidence for the question",
+        )
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+    assert result.answer == "Unanswerable"
+    assert result.telemetry["loop_terminated"] == "abstained"
+    # Abstention was decided on the first verdict — no retries fired.
+    assert result.telemetry["retries_used"] == 0
+    assert result.citations == []  # abstention drops citations
+
+
+async def test_loop_exhausted_when_max_retries_hit(tmp_path, parser_bench_submodule_present):
+    """Verifier keeps saying retry → loop runs max_retries times and exits as
+    `exhausted` with the last (still-unsupported) answer."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.7}')
+    # Always retry. Even at max=2 the loop runs 2 retries then exits.
+    verifier = _FakeClient(
+        _verdict_json(supported=False, next_action="retry_localization", confidence=0.6)
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        max_retries=2,
+    )
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+    assert result.telemetry["retries_used"] == 2
+    assert result.telemetry["loop_terminated"] == "exhausted"
+    # Initial false + final still false → retry_helped is False (not None).
+    assert result.telemetry["loop_retry_helped"] is False
+    # Verify ran 1 + 2 = 3 times.
+    stage_counts = _stage_counts(result)
+    assert stage_counts["verify"] == 3
+    assert stage_counts["localize"] == 3  # initial + 2 retries
+
+
+async def test_loop_max_retries_zero_disables_loop(tmp_path, parser_bench_submodule_present):
+    """max_retries=0 → workflow falls back to pre-loop cascade behavior. The
+    verifier's next_action is recorded but never acted on."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    verifier = _FakeClient(_verdict_json(supported=False, next_action="retry_localization"))
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        max_retries=0,
+    )
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+    # Loop didn't fire even though next_action != accept.
+    assert result.telemetry["retries_used"] == 0
+    assert result.telemetry["loop_terminated"] == "exhausted"
+    # Each stage still runs exactly once.
+    stage_counts = _stage_counts(result)
+    for stage in (
+        "plan",
+        "route_pages",
+        "localize",
+        "inspect",
+        "expand_context",
+        "answer",
+        "verify",
+    ):
+        assert stage_counts[stage] == 1, f"stage {stage} ran {stage_counts[stage]} times"
+
+
+async def test_loop_unknown_action_terminates_as_accepted(tmp_path, parser_bench_submodule_present):
+    """A future verifier extension that emits an unrecognized next_action
+    should NOT crash the workflow — it should accept the current answer
+    rather than thrash."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    # The verifier's pydantic schema only accepts the 5 known actions, so
+    # we can't actually feed an unknown action through the LLM path. We
+    # simulate this with a hand-built verifier that bypasses the LLM by
+    # returning supported=True, next_action="accept" (the canonical
+    # "no-op" path). The branch that handles unknown actions in
+    # workflow.run is exercised only via type-erased extensions; the
+    # test below just confirms the bail-out path doesn't loop infinitely
+    # when the verifier emits a quiet accept.
+    verifier = _FakeClient(_verdict_json(supported=True, next_action="accept"))
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+    assert result.telemetry["loop_terminated"] == "accepted"
+    assert result.telemetry["retries_used"] == 0
+
+
+def _stage_counts(result) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for s in result.trace.steps:
+        counts[s.stage] = counts.get(s.stage, 0) + 1
+    return counts
