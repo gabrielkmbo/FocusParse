@@ -217,16 +217,16 @@ async def test_ignores_neighbors_outside_padded_bbox(tmp_path, monkeypatch):
 
 
 async def test_caps_at_max_neighbors_per_packet(tmp_path, monkeypatch):
+    """The graph walker for `picture` (None figure_class) yields 3 distinct
+    rule matches (caption + footnote + section_header). With max=2 the
+    cap kicks in and we get 2."""
     calls: list = []
     _install_fake_inspect(monkeypatch, calls=calls)
     figure = _packet(packet_id="p0", page=1, bbox_norm=(0.1, 0.3, 0.9, 0.5), region_type="picture")
-    # Five captions near the figure — cap at 4 should drop one.
     regions = RegionsEvent(
         candidates=[
             _region(page=1, bbox_norm=(0.1, 0.51, 0.9, 0.54), region_type="caption"),
-            _region(page=1, bbox_norm=(0.1, 0.55, 0.9, 0.58), region_type="caption"),
             _region(page=1, bbox_norm=(0.1, 0.27, 0.9, 0.29), region_type="section_header"),
-            _region(page=1, bbox_norm=(0.1, 0.23, 0.9, 0.25), region_type="title"),
             _region(page=1, bbox_norm=(0.1, 0.59, 0.9, 0.61), region_type="footnote"),
         ]
     )
@@ -234,22 +234,36 @@ async def test_caps_at_max_neighbors_per_packet(tmp_path, monkeypatch):
         EvidenceEvent(packets=[figure]),
         regions=regions,
         pdf_path=tmp_path / "doc.pdf",
-        max_neighbors_per_packet=4,
+        max_neighbors_per_packet=2,
     )
-    assert len(out.packets[0].linked_crop_refs) == 4
+    assert len(out.packets[0].linked_crop_refs) == 2
 
 
-async def test_ranks_neighbors_by_vertical_distance(tmp_path, monkeypatch):
-    """Closer neighbors come first (important when capping below count)."""
+async def test_graph_picks_highest_scoring_candidate_per_rule(tmp_path, monkeypatch):
+    """When two regions of the same target_type are in the requested
+    direction, the graph walker picks the one with the higher detector
+    score (not the spatially-closest). Within the rule, ties are broken
+    by which appears first in the candidates list."""
     calls: list = []
     _install_fake_inspect(monkeypatch, calls=calls)
-    figure = _packet(packet_id="p0", page=1, bbox_norm=(0.1, 0.4, 0.9, 0.5), region_type="picture")
-    # Packet center y = 0.45. Caption A is at y~0.47 (distance 0.02);
-    # caption B is at y~0.52 (distance 0.07). A should come first.
+    figure = _packet(packet_id="p0", page=1, bbox_norm=(0.1, 0.3, 0.9, 0.5), region_type="picture")
     regions = RegionsEvent(
         candidates=[
-            _region(page=1, bbox_norm=(0.1, 0.51, 0.9, 0.53), region_type="caption"),  # B
-            _region(page=1, bbox_norm=(0.1, 0.46, 0.9, 0.48), region_type="caption"),  # A
+            # Both captions are below + within distance window.
+            # Lower-score caption appears first; the higher-score one
+            # should still be picked.
+            _region(
+                page=1,
+                bbox_norm=(0.1, 0.51, 0.9, 0.54),
+                region_type="caption",
+                score=0.40,
+            ),
+            _region(
+                page=1,
+                bbox_norm=(0.1, 0.56, 0.9, 0.59),
+                region_type="caption",
+                score=0.85,
+            ),
         ]
     )
     out = await expand_context(
@@ -258,10 +272,10 @@ async def test_ranks_neighbors_by_vertical_distance(tmp_path, monkeypatch):
         pdf_path=tmp_path / "doc.pdf",
         max_neighbors_per_packet=1,
     )
-    # Only the closer caption (A, bbox y=0.46-0.48) survives the cap.
     assert len(out.packets[0].linked_crop_refs) == 1
-    # The crop ref in the fake includes the bbox — verify A's bbox is there.
-    assert "0.46" in out.packets[0].linked_crop_refs[0]
+    # The fake's crop_ref encodes the bbox; the higher-scored caption
+    # has y0=0.56.
+    assert "0.56" in out.packets[0].linked_crop_refs[0]
 
 
 async def test_different_pages_are_independent(tmp_path, monkeypatch):
@@ -395,3 +409,132 @@ async def test_legacy_single_arg_call_is_passthrough():
     ev = EvidenceEvent(packets=[_packet(packet_id="p0", page=1, bbox_norm=(0, 0, 1, 1))])
     out = await expand_context(ev)
     assert out.packets == ev.packets
+
+
+# ---------------------------------------------------------------------------
+# Graph-driven expansion (Phase 2 item 5)
+# ---------------------------------------------------------------------------
+
+
+async def test_graph_walker_attaches_typed_role_for_chart_caption(tmp_path, monkeypatch):
+    """`linked_neighbor_types` should now carry the graph's role
+    (`caption`) rather than the raw region_type."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    figure = _packet(
+        packet_id="p0",
+        page=1,
+        bbox_norm=(0.1, 0.3, 0.9, 0.5),
+        region_type="picture",
+    )
+    regions = RegionsEvent(
+        candidates=[
+            # The matching primary region (same bbox) — graph reads
+            # figure_class from its supporting_signals.
+            RegionCandidate(
+                region_id="r_chart",
+                page=1,
+                bbox_norm=(0.1, 0.3, 0.9, 0.5),
+                region_type="picture",
+                score=0.9,
+                supporting_signals=["figure_class=bar_chart"],
+            ),
+            _region(
+                page=1,
+                bbox_norm=(0.1, 0.55, 0.9, 0.58),
+                region_type="caption",
+                score=0.85,
+            ),
+        ]
+    )
+    out = await expand_context(
+        EvidenceEvent(packets=[figure]),
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+    )
+    # Graph rule says caption-below → role="caption", not the raw type.
+    assert out.packets[0].linked_neighbor_types == ["caption"]
+
+
+async def test_graph_walker_falls_back_to_spatial_for_unknown_primary(tmp_path, monkeypatch):
+    """When primary's region_type isn't in the graph (e.g. `page-header`),
+    the spatial-overlap heuristic still runs and attaches generic
+    annotation neighbors."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    primary = _packet(
+        packet_id="p0",
+        page=1,
+        bbox_norm=(0.1, 0.0, 0.9, 0.04),
+        region_type="page-header",
+    )
+    regions = RegionsEvent(
+        candidates=[
+            # Caption nearby — won't match the (no) graph rules but the
+            # spatial heuristic accepts it as an annotation type.
+            _region(
+                page=1,
+                bbox_norm=(0.1, 0.05, 0.9, 0.08),
+                region_type="caption",
+                score=0.7,
+            ),
+        ]
+    )
+    out = await expand_context(
+        EvidenceEvent(packets=[primary]),
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+    )
+    # Spatial fallback uses raw region_type, not a graph role.
+    assert out.packets[0].linked_neighbor_types == ["caption"]
+
+
+async def test_graph_walker_uses_expansion_hints_from_reranker(tmp_path, monkeypatch):
+    """Item 4's reranker stamps `expansion_hints` on the primary region.
+    The graph walker boosts neighbors whose role matches a hint, so the
+    hint can flip the pick when scores are otherwise close."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    figure = _packet(
+        packet_id="p0",
+        page=1,
+        bbox_norm=(0.1, 0.3, 0.9, 0.5),
+        region_type="picture",
+    )
+    primary_with_hint = RegionCandidate(
+        region_id="r_chart",
+        page=1,
+        bbox_norm=(0.1, 0.3, 0.9, 0.5),
+        region_type="picture",
+        score=0.9,
+        supporting_signals=["figure_class=line_chart"],
+        expansion_hints=["caption"],  # rerank said: this chart needs a caption
+    )
+    regions = RegionsEvent(
+        candidates=[
+            primary_with_hint,
+            # Lower-scoring caption would lose without the hint boost.
+            _region(
+                page=1,
+                bbox_norm=(0.1, 0.55, 0.9, 0.58),
+                region_type="caption",
+                score=0.5,
+            ),
+            # Higher-scoring section_header takes the title-rule slot.
+            _region(
+                page=1,
+                bbox_norm=(0.1, 0.20, 0.9, 0.25),
+                region_type="section_header",
+                score=0.85,
+            ),
+        ]
+    )
+    out = await expand_context(
+        EvidenceEvent(packets=[figure]),
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+    )
+    types = out.packets[0].linked_neighbor_types
+    # Both a caption and a title attach (one per rule).
+    assert "caption" in types
+    assert "title" in types  # graph role for section_header is "title"
