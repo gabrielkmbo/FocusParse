@@ -79,6 +79,29 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-04-27 — parser-bench 5-protocol matrix wired
+
+`src/focusparse/eval/tile.py` (new) composes contact-sheet "tiled" inputs to match parser-bench's `tiled_2up`/`tiled_4up`/`tiled_8up` protocols. `make_contact_sheet` lays out N images at `ceil(sqrt(N))` cols by default but uses an explicit 4×2 grid for 8-up to match parser-bench. Composed sheets are downscaled to `max_dim=7680` (Anthropic/Gemini cap) preserving aspect, with layout offsets scaled accordingly. `prepare_tiled_images` is the harness entrypoint: when staged pages alone meet `n_tile`, composes in place; when short, calls `_render_noise_pages` (PyMuPDF at 300 DPI) on the source PDF excluding `example.supporting_pages`, deterministically shuffled by `sha256(f"{example.id}:{n_tile}")[:8]`. Output tile is content-addressed by example.id + n_tile so reruns hit the cache. Graceful degradation: missing PDF + insufficient staged pages → returns staged pages unchanged (caller still gets a valid list).
+
+`run_simple_eval` gains `pdfs_root: Path | None` and threads it into `_prepare_images`, which now dispatches to `prepare_tiled_images` when `protocol in TILE_SIZES`. `scripts/run_hf_eval.py` adds the three tiled protocols to `_SIMPLE_PROTOCOLS` and threads `--pdfs-root`. `scripts/run_hf_matrix.py` Phase A defaults extend from `(full_doc, oracle_page, oracle_crop)` to `(full_doc, oracle_page, oracle_crop, tiled_2up, tiled_4up, tiled_8up)` — six protocols matching parser-bench's set (we keep `full_doc` as the simple-baseline anchor; everything else mirrors). `--simple-protocols` flag added for subsetting; `--pdfs-root` propagated. Tests: 13 in `tests/test_tile.py` (layout, downscale, noise rendering, content-addressing, deterministic shuffle), 2 updated + 1 new in `tests/test_hf_matrix_merge.py`. Suite 395.
+
+### 2026-04-27 — Phase 2 item 5 shipped + reverted to opt-in: typed evidence graph
+
+`src/focusparse/pipeline/evidence_graph.py` (new) adds a typed `EVIDENCE_GRAPH: dict[(region_type, figure_class | None), list[NeighborSpec]]` with directional spatial constraints (`above`/`below`/`left`/`right`/`nearby`), per-rule `max_distance` + `min_overlap_fraction`, and a 1.5× `_HINT_BOOST` for candidates whose type matches the reranker's `expansion_hints`. Entries cover `("picture", "bar_chart" | "line_chart" | None)`, `("table", None)`, `("text", None)`, `("list-item", None)`, `("formula", None)`. Public surface: `lookup`, `extract_figure_class`, `matches_direction`, `find_graph_neighbors`, `has_graph_entry`. Walker dedupes candidates and excludes the primary region from its own neighbor set.
+
+Expander wires this in: `_match_primary_region(packet, candidates)` finds the source `RegionCandidate` so we can read `figure_class` + `expansion_hints`; `_synth_primary_from_packet` covers fallback packets without a backing detection. When `use_evidence_graph=True` and the graph has an entry, the walker dispatches first; otherwise (or on empty graph result) the spatial-overlap heuristic runs as fallback. Each linked neighbor records its semantic role (`caption`/`title`/`legend`/`axis`/etc.) in `linked_neighbor_types`. Tests: 21 in `tests/test_evidence_graph.py` + 3 new + 2 updated in `tests/test_expander.py`. Suite 357 → 395.
+
+**n=30 A/B vs item-4 baseline (rerank-on, loop-off, graph-on vs graph-off):**
+
+```
+region_recall                  0.718 → 0.605   ↓bad (-0.113)
+bbox_iou_mean                  0.733 → 0.677   ↓bad (-0.056)
+region_precision               0.726 → 0.680   ↓bad (-0.046)
+answer_correct                 0.033 → 0.033   unchanged
+```
+
+Hard gate fires (`plans/2026-04-27-phase2-sota-leverage.md:269`): three of three localization metrics regressed and accuracy didn't move. Diagnosis: typed graph is more selective than spatial overlap → fewer linked crops → smaller VLM context → worse downstream picks. Likely culprits: too-strict directional constraints (vertical/horizontal overlap thresholds) and too-narrow `max_distance` (0.25). Default flipped to `use_evidence_graph=False`; wiring + tests stay so we can opt in once the rules are tuned. The four graph-specific tests pass `use_evidence_graph=True` explicitly.
+
 ### 2026-04-27 — Phase 2 item 4 shipped: query-conditioned region reranker
 
 `src/focusparse/pipeline/region_reranker.py` adds a mid-tier LLM stage between localize and inspect that scores each region with `relevance ∈ [0, 1]` + a coarse `needed_for` role + `missing_context` hints. Sort key becomes `relevance × det.score`, so a small confident legend can outrank an irrelevant page-footer when the question asks about a chart legend. Skip path when `localizer_rerank` tier client is None — preserves the pre-item-4 ordering. Tests: `tests/test_region_reranker.py` (14 tests covering skip paths, happy path, partial scoring, taxonomy validation, defensive parse). 3 new workflow tests for tier_router wiring + retry-time rerank. Suite 340 → 357.
