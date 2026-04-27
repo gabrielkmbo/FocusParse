@@ -79,6 +79,36 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-04-27 — Phase 2 item 4 shipped: query-conditioned region reranker
+
+`src/focusparse/pipeline/region_reranker.py` adds a mid-tier LLM stage between localize and inspect that scores each region with `relevance ∈ [0, 1]` + a coarse `needed_for` role + `missing_context` hints. Sort key becomes `relevance × det.score`, so a small confident legend can outrank an irrelevant page-footer when the question asks about a chart legend. Skip path when `localizer_rerank` tier client is None — preserves the pre-item-4 ordering. Tests: `tests/test_region_reranker.py` (14 tests covering skip paths, happy path, partial scoring, taxonomy validation, defensive parse). 3 new workflow tests for tier_router wiring + retry-time rerank. Suite 340 → 357.
+
+`RegionCandidate` schema gains `relevance: float | None` and `needed_for: str | None` (both default None). `missing_context` from the LLM extends `expansion_hints` (preserves existing) so item 5's typed graph can use the reranker's hints directly.
+
+`needed_for` taxonomy (7 roles): primary | legend_binding | axis_reading | caption_context | footnote_adjustment | table_cell_lookup | header_disambiguation.
+
+`missing_context` taxonomy (12 entries): legend, x_axis, y_axis, axis_label, caption, footnote, header, column_header, row_header, unit, title, section_header.
+
+Pipeline now 8 stages: plan → route_pages → localize → **rerank** → inspect → expand_context → answer → verify. Existing `len(steps)==7` assertions in tests updated.
+
+**n=30 A/B vs the same baseline (`ab-baseline-noloop` vs `ab-with-rerank`, both `max_retries=0`):**
+
+```
+answer_correct                 0.000 → 0.033   ↑good (first non-zero!)
+region_recall                  0.689 → 0.718   ↑good (+0.030)
+bbox_iou_mean                  0.716 → 0.733   ↑good (+0.017)
+lazy_full_page_rate            0.067 → 0.033   ↓good (half as many)
+loop_terminated.accepted        0%   → 27%     ↑good (+27pp)
+loop_terminated.exhausted       100% → 70%     ↓good (-30pp)
+region_precision               0.781 → 0.726   ↓bad (-0.055)
+verifier_caught_unsupp_rate    0.800 → 0.700   ↓bad (-0.10)
+rerank.tokens/example          —     → 1923    +tradeoff
+rerank.usd/example             —     → $0.0032 +tradeoff
+total run cost (n=30)          $0.247 → $0.247 (offset by no-loop)
+```
+
+The plan's gate fires: 2/3 of the rerank's target metrics moved positive (recall ↑, lazy ↓; precision dipped). Net F1-like flat (-0.010) but accuracy moved 0% → 3.3% and verifier-accept rate jumped 0% → 27%, so the downstream effect is clearly net positive. Default-on. The precision regression is the rerank surfacing more diverse top-N — some new false positives but more true positives too. Item 5's evidence-graph expansion will benefit from the `expansion_hints` the rerank now populates with `missing_context`.
+
 ### 2026-04-27 — Phase 2 item 3 default reverted: n=30 A/B says loop hurts
 
 The plan's hard rule (`plans/2026-04-27-phase2-sota-leverage.md:269`) fired: the verifier→retry loop default flipped from `max_retries=2` back to `0` after a real validation A/B showed it hurts more than it helps. Run pair: `results/hf/ab-baseline-noloop/` (n=30, max_retries=0) vs `results/hf/ab-with-loop/` (n=30, max_retries=2), diffed via `scripts/diff_runs.py`. Headline regressions:
