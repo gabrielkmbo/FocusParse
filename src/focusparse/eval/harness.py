@@ -152,6 +152,7 @@ async def run_focus_eval(
     config: Any = None,
     tier_router: Any = None,
     pdfs_root: Path | None = None,
+    max_retries: int | None = None,
 ) -> dict[str, Any]:
     """Run `FocusWorkflow` over an iterable of examples.
 
@@ -186,11 +187,17 @@ async def run_focus_eval(
     pred_dir = output_dir / "predictions"
     pred_dir.mkdir(parents=True, exist_ok=True)
 
-    workflow = FocusWorkflow(
-        backend_client=backend_client,
-        config=config,
-        tier_router=tier_router,
-    )
+    workflow_kwargs: dict[str, Any] = {
+        "backend_client": backend_client,
+        "config": config,
+        "tier_router": tier_router,
+    }
+    if max_retries is not None:
+        # Caller-side override (e.g. baseline=0 vs item-3=2) controls the
+        # verifier→retry loop. None falls through to FocusWorkflow's built-
+        # in default.
+        workflow_kwargs["max_retries"] = max_retries
+    workflow = FocusWorkflow(**workflow_kwargs)
     per_example: list[dict[str, Any]] = []
 
     started_at = time.time()

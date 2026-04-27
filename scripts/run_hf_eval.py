@@ -119,6 +119,7 @@ def main() -> int:
                 config=config,
                 tier_router=tier_router,
                 pdfs_root=args.pdfs_root,
+                max_retries=args.max_retries,
             )
         )
     else:
@@ -199,6 +200,14 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--resume", dest="resume", action="store_true", default=True)
     parser.add_argument("--no-resume", dest="resume", action="store_false")
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=None,
+        help="Override the focus workflow's verifier→retry loop budget. "
+        "0 disables the loop (baseline). None (default) uses FocusWorkflow's "
+        "built-in default. Used to A/B item 3 against the pre-loop baseline.",
+    )
     return parser.parse_args()
 
 
