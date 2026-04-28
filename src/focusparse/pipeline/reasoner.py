@@ -29,6 +29,36 @@ _SYSTEM_PROMPT = (
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
+def _format_hint(answer_type: str | None) -> str:
+    """Mirror of `workflow._format_hint`. Kept local to avoid a workflow import
+    cycle (reasoner is imported by workflow). Type-aware nudges so the model
+    emits scorer-compliant output instead of prose."""
+    if not answer_type:
+        return ""
+    s = str(answer_type)
+    stem = s.split(".")[-1].lower() if "." in s else s.lower()
+    if stem == "numeric":
+        return (
+            "Answer with a single number. If the question asks for a percentage, "
+            "include the % sign. Do not add explanations or units beyond what the "
+            "question asks for."
+        )
+    if stem == "exact_match":
+        return (
+            "Answer with the exact label, identifier, or phrase from the document. "
+            "Quote the document verbatim — do not paraphrase, abbreviate, or add "
+            "explanation text that isn't present in the document. Match the "
+            "document's exact punctuation."
+        )
+    if stem == "boolean":
+        return "Answer 'yes' or 'no'."
+    if stem == "multiple_choice":
+        return "Answer with the letter of the correct choice (A, B, C, ...)."
+    if stem == "unanswerable":
+        return "If the document does not contain the answer, reply 'Unanswerable'."
+    return ""
+
+
 async def answer_from_evidence(
     question: QuestionEvent,
     evidence: EvidenceEvent,
@@ -59,11 +89,13 @@ async def answer_from_evidence(
             "Re-read the evidence packets carefully and produce an answer that "
             "addresses the verifier's concern.\n\n"
         )
+    format_hint = _format_hint(question.answer_type)
+    format_block = f"\n{format_hint}\n" if format_hint else ""
     prompt = (
         f"{hint_block}"
         f"Question: {question.question}\n\n"
         f"Available evidence packets:\n{packet_list}\n\n"
-        "Answer using only these packets."
+        f"Answer using only these packets.{format_block}"
     )
     images = _collect_packet_images(evidence)
 

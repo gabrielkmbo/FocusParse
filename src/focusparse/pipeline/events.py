@@ -19,6 +19,11 @@ class QuestionEvent(BaseModel):
     doc_id: str
     pages_available: int
     domain: str | None = None  # "finance" | "datasheet" | None
+    # Answer-type stem ("numeric"/"exact_match"/"boolean"/"multiple_choice"/
+    # "unanswerable"). Optional so legacy callers (older tests) don't break;
+    # when present, the reasoner appends a type-aware format hint that
+    # mirrors `SimpleBaselineAgent._format_hint`.
+    answer_type: str | None = None
 
 
 class PlanEvent(BaseModel):

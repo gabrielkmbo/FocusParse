@@ -165,12 +165,15 @@ class FocusWorkflow:
         pages_available = len(example.page_images or [])
         domain = getattr(example, "domain", None)
         domain_str = str(domain) if domain is not None else None
+        answer_type_attr = getattr(example, "answer_type", None)
+        answer_type_str = str(answer_type_attr) if answer_type_attr is not None else None
         question_event = QuestionEvent(
             example_id=example.id,
             question=example.question,
             doc_id=doc_id,
             pages_available=pages_available,
             domain=domain_str,
+            answer_type=answer_type_str,
         )
 
         budget = getattr(self.config, "budget", None) if self.config is not None else None
@@ -859,8 +862,10 @@ def _format_hint(answer_type: object) -> str:
         )
     if stem == "exact_match":
         return (
-            "Answer with the exact label, identifier, or short phrase from the "
-            "document. Do not paraphrase or add surrounding context."
+            "Answer with the exact label, identifier, or phrase from the document. "
+            "Quote the document verbatim — do not paraphrase, abbreviate, or add "
+            "explanation text that isn't present in the document. Match the "
+            "document's exact punctuation."
         )
     if stem == "boolean":
         return "Answer 'yes' or 'no'."
