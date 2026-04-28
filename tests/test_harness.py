@@ -267,3 +267,112 @@ async def test_run_simple_eval_handles_backend_error(tmp_path, parser_bench_subm
     assert agg.accuracy == 0.0
     per = result["per_example"][0]
     assert per["error"].startswith("simulated")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: page mapping + IoU coord-space wiring for the simple agent
+# ---------------------------------------------------------------------------
+
+
+def test_remap_positional_pages_remaps_one_indexed(parser_bench_submodule_present):
+    """Model emits page=1 for the only image; harness remaps to source page 50."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse.eval.harness import _remap_positional_pages
+
+    citations = [{"page": 1, "bbox": [0.1, 0.2, 0.3, 0.4]}]
+    out = _remap_positional_pages(citations, image_pages=[50])
+    assert out[0]["page"] == 50
+    assert out[0]["bbox"] == [0.1, 0.2, 0.3, 0.4]  # bbox untouched
+
+
+def test_remap_positional_pages_idempotent_when_already_source(parser_bench_submodule_present):
+    """Citation already uses source page 50 — leave alone, don't double-remap."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse.eval.harness import _remap_positional_pages
+
+    citations = [{"page": 50, "bbox": [0.1, 0.2, 0.3, 0.4]}]
+    out = _remap_positional_pages(citations, image_pages=[50])
+    assert out[0]["page"] == 50
+
+
+def test_remap_positional_pages_multi_image(parser_bench_submodule_present):
+    """For [page=1,page=2] with image_pages=[50,12], remap to [50,12]."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse.eval.harness import _remap_positional_pages
+
+    citations = [
+        {"page": 1, "bbox": [0, 0, 1, 1]},
+        {"page": 2, "bbox": [0, 0, 1, 1]},
+    ]
+    out = _remap_positional_pages(citations, image_pages=[50, 12])
+    assert [c["page"] for c in out] == [50, 12]
+
+
+def test_remap_positional_pages_noop_when_image_pages_none(parser_bench_submodule_present):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse.eval.harness import _remap_positional_pages
+
+    citations = [{"page": 1, "bbox": [0, 0, 1, 1]}]
+    out = _remap_positional_pages(citations, image_pages=None)
+    assert out == citations
+
+
+def test_ordered_pages_for_images_parses_filename(tmp_path, parser_bench_submodule_present):
+    """`Arm_EE382N_4_page_0050_300dpi.png` → 50."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse.eval.harness import _ordered_pages_for_images
+
+    example = _make_example("ex-pg")
+    img = tmp_path / "Arm_EE382N_4_page_0050_300dpi.png"
+    img.write_bytes(b"fake")
+    pages = _ordered_pages_for_images(example, [img], protocol="full_doc")
+    assert pages == [50]
+
+
+def test_ordered_pages_for_images_falls_back_to_supporting_pages(
+    tmp_path, parser_bench_submodule_present
+):
+    """No `_page_NNNN_` in filename → fall back to supporting_pages."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse.eval.harness import _ordered_pages_for_images
+
+    example = _make_example("ex-fb")  # supporting_pages=[3]
+    img = tmp_path / "anonymous.png"
+    img.write_bytes(b"fake")
+    pages = _ordered_pages_for_images(example, [img], protocol="oracle_page")
+    assert pages == [3]
+
+
+@pytest.mark.asyncio
+async def test_run_simple_eval_remaps_positional_citation(tmp_path, parser_bench_submodule_present):
+    """Model returns page=1; harness remaps to gold page 3 → page_recall=1.0."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    img_path = tmp_path / "datasheet-A_page_0003_300dpi.png"
+    Image.new("RGB", (200, 300), color=(255, 255, 255)).save(img_path)
+    examples = [_make_example("ex-remap").model_copy(update={"page_images": [str(img_path)]})]
+    # Model emits a perfect numeric answer with positional page=1
+    response_json = '{"answer": "5.5", "citations": [{"page": 1, "bbox": [0.1, 0.2, 0.3, 0.4]}]}'
+    client = _FakeClient(response_text=response_json)
+    result = await run_simple_eval(
+        examples,
+        backend_client=client,
+        backend="fake",
+        model="fake-1",
+        protocol="full_doc",
+        output_dir=tmp_path / "run",
+        images_root=tmp_path,
+        limit=1,
+    )
+    per = result["per_example"][0]
+    # page_recall now 1.0 because page=1 was remapped to source page 3.
+    assert per["page_recall"] == 1.0
+    # Citation in the record reflects the remap.
+    assert per["citations"][0]["page"] == 3

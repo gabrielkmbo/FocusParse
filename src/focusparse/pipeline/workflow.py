@@ -841,6 +841,60 @@ _SIMPLE_SYSTEM_PROMPT = (
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
+def _format_hint(answer_type: object) -> str:
+    """Type-aware answer-format hint appended to the user prompt.
+
+    Lets a single-shot VLM emit the strict form the scorer expects (a bare
+    number / label / yes-no / letter) instead of prose like "About 50% of
+    the way down the displayed memory stack." Empty string for unknown
+    types so we never pollute the prompt with junk.
+    """
+    s = str(answer_type)
+    stem = s.split(".")[-1].lower() if "." in s else s.lower()
+    if stem == "numeric":
+        return (
+            "Answer with a single number. If the question asks for a percentage, "
+            "include the % sign. Do not add explanations or units beyond what the "
+            "question asks for."
+        )
+    if stem == "exact_match":
+        return (
+            "Answer with the exact label, identifier, or short phrase from the "
+            "document. Do not paraphrase or add surrounding context."
+        )
+    if stem == "boolean":
+        return "Answer 'yes' or 'no'."
+    if stem == "multiple_choice":
+        return "Answer with the letter of the correct choice (A, B, C, ...)."
+    if stem == "unanswerable":
+        return "If the document does not contain the answer, reply 'Unanswerable'."
+    return ""
+
+
+def _build_simple_user_prompt(
+    example: BenchmarkExample,
+    image_pages: list[int] | None,
+) -> str:
+    """Compose the user-side prompt: question + page mapping + format hint.
+
+    `image_pages` enumerates which source PDF page each image corresponds
+    to so the model emits citations against real page numbers (not 1-indexed
+    positional). Tiled protocols pass the constituent pages of the tile.
+    """
+    lines = [f"Question: {example.question}"]
+    if image_pages:
+        if len(image_pages) == 1:
+            lines.append(f"This image is from page {image_pages[0]} of the document.")
+        else:
+            listing = ", ".join(f"image {i + 1} = page {p}" for i, p in enumerate(image_pages))
+            lines.append(f"Images correspond to: {listing}")
+        lines.append("Cite source page numbers from this list, not positional indices.")
+    hint = _format_hint(example.answer_type)
+    if hint:
+        lines.append(hint)
+    return "\n".join(lines)
+
+
 class SimpleBaselineAgent:
     """Single-shot VLM baseline used for parser-bench reproducibility checks.
 
@@ -857,11 +911,13 @@ class SimpleBaselineAgent:
         self,
         example: BenchmarkExample,
         images: list[Path],
+        *,
+        image_pages: list[int] | None = None,
     ) -> WorkflowResult:
         recorder = TrajectoryRecorder(example_id=example.id, question=example.question)
         recorder.set_plan({"agent": "simple", "protocol": self.protocol, "n_images": len(images)})
 
-        prompt = f"Question: {example.question}"
+        prompt = _build_simple_user_prompt(example, image_pages)
         response: ModelResponse = await self.backend_client.predict(
             prompt=prompt,
             images=images,

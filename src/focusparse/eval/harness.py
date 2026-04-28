@@ -106,8 +106,16 @@ async def run_simple_eval(
                 tile_cache_dir=output_dir / "tiles",
             )
             try:
-                result: WorkflowResult = await agent.run(example, images)
-                record = _score_and_record(example, result, protocol=protocol)
+                image_pages = _ordered_pages_for_images(example, images, protocol)
+                result: WorkflowResult = await agent.run(example, images, image_pages=image_pages)
+                image_dims = _image_dims_by_page(example, images)
+                record = _score_and_record(
+                    example,
+                    result,
+                    protocol=protocol,
+                    image_dims_by_page=image_dims,
+                    image_pages=image_pages,
+                )
                 cache_path.write_text(json.dumps(record, default=str))
             except Exception as exc:
                 logger.exception("Example %s failed: %s", example.id, exc)
@@ -358,6 +366,57 @@ def _resolve_pdf_path(
     return None
 
 
+def _ordered_pages_for_images(
+    example: BenchmarkExample,
+    images: list[Path],
+    protocol: str,
+) -> list[int] | None:
+    """Per-protocol map of image-index -> source page number.
+
+    The simple agent's prompt uses this to tell the model which page
+    corresponds to which image, so citations come back with real page
+    numbers (not 1-indexed positional). For tiled protocols the page list
+    is the constituent pages packed into the contact sheet.
+
+    Returns None when the mapping can't be determined (older fixtures
+    without `_page_NNNN_` filenames + no supporting_pages hint).
+    """
+    import re as _re
+
+    from focusparse.eval.tile import TILE_SIZES
+
+    if protocol in TILE_SIZES:
+        # Tiled protocols: caller still has the raw staged page list, so
+        # use those page numbers (the tile is a composition; the model
+        # should cite the underlying pages).
+        return _pages_from_filenames(example.page_images or [])
+
+    pat = _re.compile(r"_page_(\d+)")
+    pages: list[int] = []
+    for idx, img_path in enumerate(images):
+        m = pat.search(img_path.name)
+        if m:
+            pages.append(int(m.group(1)))
+        elif example.supporting_pages and idx < len(example.supporting_pages):
+            pages.append(int(example.supporting_pages[idx]))
+        else:
+            pages.append(idx + 1)
+    return pages or None
+
+
+def _pages_from_filenames(rel_paths: list[str]) -> list[int] | None:
+    """Extract page numbers from `..._page_NNNN_300dpi.png` filenames."""
+    import re as _re
+
+    pat = _re.compile(r"_page_(\d+)")
+    out: list[int] = []
+    for p in rel_paths:
+        m = pat.search(Path(p).name)
+        if m:
+            out.append(int(m.group(1)))
+    return out or None
+
+
 def _image_dims_by_page(
     example: BenchmarkExample,
     images: list[Path],
@@ -446,24 +505,52 @@ def _make_oracle_crops(
     return crops
 
 
+def _remap_positional_pages(
+    citations: list[dict[str, Any]],
+    image_pages: list[int] | None,
+) -> list[dict[str, Any]]:
+    """Remap 1-indexed positional citation pages to source pages.
+
+    The simple agent (and any VLM that doesn't internalize the page-mapping
+    hint) tends to emit `page=1` for the first image, `page=2` for the
+    second, etc. When `image_pages` is provided, treat any citation page
+    that's a valid positional index AND not already in `image_pages` as
+    positional and remap it. Citations that already use a real source page
+    pass through untouched (idempotent).
+    """
+    if not image_pages:
+        return citations
+    out: list[dict[str, Any]] = []
+    page_set = set(image_pages)
+    for c in citations:
+        p = c.get("page")
+        if isinstance(p, int) and 1 <= p <= len(image_pages) and p not in page_set:
+            c = {**c, "page": image_pages[p - 1]}
+        out.append(c)
+    return out
+
+
 def _score_and_record(
     example: BenchmarkExample,
     result: WorkflowResult,
     *,
     protocol: str,
     image_dims_by_page: dict[int, tuple[int, int]] | None = None,
+    image_pages: list[int] | None = None,
 ) -> dict[str, Any]:
     """Score one prediction and flatten into a per-example record.
 
     `image_dims_by_page` forwards to scoring so pixel-space gold bboxes
-    and normalized [0,1] predicted bboxes compare correctly. Simple-agent
-    runs can omit it (VLM citations happen to be pixel-space).
+    and normalized [0,1] predicted bboxes compare correctly.
+    `image_pages` enables positional → source-page remapping for citations
+    when the model emitted page=1..N rather than the actual source pages.
     """
     from focusparse._parser_bench import BBox as _BBox
 
-    predicted_pages = [int(c["page"]) for c in result.citations if "page" in c]
+    citations = _remap_positional_pages(list(result.citations), image_pages)
+    predicted_pages = [int(c["page"]) for c in citations if "page" in c]
     predicted_bboxes: list[Any] = []
-    for c in result.citations:
+    for c in citations:
         bbox = c.get("bbox")
         if not (isinstance(bbox, list) and len(bbox) == 4):
             continue
@@ -532,7 +619,7 @@ def _score_and_record(
         "tokens_out": result.telemetry.get("tokens_out", 0),
         "usd": result.telemetry.get("usd") or 0.0,
         "latency_ms": result.telemetry.get("latency_ms", 0),
-        "citations": result.citations,
+        "citations": citations,
         "cache_hit": False,
         "telemetry": dict(result.telemetry or {}),
         "trace": trace_dict,

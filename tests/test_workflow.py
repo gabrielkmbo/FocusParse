@@ -1026,3 +1026,112 @@ async def test_focus_workflow_rerank_runs_on_localization_retry(
     assert stage_counts["rerank"] == 2
     # Rerank LLM was called twice (once per localize pass).
     assert len(rerank_client.calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 / Phase 3: SimpleBaselineAgent prompt enrichment
+# ---------------------------------------------------------------------------
+
+
+async def test_simple_agent_prompt_includes_page_mapping(tmp_path, parser_bench_submodule_present):
+    """Single image at page 50 → user prompt mentions 'page 50'."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse.pipeline.workflow import SimpleBaselineAgent
+
+    client = _FakeClient('{"answer": "5.5", "citations": []}')
+    agent = SimpleBaselineAgent(backend_client=client, protocol="full_doc")
+    img = tmp_path / "Arm_EE382N_4_page_0050_300dpi.png"
+    img.write_bytes(b"fake")
+
+    await agent.run(_make_example(), [img], image_pages=[50])
+
+    prompt = client.calls[0]["prompt"]
+    assert "page 50" in prompt
+    # Sanity: the question is still in the prompt
+    assert "supply voltage" in prompt
+
+
+async def test_simple_agent_prompt_lists_multi_image_page_mapping(
+    tmp_path, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse.pipeline.workflow import SimpleBaselineAgent
+
+    client = _FakeClient('{"answer": "5.5", "citations": []}')
+    agent = SimpleBaselineAgent(backend_client=client, protocol="full_doc")
+
+    await agent.run(_make_example(), [tmp_path / "a.png", tmp_path / "b.png"], image_pages=[50, 12])
+
+    prompt = client.calls[0]["prompt"]
+    assert "image 1 = page 50" in prompt
+    assert "image 2 = page 12" in prompt
+
+
+async def test_simple_agent_prompt_omits_page_mapping_when_none(
+    tmp_path, parser_bench_submodule_present
+):
+    """Backwards compat: legacy callers (no image_pages) get the bare question."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse.pipeline.workflow import SimpleBaselineAgent
+
+    client = _FakeClient('{"answer": "5.5", "citations": []}')
+    agent = SimpleBaselineAgent(backend_client=client, protocol="full_doc")
+
+    await agent.run(_make_example(), [tmp_path / "a.png"])
+
+    prompt = client.calls[0]["prompt"]
+    assert "page" not in prompt.split("\n")[0]  # First line is just the question.
+
+
+async def test_simple_agent_prompt_includes_numeric_format_hint(
+    tmp_path, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse.pipeline.workflow import SimpleBaselineAgent
+
+    client = _FakeClient('{"answer": "5.5", "citations": []}')
+    agent = SimpleBaselineAgent(backend_client=client, protocol="full_doc")
+
+    # _make_example sets answer_type='numeric'
+    await agent.run(_make_example(), [tmp_path / "a.png"])
+
+    prompt = client.calls[0]["prompt"]
+    assert "single number" in prompt.lower()
+
+
+async def test_simple_agent_prompt_includes_exact_match_hint(
+    tmp_path, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse._parser_bench import AnswerType
+    from focusparse.pipeline.workflow import SimpleBaselineAgent
+
+    client = _FakeClient('{"answer": "0x44", "citations": []}')
+    agent = SimpleBaselineAgent(backend_client=client, protocol="full_doc")
+
+    ex = _make_example().model_copy(update={"answer_type": AnswerType.EXACT_MATCH})
+    await agent.run(ex, [tmp_path / "a.png"])
+
+    prompt = client.calls[0]["prompt"]
+    assert "exact label" in prompt.lower()
+
+
+async def test_simple_agent_prompt_includes_boolean_hint(tmp_path, parser_bench_submodule_present):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse._parser_bench import AnswerType
+    from focusparse.pipeline.workflow import SimpleBaselineAgent
+
+    client = _FakeClient('{"answer": "yes", "citations": []}')
+    agent = SimpleBaselineAgent(backend_client=client, protocol="full_doc")
+
+    ex = _make_example().model_copy(update={"answer_type": AnswerType.BOOLEAN})
+    await agent.run(ex, [tmp_path / "a.png"])
+
+    prompt = client.calls[0]["prompt"]
+    assert "yes" in prompt.lower() and "no" in prompt.lower()
