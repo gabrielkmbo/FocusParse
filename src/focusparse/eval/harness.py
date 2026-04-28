@@ -168,6 +168,7 @@ async def run_focus_eval(
     tier_router: Any = None,
     pdfs_root: Path | None = None,
     max_retries: int | None = None,
+    use_evidence_graph: bool = False,
 ) -> dict[str, Any]:
     """Run `FocusWorkflow` over an iterable of examples.
 
@@ -212,6 +213,10 @@ async def run_focus_eval(
         # verifier→retry loop. None falls through to FocusWorkflow's built-
         # in default.
         workflow_kwargs["max_retries"] = max_retries
+    if use_evidence_graph:
+        # Item-5 toggle: typed graph expansion in expand_context. Off by
+        # default pending a fresh A/B under the post-2026-04-27 scorer.
+        workflow_kwargs["use_evidence_graph"] = True
     workflow = FocusWorkflow(**workflow_kwargs)
     per_example: list[dict[str, Any]] = []
 

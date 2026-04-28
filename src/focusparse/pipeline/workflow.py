@@ -89,6 +89,7 @@ class FocusWorkflow:
         cache: Any = None,
         tools: Any = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
+        use_evidence_graph: bool = False,
     ) -> None:
         self.backend_client = backend_client
         self.config = config
@@ -99,6 +100,10 @@ class FocusWorkflow:
         # to the pre-2026-04-27 cascade (no loops); the default lets the
         # verifier act as a controller, not just a judge.
         self.max_retries = max_retries
+        # Item 5: typed evidence-graph expansion. Default off pending a fresh
+        # A/B under the post-2026-04-27 scorer (the n=30 regression that
+        # gated this off was measured under the pre-fix scorer).
+        self.use_evidence_graph = use_evidence_graph
 
     def _client_for(self, role: str) -> ModelClient | None:
         """Resolve a role-scoped client via `tier_router`, else return None.
@@ -600,6 +605,7 @@ class FocusWorkflow:
             pdf_path=pdf_path,
             crop_cache_dir=self._role_cache_dir("crops"),
             adjacency_pad=adjacency_pad,
+            use_evidence_graph=self.use_evidence_graph,
         )
         n_with_neighbors = sum(1 for p in expanded.packets if p.linked_crop_refs)
         n_neighbors = sum(len(p.linked_crop_refs) for p in expanded.packets)

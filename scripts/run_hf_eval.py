@@ -129,6 +129,7 @@ def main() -> int:
                 tier_router=tier_router,
                 pdfs_root=args.pdfs_root,
                 max_retries=args.max_retries,
+                use_evidence_graph=args.use_evidence_graph,
             )
         )
     else:
@@ -225,6 +226,13 @@ def _parse_args() -> argparse.Namespace:
         help="Override the focus workflow's verifier→retry loop budget. "
         "0 disables the loop (baseline). None (default) uses FocusWorkflow's "
         "built-in default. Used to A/B item 3 against the pre-loop baseline.",
+    )
+    parser.add_argument(
+        "--use-evidence-graph",
+        action="store_true",
+        default=False,
+        help="Enable item 5's typed evidence-graph expansion in expand_context. "
+        "Default off pending a fresh A/B under the post-2026-04-27 scorer.",
     )
     return parser.parse_args()
 
