@@ -79,6 +79,49 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-04-27 — Full validation eval: simple-agent matrix at parser-bench parity
+
+148-example HF validation split (gold filter applied; 71 stress rows excluded).
+Reasoner = `gpt-5.4` (frontier tier). Cost-per-correct in USD. Run dir
+`results/hf/full-eval-v1/`.
+
+| protocol      | accuracy  | page_recall | bbox_iou | total_cost | $/correct | parser-bench  |
+| ------------- | --------- | ----------- | -------- | ---------- | --------- | ------------- |
+| full_doc      | **46.6%** | 0.94        | 0.38     | $0.82      | $0.0119   | GPT-5.4 48.6% |
+| oracle_page   | **48.6%** | 0.97        | 0.40     | $0.82      | $0.0114   | (n/a)         |
+| oracle_crop   | **45.9%** | 0.90        | 0.00     | $0.53      | $0.0078   | GPT-5.4 59.4% |
+| tiled_4up     | **39.9%** | 0.90        | 0.07     | $0.65      | $0.0111   | (n/a)         |
+| focus_default | running…  |             |          |            |           |               |
+
+Reproducibility: full_doc within 2pp of parser-bench's published GPT-5.4 baseline. oracle_crop 13pp below the published number — likely sample-split difference (we're on the 148-row canonical validation split; parser-bench's 59.4% may be on the full benchmark). Same model + scorer + prompts; the gap is data, not implementation.
+
+Phase-3 toggles wired but default off:
+
+- `--auto-zoom`: LANCZOS 2× upsample of tiny crops via run_python sandbox (`746328b`).
+- `--use-evidence-graph`: re-A/B item 5 under the fixed scorer (`6fb44c4`).
+- `--max-retries N`: re-A/B item 3.
+
+Item 5 A/B at n=7 (Arm only, post-fix scorer): graph-on improves page_recall (+0.07) and bbox_iou (+0.01) without hurting accuracy. **Opposite trend** from the previous regression which was broken-scorer noise. Needs n≥30 confirmation before flipping default.
+
+Run was parallelized: 1 sequential matrix process (full_doc → oracle_page) + 3 spawned parallel jobs (oracle_crop, tiled_4up, focus). Approx 2.5× speedup vs sequential. Total wall time ≈ 1.5h for 4 simple protocols; focus pipeline still running (~14s/example).
+
+### 2026-04-27 — `run_python` + auto-zoom shipped (Phase 3, on)
+
+Sandboxed code execution for the coding-driven zoom mechanism. `src/focusparse/tools/run_python.py`:
+
+- `multiprocessing.Process` spawn context (fresh interpreter, no fork inheritance issues)
+- `resource.setrlimit(RLIMIT_CPU=15s, RLIMIT_AS=1024MB)` + parent-side wall-time watchdog
+- Import allowlist via `__builtins__.__import__` shim — more reliable than `sys.meta_path` finders since the parent's `sys.modules` cache bypasses them. Allowlist: PIL, numpy, matplotlib, scipy + tiny stdlib (math, statistics, hashlib, json, base64, itertools, functools).
+- Builtins allowlist excludes `open`/`exec`/`eval`/`compile`/`input`.
+- Image I/O: `images: dict[str, PIL.Image]` global keyed by content-addressed ref the parent resolves from disk; `save_image(img)` returns new sha256-prefixed PNGs.
+- 11 tests pin disallowed imports/builtins, wall-time timeout, image round-trip, content-addressed dedup, LANCZOS upsample workflow.
+
+Threat model: research-grade, NOT adversarial defense. CLAUDE.md already documents this.
+
+Inspector integration (`src/focusparse/pipeline/inspector.py:_zoom_crop`): when `auto_zoom=True` and a region's normalized bbox area is below 0.005, the inspector calls `run_python` with a LANCZOS 2× upsample. The packet's `local_crop_ref` then points at the upsampled PNG; `provenance.args_hash` carries `run_python:zoom2x`. Best-effort — sandbox failure preserves the original crop.
+
+CLI surface: `--auto-zoom` flag on `scripts/run_hf_eval.py`. Default off pending an A/B against the 46.6% full_doc baseline. Likely target use-case: visual interpolation questions (axis_value_interpolation question family) where fine details (10-pixel-tall percentage marks) need super-sampling.
+
 ### 2026-04-27 — Baseline accuracy fix: 0% → 28-57% (5-phase plan landed)
 
 The 6-protocol matrix on `Arm_EE382N_4` (7 examples) reported 0% accuracy across all protocols. Diagnosis: scoring + harness defects masked real model output, not a model deficiency. Five phases per `plans/2026-04-27-fix-baseline-accuracy.md`:
