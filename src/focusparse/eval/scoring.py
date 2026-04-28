@@ -20,24 +20,34 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+def _answer_type_stem(answer_type: object) -> str:
+    """Normalize answer_type to a lowercase stem regardless of repr form.
+
+    Accepts the parser-bench `AnswerType` enum (`AnswerType.NUMERIC`, str-repr
+    `"AnswerType.NUMERIC"`) and a bare string (`"numeric"`). Returns the
+    lowercase stem (`"numeric"`) so the scorer's branch checks work uniformly.
+    """
+    s = str(answer_type)
+    return s.split(".")[-1].lower() if "." in s else s.lower()
+
+
 def score_answer(prediction_text: str, example: BenchmarkExample) -> float:
     """Return 1.0 if the prediction matches the gold answer under the example's
     answer_type tolerance, else 0.0."""
     gold = (example.answer or "").strip()
     pred = (prediction_text or "").strip()
+    stem = _answer_type_stem(example.answer_type)
 
-    answer_type = str(example.answer_type)
-    # Unanswerable — correct iff the model abstains with a recognizable signal.
-    if answer_type.endswith("unanswerable"):
+    if stem == "unanswerable":
         return 1.0 if _is_abstention(pred) else 0.0
 
-    if answer_type.endswith("boolean"):
+    if stem == "boolean":
         return 1.0 if _normalize_bool(pred) == _normalize_bool(gold) else 0.0
 
-    if answer_type.endswith("multiple_choice"):
-        return 1.0 if pred.strip().upper()[:1] == gold.strip().upper()[:1] else 0.0
+    if stem == "multiple_choice":
+        return 1.0 if pred.upper()[:1] == gold.upper()[:1] else 0.0
 
-    if answer_type.endswith("numeric"):
+    if stem == "numeric":
         return _score_numeric(pred, gold, example.tolerance)
 
     # exact_match (fall-through)
@@ -62,14 +72,20 @@ def _normalize_bool(text: str) -> str | None:
 
 
 def _score_numeric(pred: str, gold: str, tolerance: float | None) -> float:
+    """Match parser-bench's scorer (third_party/parser-bench/src/eval/scoring.py:56):
+    when `tolerance` is provided, it's an absolute delta between extracted
+    numeric tokens. When `tolerance` is None, fall back to 1% relative
+    tolerance against the gold magnitude. The 1e-9 epsilon absorbs FP error
+    near tolerance boundaries (`|1.1 - 1.0|` is `0.10000000000000009`).
+    """
     p = _extract_float(pred)
     g = _extract_float(gold)
     if p is None or g is None:
         return 0.0
-    tol = tolerance if tolerance is not None else 0.01
-    if abs(g) < 1e-9:
-        return 1.0 if abs(p - g) <= tol else 0.0
-    return 1.0 if abs(p - g) / max(abs(g), 1e-9) <= tol else 0.0
+    if tolerance is not None:
+        return 1.0 if abs(p - g) <= tolerance + 1e-9 else 0.0
+    rel = max(abs(g) * 0.01, 1e-9)
+    return 1.0 if abs(p - g) <= rel + 1e-9 else 0.0
 
 
 def _extract_float(text: str) -> float | None:

@@ -289,3 +289,140 @@ def test_score_evidence_reward_respects_coord_space_fix(
         image_dims_by_page={1: (3000, 2250)},
     )
     assert fixed > 0.95  # answer=1 × recall=1 × IoU≈1 ≈ 1.0
+
+
+# ---------------------------------------------------------------------------
+# answer_type routing — pin behavior under enum + string repr forms
+# (regression: AnswerType.NUMERIC was falling through to exact_match because
+#  endswith("numeric") never matched "AnswerType.NUMERIC")
+# ---------------------------------------------------------------------------
+
+
+def _example_with_type(answer_type, *, answer="42", tolerance=None):
+    from focusparse._parser_bench import (
+        BBox,
+        BenchmarkExample,
+        DifficultyScores,
+        Domain,
+    )
+
+    return BenchmarkExample(
+        id="test-route",
+        domain=Domain.FINANCE,
+        source_pdf="fake.pdf",
+        page_images=["fake_page_1.png"],
+        question="?",
+        answer=answer,
+        answer_type=answer_type,
+        tolerance=tolerance,
+        supporting_pages=[1],
+        supporting_bboxes=[BBox(page=1, x0=0, y0=0, x1=1, y1=1)],
+        difficulty=DifficultyScores(visual=1, reasoning=1, localization=1),
+        question_family="single_value_lookup",
+    )
+
+
+def test_answer_type_stem_normalizes_enum_and_string():
+    from focusparse._parser_bench import AnswerType
+    from focusparse.eval.scoring import _answer_type_stem
+
+    # Enum value
+    assert _answer_type_stem(AnswerType.NUMERIC) == "numeric"
+    # str(enum) form (`"AnswerType.NUMERIC"`)
+    assert _answer_type_stem(str(AnswerType.NUMERIC)) == "numeric"
+    # Bare lowercase string
+    assert _answer_type_stem("numeric") == "numeric"
+    # Bare uppercase string
+    assert _answer_type_stem("NUMERIC") == "numeric"
+
+
+def test_score_answer_routes_numeric_via_enum(parser_bench_submodule_present):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse._parser_bench import AnswerType
+    from focusparse.eval.scoring import score_answer
+
+    ex = _example_with_type(AnswerType.NUMERIC, answer="40", tolerance=10.0)
+    # Within absolute tolerance of 10 → 1.0 (was 0.0 before the fix)
+    assert score_answer("50", ex) == 1.0
+    # Outside tolerance → 0.0
+    assert score_answer("55", ex) == 0.0
+
+
+def test_score_answer_routes_unanswerable_via_enum(parser_bench_submodule_present):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse._parser_bench import AnswerType
+    from focusparse.eval.scoring import score_answer
+
+    ex = _example_with_type(AnswerType.UNANSWERABLE, answer="N/A")
+    assert score_answer("Unanswerable", ex) == 1.0
+    assert score_answer("cannot be determined", ex) == 1.0
+    assert score_answer("42", ex) == 0.0
+
+
+def test_score_answer_routes_boolean_via_enum(parser_bench_submodule_present):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse._parser_bench import AnswerType
+    from focusparse.eval.scoring import score_answer
+
+    ex = _example_with_type(AnswerType.BOOLEAN, answer="true")
+    assert score_answer("yes", ex) == 1.0
+    assert score_answer("Y", ex) == 1.0
+    assert score_answer("no", ex) == 0.0
+
+
+def test_score_answer_routes_multiple_choice_via_enum(parser_bench_submodule_present):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse._parser_bench import AnswerType
+    from focusparse.eval.scoring import score_answer
+
+    ex = _example_with_type(AnswerType.MULTIPLE_CHOICE, answer="C")
+    assert score_answer("C", ex) == 1.0
+    assert score_answer("c. some explanation", ex) == 1.0
+    assert score_answer("D", ex) == 0.0
+
+
+def test_score_numeric_uses_absolute_tolerance(parser_bench_submodule_present):
+    """Parser-bench parity: tolerance is an absolute delta, not relative."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse.eval.scoring import _score_numeric
+
+    # gold=40, pred=50, tol=10.0 → |10| ≤ 10 → 1.0
+    assert _score_numeric("50", "40", 10.0) == 1.0
+    # gold=40, pred=51, tol=10.0 → |11| > 10 → 0.0
+    assert _score_numeric("51", "40", 10.0) == 0.0
+    # FP-precision edge: |1.1 - 1.0| is 0.10000000000000009; epsilon absorbs it.
+    assert _score_numeric("1.1", "1.0", 0.1) == 1.0
+    # gold=40, pred=40 → exact match
+    assert _score_numeric("40", "40", 0.0) == 1.0
+
+
+def test_score_numeric_falls_back_to_one_percent_relative_when_no_tolerance():
+    from focusparse.eval.scoring import _score_numeric
+
+    # gold=100, pred=101 → |1| ≤ max(1, 1e-9) → 1.0
+    assert _score_numeric("101", "100", None) == 1.0
+    # gold=100, pred=102 → |2| > 1 → 0.0
+    assert _score_numeric("102", "100", None) == 0.0
+    # gold=0 — relative tolerance collapses to epsilon
+    assert _score_numeric("0", "0", None) == 1.0
+    assert _score_numeric("0.0001", "0", None) == 0.0
+
+
+def test_score_answer_extracts_number_from_prose_when_numeric(parser_bench_submodule_present):
+    """Real model output: '50%' should match gold='40%' under tol=10 absolute."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse._parser_bench import AnswerType
+    from focusparse.eval.scoring import score_answer
+
+    ex = _example_with_type(AnswerType.NUMERIC, answer="40%", tolerance=10.0)
+    assert score_answer("50%", ex) == 1.0
+    assert score_answer("About 50%", ex) == 1.0
+    # First-number extraction: "2 outputs" → 2 matches gold "2"
+    ex2 = _example_with_type(AnswerType.NUMERIC, answer="2", tolerance=0.0)
+    assert score_answer("2 outputs", ex2) == 1.0
