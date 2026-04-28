@@ -33,7 +33,12 @@ def _answer_type_stem(answer_type: object) -> str:
 
 def score_answer(prediction_text: str, example: BenchmarkExample) -> float:
     """Return 1.0 if the prediction matches the gold answer under the example's
-    answer_type tolerance, else 0.0."""
+    answer_type tolerance, else 0.0.
+
+    Mirrors parser-bench's scorer (`third_party/parser-bench/src/eval/scoring.py`)
+    so the reproducibility gate (simple agent within ±1 pt of published numbers)
+    holds. Each branch delegates to a parser-bench-equivalent helper.
+    """
     gold = (example.answer or "").strip()
     pred = (prediction_text or "").strip()
     stem = _answer_type_stem(example.answer_type)
@@ -42,41 +47,186 @@ def score_answer(prediction_text: str, example: BenchmarkExample) -> float:
         return 1.0 if _is_abstention(pred) else 0.0
 
     if stem == "boolean":
-        return 1.0 if _normalize_bool(pred) == _normalize_bool(gold) else 0.0
+        return 1.0 if _score_boolean(pred, gold) else 0.0
 
     if stem == "multiple_choice":
-        return 1.0 if pred.upper()[:1] == gold.upper()[:1] else 0.0
+        return 1.0 if _score_multiple_choice(pred, gold) else 0.0
 
     if stem == "numeric":
         return _score_numeric(pred, gold, example.tolerance)
 
     # exact_match (fall-through)
-    return 1.0 if pred.casefold() == gold.casefold() else 0.0
+    return 1.0 if _score_exact_match(pred, gold) else 0.0
+
+
+# Parser-bench parity: mirror of `src/eval/scoring.py:_ABSTAIN_PHRASES`.
+_ABSTAIN_PHRASES: frozenset[str] = frozenset(
+    {
+        "unanswerable",
+        "cannot be determined",
+        "not enough information",
+        "cannot answer",
+        "insufficient information",
+        "unable to determine",
+        "not answerable",
+        "cannot be answered",
+        "n/a",
+    }
+)
 
 
 def _is_abstention(text: str) -> bool:
     lowered = text.lower()
-    return any(
-        kw in lowered
-        for kw in ("unanswerable", "cannot be determined", "not enough information", "n/a")
-    )
+    return any(phrase in lowered for phrase in _ABSTAIN_PHRASES)
 
 
 def _normalize_bool(text: str) -> str | None:
     t = text.strip().lower()
-    if t in ("true", "yes", "y", "1"):
+    if t in ("true", "yes", "y", "1", "correct"):
         return "true"
-    if t in ("false", "no", "n", "0"):
+    if t in ("false", "no", "n", "0", "incorrect"):
         return "false"
     return None
+
+
+# ---------------------------------------------------------------------------
+# Parser-bench parity helpers: exact_match / boolean / multiple_choice
+# (mirrors of `third_party/parser-bench/src/eval/scoring.py`)
+# ---------------------------------------------------------------------------
+
+
+def _normalize_text_for_match(s: str) -> str:
+    """Lowercase, collapse whitespace, strip trailing punctuation.
+
+    Mirrors parser-bench's `_normalize_text`. Trailing `;,.\\s` strip catches
+    the common pattern where the gold answer has an explanation clause after
+    the core value.
+    """
+    import re
+
+    s = s.strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"[;,.\s]+$", "", s)
+    return s
+
+
+def _score_exact_match(pred: str, gold: str) -> bool:
+    """Match parser-bench's `_score_exact_match` — 4 fallback layers.
+
+    1. Verbatim normalized equality.
+    2. Gold has explanation after a separator (`;`, `. `, ` — `, ` - `) →
+       compare the core token before the separator.
+    3. Containment in either direction with overlap thresholds.
+    4. Parenthetical removal: `X (Y)` ≡ `X`.
+    """
+    import re
+
+    p = _normalize_text_for_match(pred)
+    g = _normalize_text_for_match(gold)
+
+    # 1. Verbatim match
+    if p == g:
+        return True
+
+    # 2. Gold has explanation after separator — match the core value
+    for sep in (";", ". ", " — ", " - "):
+        if sep in g:
+            g_core = _normalize_text_for_match(g.split(sep, 1)[0])
+            if g_core and (p == g_core or (len(p) >= 3 and p in g_core)):
+                return True
+
+    # 3. Containment: pred is the core answer within a longer gold
+    if len(p) >= 3 and p in g:
+        if len(g) <= 80:
+            if len(p) >= len(g) * 0.4:
+                return True
+        else:
+            return True
+    # 3b. Gold is contained in pred (model was more verbose)
+    if len(g) >= 3 and g in p:
+        if len(g) >= len(p) * 0.4:
+            return True
+
+    # 4. Parenthetical removal
+    g_np = _normalize_text_for_match(re.sub(r"\s*\([^)]*\)", "", g))
+    p_np = _normalize_text_for_match(re.sub(r"\s*\([^)]*\)", "", p))
+    if p_np and p_np == g_np:
+        return True
+
+    return False
+
+
+def _score_boolean(pred: str, gold: str) -> bool:
+    """Match parser-bench's `_score_boolean`. Tokenize on `,;.`, normalize."""
+    p_token = pred.strip().lower().split(",")[0].split(";")[0].split(".")[0].strip()
+    g_token = gold.strip().lower().split(",")[0].split(";")[0].split(".")[0].strip()
+    p_bool = _normalize_bool(p_token)
+    g_bool = _normalize_bool(g_token)
+    if p_bool is not None and g_bool is not None:
+        return p_bool == g_bool
+    return p_token == g_token
+
+
+def _score_multiple_choice(pred: str, gold: str) -> bool:
+    """Match parser-bench's `_score_multiple_choice`. Standalone letter A-E first."""
+    import re
+
+    standalone = re.compile(r"(?<![a-zA-Z])([A-Ea-e])(?![a-zA-Z])")
+    p_m = standalone.search(pred)
+    g_m = standalone.search(gold)
+    if p_m and g_m:
+        return p_m.group(1).upper() == g_m.group(1).upper()
+    p_any = re.search(r"[A-Ea-e]", pred)
+    g_any = re.search(r"[A-Ea-e]", gold)
+    if p_any and g_any:
+        return p_any.group().upper() == g_any.group().upper()
+    return pred.strip().lower() == gold.strip().lower()
+
+
+_NUMERIC_TOKEN_RE_STR = r"-?\d+(?:,\d{3})*(?:\.\d+)?(?:[eE][+-]?\d+)?"
+_UNIT_PATTERN_STR = r"[^\d\.\-\+eE]"
+
+
+def _strip_units(s: str) -> str:
+    """Mirror parser-bench's `_strip_units`: drop currency / units / commas."""
+    import re
+
+    s = s.replace(",", "").replace(" ", "")
+    s = re.sub(_UNIT_PATTERN_STR, "", s)
+    return s.strip()
+
+
+def _extract_float(text: str) -> float | None:
+    """Parse a numeric value from `text` matching parser-bench `_parse_numeric`.
+
+    First tries strip-and-parse (handles "$1,234.56", "42 USD", "5.5V", "40%"
+    cleanly). Falls back to first-numeric-token regex for prose-wrapped golds
+    like "Approximately 520 A" or "The aspect ratio is approximately 1.0 (...)".
+    """
+    if text is None:
+        return None
+    try:
+        return float(_strip_units(text))
+    except (ValueError, TypeError):
+        pass
+    import re
+
+    m = re.search(_NUMERIC_TOKEN_RE_STR, text)
+    if not m:
+        return None
+    try:
+        return float(m.group().replace(",", ""))
+    except ValueError:
+        return None
 
 
 def _score_numeric(pred: str, gold: str, tolerance: float | None) -> float:
     """Match parser-bench's scorer (third_party/parser-bench/src/eval/scoring.py:56):
     when `tolerance` is provided, it's an absolute delta between extracted
     numeric tokens. When `tolerance` is None, fall back to 1% relative
-    tolerance against the gold magnitude. The 1e-9 epsilon absorbs FP error
-    near tolerance boundaries (`|1.1 - 1.0|` is `0.10000000000000009`).
+    tolerance against the gold magnitude (clamped to abs(gold) ≥ 1.0 so small
+    golds like 0.5 don't reduce tolerance to 0.005). The 1e-9 epsilon absorbs
+    FP error near tolerance boundaries (`|1.1 - 1.0|` is `0.10000000000000009`).
     """
     p = _extract_float(pred)
     g = _extract_float(gold)
@@ -84,20 +234,8 @@ def _score_numeric(pred: str, gold: str, tolerance: float | None) -> float:
         return 0.0
     if tolerance is not None:
         return 1.0 if abs(p - g) <= tolerance + 1e-9 else 0.0
-    rel = max(abs(g) * 0.01, 1e-9)
+    rel = 0.01 * max(abs(g), 1.0)
     return 1.0 if abs(p - g) <= rel + 1e-9 else 0.0
-
-
-def _extract_float(text: str) -> float | None:
-    import re
-
-    m = re.search(r"-?\d+(?:\.\d+)?", text)
-    if not m:
-        return None
-    try:
-        return float(m.group(0))
-    except ValueError:
-        return None
 
 
 # ---------------------------------------------------------------------------

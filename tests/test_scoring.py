@@ -402,15 +402,20 @@ def test_score_numeric_uses_absolute_tolerance(parser_bench_submodule_present):
 
 
 def test_score_numeric_falls_back_to_one_percent_relative_when_no_tolerance():
+    """Parser-bench parity: relative tolerance is 1% of max(|gold|, 1.0)."""
     from focusparse.eval.scoring import _score_numeric
 
-    # gold=100, pred=101 → |1| ≤ max(1, 1e-9) → 1.0
+    # gold=100, pred=101 → |1| ≤ 1.0 → 1.0
     assert _score_numeric("101", "100", None) == 1.0
     # gold=100, pred=102 → |2| > 1 → 0.0
     assert _score_numeric("102", "100", None) == 0.0
-    # gold=0 — relative tolerance collapses to epsilon
+    # gold=0, pred=0 → exact → 1.0
     assert _score_numeric("0", "0", None) == 1.0
-    assert _score_numeric("0.0001", "0", None) == 0.0
+    # gold=0, pred=0.5 → 0.5 ≤ 0.01*max(0,1)=0.01 → False → 0.0
+    assert _score_numeric("0.5", "0", None) == 0.0
+    # Small-gold floor: gold=0.5, pred=0.51 → tol = 0.01*max(0.5,1)=0.01,
+    # |0.01| ≤ 0.01 → 1.0 (matches parser-bench, gives small golds room).
+    assert _score_numeric("0.51", "0.5", None) == 1.0
 
 
 def test_score_answer_extracts_number_from_prose_when_numeric(parser_bench_submodule_present):
@@ -426,3 +431,93 @@ def test_score_answer_extracts_number_from_prose_when_numeric(parser_bench_submo
     # First-number extraction: "2 outputs" → 2 matches gold "2"
     ex2 = _example_with_type(AnswerType.NUMERIC, answer="2", tolerance=0.0)
     assert score_answer("2 outputs", ex2) == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: parser-bench parity for exact_match / boolean / multiple_choice
+# ---------------------------------------------------------------------------
+
+
+def test_exact_match_verbatim():
+    from focusparse.eval.scoring import _score_exact_match
+
+    assert _score_exact_match("0x44", "0x44") is True
+    assert _score_exact_match("0x44.", "0x44") is True  # trailing punctuation stripped
+    assert _score_exact_match("0X44", "0x44") is True  # case-insensitive
+
+
+def test_exact_match_separator_split_on_gold():
+    """Gold='MEMORY; it occurs after EXECUTE...' pred='MEMORY' → match core."""
+    from focusparse.eval.scoring import _score_exact_match
+
+    gold = "MEMORY; it occurs after EXECUTE and before WRITE"
+    assert _score_exact_match("MEMORY", gold) is True
+    assert _score_exact_match("memory", gold) is True
+
+
+def test_exact_match_pred_contains_gold():
+    """Gold='0x44' embedded in a longer pred → match (gold ⊂ pred, len ratio ok)."""
+    from focusparse.eval.scoring import _score_exact_match
+
+    pred = "After STR/LDRB the value r2 = 0x44 in little-endian."
+    # gold len 4, pred len ~55 → 4 / 55 = 0.07 < 0.4 — won't match the
+    # containment threshold. This codifies parser-bench's choice.
+    assert _score_exact_match(pred, "0x44") is False
+    # But a pred that's a verbose version of a longer gold matches:
+    long_gold = "Arithmetic Shift Right shifts in the sign bit"
+    long_pred = f"{long_gold}. The diagram shows this clearly."
+    assert _score_exact_match(long_pred, long_gold) is True
+
+
+def test_exact_match_gold_contains_pred():
+    """Gold='Balance Sheets, page 52' pred='Balance Sheets' → match."""
+    from focusparse.eval.scoring import _score_exact_match
+
+    assert _score_exact_match("Balance Sheets", "Balance Sheets, page 52") is True
+    # Too-short pred (< 3 chars) doesn't match
+    assert _score_exact_match("Ba", "Balance Sheets, page 52") is False
+
+
+def test_exact_match_parenthetical_removal():
+    """X (Y) ≡ X."""
+    from focusparse.eval.scoring import _score_exact_match
+
+    full = "Irish Data Protection Commission (IDPC)"
+    short = "Irish Data Protection Commission"
+    assert _score_exact_match(short, full) is True
+    assert _score_exact_match(full, short) is True
+
+
+def test_score_boolean_token_tolerance():
+    from focusparse.eval.scoring import _score_boolean
+
+    assert _score_boolean("yes", "true") is True
+    assert _score_boolean("Yes, the device meets the spec.", "true") is True
+    assert _score_boolean("no, it does not", "false") is True
+    assert _score_boolean("Y", "yes") is True
+    assert _score_boolean("incorrect", "false") is True
+    assert _score_boolean("yes", "no") is False
+
+
+def test_score_multiple_choice_standalone_letter():
+    from focusparse.eval.scoring import _score_multiple_choice
+
+    assert _score_multiple_choice("B", "B") is True
+    assert _score_multiple_choice("(B)", "B") is True
+    assert _score_multiple_choice("The answer is C.", "C") is True
+    # Standalone letter wins over embedded letters in words
+    assert _score_multiple_choice("Bandwidth answer is B", "B") is True
+    assert _score_multiple_choice("D", "B") is False
+
+
+def test_extract_float_handles_units_and_currency():
+    from focusparse.eval.scoring import _extract_float
+
+    assert _extract_float("$1,234.56") == 1234.56
+    assert _extract_float("42 USD") == 42.0
+    assert _extract_float("5.5V") == 5.5
+    assert _extract_float("40%") == 40.0
+    # Prose-wrapped fallback
+    assert _extract_float("The aspect ratio is approximately 1.0 (units of mm)") == 1.0
+    # No number present
+    assert _extract_float("foo bar") is None
