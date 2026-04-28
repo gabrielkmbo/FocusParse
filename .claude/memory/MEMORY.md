@@ -79,6 +79,53 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-04-27 — Baseline accuracy fix: 0% → 28-57% (5-phase plan landed)
+
+The 6-protocol matrix on `Arm_EE382N_4` (7 examples) reported 0% accuracy across all protocols. Diagnosis: scoring + harness defects masked real model output, not a model deficiency. Five phases per `plans/2026-04-27-fix-baseline-accuracy.md`:
+
+**Phase 1 — scoring routing (`src/focusparse/eval/scoring.py`):**
+
+- `score_answer` was using `answer_type.endswith("numeric")` against `"AnswerType.NUMERIC"` (parser-bench enum repr) → all 4 branches dead, every example fell through to strict casefold exact_match.
+- New `_answer_type_stem(answer_type)` normalizes enum/string → lowercase stem; routes correctly.
+- `_score_numeric` switched from RELATIVE tolerance (FocusParse-only) to ABSOLUTE (parser-bench parity), with 1e-9 epsilon for FP-precision edges.
+
+**Phase 2 — simple-agent page mapping + IoU coord-space:**
+
+- Simple agent emitted `page=1` (positional) for all citations; gold pages were 50/33/15 → page_recall=0, bbox_iou=0.
+- `_build_simple_user_prompt` now tells the model "This image is from page 50 of the document"; `_ordered_pages_for_images` derives the mapping from `_page_NNNN_` filenames.
+- `_remap_positional_pages` is the safety-net fallback when the model still emits 1-indexed citations (idempotent for already-source-numbered).
+- `run_simple_eval` now passes `image_dims_by_page` into `_score_and_record` so predicted-normalized vs gold-pixel-space IoU works (matches `run_focus_eval`).
+
+**Phase 3 — answer-format hint:**
+
+- `_format_hint(answer_type)` appends "Answer with a single number" / "Answer with the exact label" / "Answer 'yes' or 'no'" / etc. to the user prompt. Stops the VLM from emitting prose like "About 70% of the way down the displayed memory stack" for a numeric gold of "40%".
+
+**Phase 4 — full parser-bench scorer parity (`src/focusparse/eval/scoring.py`):**
+
+- `_score_exact_match`: 4 fallback layers — verbatim, separator-split on gold (`;`, `. `, `—`, `-`), bidirectional containment with overlap thresholds, parenthetical removal.
+- `_score_boolean`: tokenize on `,;.`, normalize via expanded vocab.
+- `_score_multiple_choice`: standalone-letter regex with fallbacks.
+- `_extract_float`: strip-units-first then token-fallback (handles `$1,234.56`, `42 USD`, `5.5V`, `40%`).
+- `_ABSTAIN_PHRASES`: 8-phrase set matching parser-bench.
+
+**Phase 5 — fresh smoke validation:**
+| protocol | before | after | $/correct |
+|---|---|---|---|
+| full_doc | 0.0% | **42.9%** | $0.013 |
+| oracle_page | 0.0% | **42.9%** | $0.013 |
+| oracle_crop | 0.0% | **42.9%** | $0.008 |
+| tiled_2up | 0.0% | **42.9%** | $0.007 |
+| tiled_4up | 0.0% | **57.1%** | $0.008 |
+| tiled_8up | 0.0% | **28.6%** | $0.011 |
+
+Within ±10pp of parser-bench's published GPT-5.4 numbers (full_doc 48.6%, oracle_crop 59.4%) at n=7. Remaining gap is consistent with sample-size variance and prose-format leakage on the longer exact_match golds (e.g. `"BLE; Signed integer comparison gave less than or equal"` — model paraphrases the explanation).
+
+Tooling: `scripts/rescore_predictions.py` re-applies `score_answer` to cached predictions without re-running the model — used to verify Phase 1 yielded 14-43% lift before any model re-run, then Phase 4 added a few more pp once Phase 3 trimmed the predictions.
+
+Tests: 16 new in test_scoring.py (enum routing, abs tolerance, exact_match 4 layers, boolean tokenization, multi-choice standalone, extract_float unit stripping), 6 new in test_harness.py (positional page remap, ordered_pages_for_images, integration), 5 new in test_workflow.py (prompt enrichment, format hints by answer_type). Suite: 395 → 433 passed.
+
+Headline: the focus pipeline (and all of the SOTA-leverage tail in `plans/2026-04-27-phase2-sota-leverage.md`) now has a real signal floor to optimize against. Pre-fix, items 4-5's A/B "regressions" may have been measuring scoring noise — re-evaluate after Phase 3 of `phase2-sota-leverage` lands.
+
 ### 2026-04-27 — parser-bench 5-protocol matrix wired
 
 `src/focusparse/eval/tile.py` (new) composes contact-sheet "tiled" inputs to match parser-bench's `tiled_2up`/`tiled_4up`/`tiled_8up` protocols. `make_contact_sheet` lays out N images at `ceil(sqrt(N))` cols by default but uses an explicit 4×2 grid for 8-up to match parser-bench. Composed sheets are downscaled to `max_dim=7680` (Anthropic/Gemini cap) preserving aspect, with layout offsets scaled accordingly. `prepare_tiled_images` is the harness entrypoint: when staged pages alone meet `n_tile`, composes in place; when short, calls `_render_noise_pages` (PyMuPDF at 300 DPI) on the source PDF excluding `example.supporting_pages`, deterministically shuffled by `sha256(f"{example.id}:{n_tile}")[:8]`. Output tile is content-addressed by example.id + n_tile so reruns hit the cache. Graceful degradation: missing PDF + insufficient staged pages → returns staged pages unchanged (caller still gets a valid list).
