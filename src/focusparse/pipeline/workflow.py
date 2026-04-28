@@ -90,6 +90,7 @@ class FocusWorkflow:
         tools: Any = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
         use_evidence_graph: bool = False,
+        auto_zoom: bool = False,
     ) -> None:
         self.backend_client = backend_client
         self.config = config
@@ -104,6 +105,10 @@ class FocusWorkflow:
         # A/B under the post-2026-04-27 scorer (the n=30 regression that
         # gated this off was measured under the pre-fix scorer).
         self.use_evidence_graph = use_evidence_graph
+        # Phase 3: auto-zoom tiny regions via run_python (LANCZOS 2× upsample).
+        # Default off — needs an A/B before flipping. Visual-reading examples
+        # like axis-value-interpolation are the target use case.
+        self.auto_zoom = auto_zoom
 
     def _client_for(self, role: str) -> ModelClient | None:
         """Resolve a role-scoped client via `tier_router`, else return None.
@@ -567,6 +572,7 @@ class FocusWorkflow:
             pdf_path=pdf_path,
             crop_cache_dir=self._role_cache_dir("crops"),
             text_layer_cache_dir=self._text_layer_cache_dir(),
+            auto_zoom=self.auto_zoom,
         )
         n_real_packets = sum(
             1 for p in evidence.packets if p.provenance.tool != "skeleton_inspector_fallback"

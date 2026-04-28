@@ -130,6 +130,7 @@ def main() -> int:
                 pdfs_root=args.pdfs_root,
                 max_retries=args.max_retries,
                 use_evidence_graph=args.use_evidence_graph,
+                auto_zoom=args.auto_zoom,
             )
         )
     else:
@@ -233,6 +234,14 @@ def _parse_args() -> argparse.Namespace:
         default=False,
         help="Enable item 5's typed evidence-graph expansion in expand_context. "
         "Default off pending a fresh A/B under the post-2026-04-27 scorer.",
+    )
+    parser.add_argument(
+        "--auto-zoom",
+        action="store_true",
+        default=False,
+        help="Enable Phase 3 auto-zoom: tiny regions get a LANCZOS 2× upsample "
+        "via the run_python sandbox before being handed to the reasoner. "
+        "Default off pending an A/B.",
     )
     return parser.parse_args()
 

@@ -41,8 +41,30 @@ from focusparse.pipeline.events import (
 )
 from focusparse.tools.get_text_layer import GetTextLayerInput, get_text_layer
 from focusparse.tools.inspect_region import InspectRegionInput, inspect_region
+from focusparse.tools.run_python import RunPythonInput, run_python
 
 logger = logging.getLogger(__name__)
+
+
+# Bbox area threshold for triggering auto-zoom (super-sampling). Regions
+# whose normalized area is below this are candidates for LANCZOS 2× upsample
+# via `run_python`. 0.005 ≈ a 70×70 px box on a 1000×1000 page — small enough
+# that fine details (axis labels, footnotes) might be unreadable at native
+# resolution.
+_AUTOZOOM_AREA_THRESHOLD = 0.005
+
+# LANCZOS 2× upsample code passed to the sandboxed `run_python`. The sandbox
+# loads the input crop into `images[ref]`; we resize and `save_image()` the
+# result. The sandbox returns a content-addressed ref we point the packet at.
+_AUTOZOOM_CODE = """
+from PIL import Image
+ref = list(images.keys())[0]
+img = images[ref]
+w, h = img.size
+out = img.resize((w * 2, h * 2), Image.Resampling.LANCZOS)
+print("zoomed", img.size, "->", out.size)
+save_image(out)
+"""
 
 # Region types where native text extraction + OCR make sense. The layout
 # endpoint's RT-DETRv2 emits these labels plus picture/chart etc. where we
@@ -109,6 +131,7 @@ async def inspect_regions(
     pdf_path: Path | None = None,
     crop_cache_dir: Path | None = None,
     text_layer_cache_dir: Path | None = None,
+    auto_zoom: bool = False,
 ) -> EvidenceEvent:
     """Produce real `EvidencePacket`s via the tool belt.
 
@@ -125,6 +148,10 @@ async def inspect_regions(
             `inspect_region`. When None, a `cache/crops/` dir is created
             under CWD (test-only convenience).
         text_layer_cache_dir: where native-text extractions are memoized.
+        auto_zoom: when True, regions whose bbox area is below
+            `_AUTOZOOM_AREA_THRESHOLD` are super-sampled 2× via LANCZOS in
+            the `run_python` sandbox. The packet's `local_crop_ref` then
+            points to the upsampled PNG. Default off pending an A/B.
 
     Returns:
         An `EvidenceEvent` with one packet per inspected region. When
@@ -150,6 +177,7 @@ async def inspect_regions(
             pdf_path=pdf_path,
             crop_cache_dir=crop_cache_dir,
             text_layer_cache_dir=text_layer_cache_dir,
+            auto_zoom=auto_zoom,
         )
         packets.append(packet)
     return EvidenceEvent(packets=packets)
@@ -168,6 +196,7 @@ async def _inspect_one_region(
     pdf_path: Path | None,
     crop_cache_dir: Path | None,
     text_layer_cache_dir: Path | None,
+    auto_zoom: bool = False,
 ) -> EvidencePacket:
     """Run the tool chain for one region and bundle the outputs into a packet."""
     page_image = images_by_page.get(region.page)
@@ -198,6 +227,18 @@ async def _inspect_one_region(
         except (FileNotFoundError, ValueError) as exc:
             # Missing PDF / invalid bbox → keep the page image as fallback.
             logger.debug("inspect_region(image) failed for %s: %s", packet_id, exc)
+
+    # --- 1b. Auto-zoom for tiny regions via run_python sandbox. ---
+    if auto_zoom and crop_ref and crop_ref != page_thumbnail_ref:
+        if _bbox_area(region.bbox_norm) < _AUTOZOOM_AREA_THRESHOLD:
+            zoomed_ref = await _zoom_crop(
+                crop_ref=crop_ref,
+                cache_dir=crop_cache_dir,
+                packet_id=packet_id,
+            )
+            if zoomed_ref is not None:
+                crop_ref = zoomed_ref
+                crop_signals.append("run_python:zoom2x")
 
     # --- 2. Text extraction — prefer native PDF, fall back to OCR. ---
     text_layer_snippet: str | None = None
@@ -271,6 +312,49 @@ async def _inspect_one_region(
 # ---------------------------------------------------------------------------
 # Ranking helpers
 # ---------------------------------------------------------------------------
+
+
+def _bbox_area(bbox: tuple[float, float, float, float]) -> float:
+    """Return normalized [0,1]² area of a bbox. Negative-shaped bboxes → 0."""
+    x0, y0, x1, y1 = bbox
+    w = max(0.0, x1 - x0)
+    h = max(0.0, y1 - y0)
+    return w * h
+
+
+async def _zoom_crop(
+    *,
+    crop_ref: str,
+    cache_dir: Path | None,
+    packet_id: str,
+) -> str | None:
+    """LANCZOS 2× upsample `crop_ref` via the run_python sandbox.
+
+    Returns the path to the zoomed PNG (so the packet's `local_crop_ref`
+    can swap to it) or None on any failure (silent — keep the original
+    crop). Cache dir is the same content-addressed dir `inspect_region`
+    writes to; the upsampled PNG goes there too keyed by sha256(bytes).
+    """
+    try:
+        out = await run_python(
+            RunPythonInput(code=_AUTOZOOM_CODE, image_refs=[crop_ref]),
+            image_cache_dir=cache_dir,
+            new_image_cache_dir=cache_dir,
+        )
+    except Exception as exc:  # noqa: BLE001 — sandbox is always best-effort
+        logger.debug("run_python(zoom) failed for %s: %s", packet_id, exc)
+        return None
+    if out.exit_code != 0 or out.timed_out or not out.new_image_refs:
+        logger.debug(
+            "run_python(zoom) returned no new image for %s (exit=%d, timed_out=%s)",
+            packet_id,
+            out.exit_code,
+            out.timed_out,
+        )
+        return None
+    if cache_dir is None:
+        return None
+    return str(cache_dir / f"{out.new_image_refs[0]}.png")
 
 
 def _expand_evidence_types(evidence_types: list[str] | None) -> frozenset[str]:

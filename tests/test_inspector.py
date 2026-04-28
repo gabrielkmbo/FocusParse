@@ -746,3 +746,188 @@ async def test_tool_errors_degrade_to_fallback_packet(tmp_path, monkeypatch):
     )
     assert len(ev.packets) == 1
     assert ev.packets[0].provenance.tool == "skeleton_inspector_fallback"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 auto-zoom — inspector swaps in LANCZOS-upsampled crops for tiny regions
+# ---------------------------------------------------------------------------
+
+
+def _bbox_with_area(area: float) -> tuple[float, float, float, float]:
+    """Return a bbox with the requested normalized area (square)."""
+    side = area**0.5
+    return (0.1, 0.1, 0.1 + side, 0.1 + side)
+
+
+async def test_auto_zoom_skips_when_disabled(tmp_path, monkeypatch):
+    """auto_zoom=False (default) → run_python is never called."""
+    inspect_calls: list = []
+    text_calls: list = []
+    run_python_calls: list = []
+
+    async def _fake_run_python(inp, **kw):
+        run_python_calls.append(inp.code)
+        from focusparse.tools.run_python import RunPythonOutput
+
+        return RunPythonOutput(stdout="ok", new_image_refs=["zoomed"])
+
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    monkeypatch.setattr("focusparse.pipeline.inspector.run_python", _fake_run_python)
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="tiny",
+                page=1,
+                bbox_norm=_bbox_with_area(0.001),  # well below threshold
+                region_type="text",
+                score=0.9,
+            )
+        ]
+    )
+    await inspect_regions(
+        _q(),
+        _plan(),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        # auto_zoom defaults to False
+    )
+    assert run_python_calls == []
+
+
+async def test_auto_zoom_fires_for_tiny_region(tmp_path, monkeypatch):
+    """auto_zoom=True + tiny region → run_python(zoom2x) called, packet
+    crop_ref points at the upsampled PNG."""
+    inspect_calls: list = []
+    text_calls: list = []
+    run_python_calls: list = []
+
+    async def _fake_run_python(inp, *, image_cache_dir=None, new_image_cache_dir=None):
+        run_python_calls.append(
+            {
+                "code": inp.code,
+                "refs": list(inp.image_refs),
+                "image_cache_dir": image_cache_dir,
+            }
+        )
+        from focusparse.tools.run_python import RunPythonOutput
+
+        return RunPythonOutput(stdout="ok", new_image_refs=["zoomed_abc"])
+
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    monkeypatch.setattr("focusparse.pipeline.inspector.run_python", _fake_run_python)
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    cache_dir = tmp_path / "crops"
+    cache_dir.mkdir()
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="tiny",
+                page=1,
+                bbox_norm=_bbox_with_area(0.001),
+                region_type="text",
+                score=0.9,
+            )
+        ]
+    )
+    ev = await inspect_regions(
+        _q(),
+        _plan(),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        crop_cache_dir=cache_dir,
+        auto_zoom=True,
+    )
+    assert len(run_python_calls) == 1
+    assert "LANCZOS" in run_python_calls[0]["code"]
+    # Packet crop_ref now points at the zoomed PNG.
+    packet = ev.packets[0]
+    assert packet.local_crop_ref == str(cache_dir / "zoomed_abc.png")
+    # Provenance reflects the zoom step.
+    assert "run_python:zoom2x" in (packet.provenance.args_hash or "")
+
+
+async def test_auto_zoom_skips_for_large_region(tmp_path, monkeypatch):
+    """auto_zoom=True but region area above threshold → run_python NOT called."""
+    inspect_calls: list = []
+    text_calls: list = []
+    run_python_calls: list = []
+
+    async def _fake_run_python(inp, **kw):
+        run_python_calls.append(inp.code)
+        from focusparse.tools.run_python import RunPythonOutput
+
+        return RunPythonOutput(stdout="ok", new_image_refs=["zoomed"])
+
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    monkeypatch.setattr("focusparse.pipeline.inspector.run_python", _fake_run_python)
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="big",
+                page=1,
+                # 0.3×0.3 = 0.09 area, well above threshold of 0.005
+                bbox_norm=(0.1, 0.1, 0.4, 0.4),
+                region_type="text",
+                score=0.9,
+            )
+        ]
+    )
+    await inspect_regions(
+        _q(),
+        _plan(),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        auto_zoom=True,
+    )
+    assert run_python_calls == []
+
+
+async def test_auto_zoom_failure_keeps_original_crop(tmp_path, monkeypatch):
+    """run_python returns an error → original crop_ref is preserved."""
+    inspect_calls: list = []
+    text_calls: list = []
+
+    async def _fake_run_python(inp, **kw):
+        from focusparse.tools.run_python import RunPythonOutput
+
+        return RunPythonOutput(stdout="", stderr="ImportError", exit_code=1)
+
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    monkeypatch.setattr("focusparse.pipeline.inspector.run_python", _fake_run_python)
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="tiny",
+                page=1,
+                bbox_norm=_bbox_with_area(0.001),
+                region_type="text",
+                score=0.9,
+            )
+        ]
+    )
+    ev = await inspect_regions(
+        _q(),
+        _plan(),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        crop_cache_dir=tmp_path / "crops",
+        auto_zoom=True,
+    )
+    # crop_ref came from inspect_region (unchanged), not run_python.
+    assert "zoomed" not in ev.packets[0].local_crop_ref
+    assert "run_python:zoom2x" not in (ev.packets[0].provenance.args_hash or "")
