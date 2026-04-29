@@ -91,6 +91,7 @@ class FocusWorkflow:
         max_retries: int = _DEFAULT_MAX_RETRIES,
         use_evidence_graph: bool = False,
         auto_zoom: bool = False,
+        tool_set: str = "full",
     ) -> None:
         self.backend_client = backend_client
         self.config = config
@@ -108,7 +109,17 @@ class FocusWorkflow:
         # Phase 3: auto-zoom tiny regions via run_python (LANCZOS 2× upsample).
         # Default off — needs an A/B before flipping. Visual-reading examples
         # like axis-value-interpolation are the target use case.
-        self.auto_zoom = auto_zoom
+        # Forced off when tool_set=="minimal" (run_python is one of the
+        # tools removed in that variant).
+        self.auto_zoom = auto_zoom and tool_set != "minimal"
+        # Headline-table tool-set axis: "minimal" = inspect_region +
+        # get_text_layer only; "full" = + expand_context + run_python.
+        # When minimal, the expand_context stage is skipped (passthrough)
+        # so the +2-tools row of the table is a real ablation, not just
+        # a flag that hides expansion.
+        if tool_set not in ("minimal", "full"):
+            raise ValueError(f"tool_set must be 'minimal' or 'full', got {tool_set!r}")
+        self.tool_set = tool_set
 
     def _client_for(self, role: str) -> ModelClient | None:
         """Resolve a role-scoped client via `tier_router`, else return None.
@@ -605,6 +616,24 @@ class FocusWorkflow:
         step_counter: _StepCounter,
         retry_attempt: int = 0,
     ) -> EvidenceEvent:
+        # Tool-set ablation: when running with the +2-tools (minimal) belt
+        # we skip expand_context entirely. The trace records a passthrough
+        # step so per-stage metrics stay alignable across runs.
+        if self.tool_set == "minimal":
+            recorder.record(
+                TrajectoryStep(
+                    step_index=step_counter.next(),
+                    stage="expand_context",
+                    tier="skipped",
+                    action="passthrough",
+                    args={
+                        "n_packets": len(evidence.packets),
+                        "reason": "tool_set=minimal",
+                        "retry_attempt": retry_attempt,
+                    },
+                )
+            )
+            return evidence
         expanded = await expand_context(
             evidence,
             regions=regions,

@@ -131,6 +131,7 @@ def main() -> int:
                 max_retries=args.max_retries,
                 use_evidence_graph=args.use_evidence_graph,
                 auto_zoom=args.auto_zoom,
+                tool_set=args.tool_set,
             )
         )
     else:
@@ -242,6 +243,18 @@ def _parse_args() -> argparse.Namespace:
         help="Enable Phase 3 auto-zoom: tiny regions get a LANCZOS 2× upsample "
         "via the run_python sandbox before being handed to the reasoner. "
         "Default off pending an A/B.",
+    )
+    parser.add_argument(
+        "--tool-set",
+        choices=["minimal", "full"],
+        default="full",
+        help=(
+            "Tool belt available to the agent. minimal = inspect_region + "
+            "get_text_layer (universal see-and-read). full = + expand_context "
+            "+ run_python (FocusParse-specific). The +2-tools / +4-tools axis "
+            "of the headline table. Forwarded to FocusWorkflow which skips "
+            "expand_context and forces auto_zoom off when minimal."
+        ),
     )
     return parser.parse_args()
 

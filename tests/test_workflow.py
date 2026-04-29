@@ -1135,3 +1135,77 @@ async def test_simple_agent_prompt_includes_boolean_hint(tmp_path, parser_bench_
 
     prompt = client.calls[0]["prompt"]
     assert "yes" in prompt.lower() and "no" in prompt.lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 of headline-table plan: --tool-set minimal | full
+# ---------------------------------------------------------------------------
+
+
+async def test_workflow_rejects_unknown_tool_set(parser_bench_submodule_present):
+    """Defensive: tool_set outside {minimal, full} fails fast at construction."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+    client = _FakeClient('{"answer": "x", "citations": []}')
+    with pytest.raises(ValueError, match="tool_set"):
+        FocusWorkflow(backend_client=client, tool_set="medium")
+
+
+async def test_workflow_minimal_tool_set_skips_expand_context(
+    tmp_path, parser_bench_submodule_present
+):
+    """tool_set=minimal records a passthrough expand_context step (tier=skipped)."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+
+    client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    workflow = FocusWorkflow(backend_client=client, tool_set="minimal")
+    images = [tmp_path / "datasheet-A_page_0003_300dpi.png"]
+    result = await workflow.run(_make_example(), images, protocol="focus")
+
+    expand_steps = [s for s in result.trace.steps if s.stage == "expand_context"]
+    assert len(expand_steps) == 1
+    step = expand_steps[0]
+    assert step.tier == "skipped"
+    assert step.action == "passthrough"
+    assert step.args.get("reason") == "tool_set=minimal"
+
+
+async def test_workflow_full_tool_set_runs_expand_context(tmp_path, parser_bench_submodule_present):
+    """tool_set=full (default) runs the real expand_context with deterministic tier."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+
+    client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    workflow = FocusWorkflow(backend_client=client, tool_set="full")
+    images = [tmp_path / "datasheet-A_page_0003_300dpi.png"]
+    result = await workflow.run(_make_example(), images, protocol="focus")
+
+    expand_steps = [s for s in result.trace.steps if s.stage == "expand_context"]
+    assert len(expand_steps) == 1
+    step = expand_steps[0]
+    assert step.tier in ("deterministic", "skeleton")
+    assert step.action != "passthrough"
+
+
+async def test_workflow_minimal_tool_set_forces_auto_zoom_off(
+    parser_bench_submodule_present,
+):
+    """auto_zoom=True + tool_set=minimal → auto_zoom is silently disabled
+    (run_python is one of the tools removed in the +2-tools belt)."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+    client = _FakeClient('{"answer": "x", "citations": []}')
+    workflow = FocusWorkflow(backend_client=client, auto_zoom=True, tool_set="minimal")
+    assert workflow.auto_zoom is False
+
+
+async def test_workflow_full_tool_set_respects_auto_zoom(
+    parser_bench_submodule_present,
+):
+    """auto_zoom=True + tool_set=full → auto_zoom stays on."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+    client = _FakeClient('{"answer": "x", "citations": []}')
+    workflow = FocusWorkflow(backend_client=client, auto_zoom=True, tool_set="full")
+    assert workflow.auto_zoom is True

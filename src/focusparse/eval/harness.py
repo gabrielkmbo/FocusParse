@@ -173,6 +173,7 @@ async def run_focus_eval(
     max_retries: int | None = None,
     use_evidence_graph: bool = False,
     auto_zoom: bool = False,
+    tool_set: str = "full",
 ) -> dict[str, Any]:
     """Run `FocusWorkflow` over an iterable of examples.
 
@@ -223,7 +224,14 @@ async def run_focus_eval(
         workflow_kwargs["use_evidence_graph"] = True
     if auto_zoom:
         # Phase-3 toggle: deterministic LANCZOS 2× upsample of tiny crops.
+        # Workflow forces this off when tool_set=="minimal" (run_python is
+        # not in the +2-tools belt), but we still surface the flag here so
+        # the tier-router log records the caller's intent.
         workflow_kwargs["auto_zoom"] = True
+    if tool_set != "full":
+        # +2-tools ablation row of the headline table. Workflow validates
+        # the value; harness just forwards.
+        workflow_kwargs["tool_set"] = tool_set
     workflow = FocusWorkflow(**workflow_kwargs)
     per_example: list[dict[str, Any]] = []
 
