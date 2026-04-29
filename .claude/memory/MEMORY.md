@@ -8,6 +8,58 @@
 >
 > **This is where running context lives. CLAUDE.md stays lean (commands + structure + contracts).** If you're tempted to put a multi-paragraph note in CLAUDE.md, put it here instead.
 
+## Research framework — what we're proving (2026-04-29)
+
+**This is the single guiding rule for every change to the repo.**
+
+We are building one research artifact: a **headline 4-method × 2-task × 2-metric table** that supports one causal claim — _FocusParse's evidence-localization-first agent harness beats both base VLMs and generic ReAct agents on high-resolution domain-specific document parsing (technical datasheets + finance docs), and the advantage scales with tool count._
+
+```
+                          | Datasheets (n=101)     | Finance (n=47)
+                          | accuracy | $/correct   | accuracy | $/correct
+--------------------------|----------|-------------|----------|----------
+Base VLM (no tools)       |          |             |          |
+ReAct +2 / +4 tools       |          |             |          |
+Agent baseline +2 / +4    |          |             |          |
+Our harness +2 / +4 tools |          |             |          |
+```
+
+- **Independent variables:** harness type (Base / ReAct / Agent baseline / FocusParse) × tool-count (+2 / +4).
+- **Dependent variables:** accuracy (primary), $/correct (primary), bbox_iou (secondary).
+- **Conditions (tasks):** technical datasheets (101 examples) and finance docs (47 examples).
+- **Protocol:** `agentic_multi_page` (mixed 2/4/8up summary view + full page-list with tool access) — _not_ oracle protocols. Oracle goes in the appendix.
+- **Statistical reporting:** 95% bootstrap CIs on every cell. n=47 finance is small; CIs matter.
+- **Reproducibility gate:** a side-row showing `simple/full_doc` matches parser-bench's published GPT-5.4 (48.6%) within ±2pp must stay green.
+
+### Development priority — FocusParse harness is the product
+
+**The comparator methods (Base VLM, ReAct, Agent baseline) exist only to make our claim measurable. They are not products.** They get the minimum viable implementation and then they freeze. Engineering effort goes to:
+
+- `src/focusparse/pipeline/{localizer,inspector,expander}.py` — the 3 hot stages
+- `src/focusparse/tools/*` — `inspect_region`, `expand_context`, `run_python`, `chart_to_table`
+- `src/focusparse/traces/*` — trajectory recording for the future SFT pipeline
+
+Other code (`react_agent.py`, `agent_baseline.py`, harness wiring, eval infrastructure) gets only the implementation needed to keep the headline table fillable. Don't optimize comparators.
+
+### How to evaluate any proposed change
+
+1. Which **cell** in the headline table does this change move?
+2. By how much is it expected to move? (Specify a number, even if a guess.)
+3. Through what **mechanism**? (Pipe the prediction through a stage-level metric like `bbox_iou`, `region_recall`, `cited_evidence_completeness` so the A/B can falsify it.)
+4. After implementation: A/B at n=148 with bootstrapped CIs. Move ≥ 3pp at non-overlapping CIs → ship as default. Otherwise → opt-in flag, negative-result note in this file, move on.
+
+If a change can't answer questions 1–3 honestly, **deprioritize it**. The headline table is the metronome.
+
+### Active plan: `plans/2026-04-29-research-driven-eval-framework.md`
+
+That plan defines Phases 1–7 (domain split + CIs → tool-set axis → multi-page protocol → comparator methods → run table → iterate harness → appendix). It subsumes prior plans:
+
+- `plans/2026-04-13-focusparse-agentic-pipeline.md` Phase 5 (multi-tier sweep) → Phase 7 model-swap appendix experiment
+- `plans/2026-04-27-phase2-sota-leverage.md` items 3–5 (loop / rerank / graph) → Phase 6 candidates 1, 2, 4
+- `plans/2026-04-27-fix-baseline-accuracy.md` → already complete; underwrites the scoring trust the headline depends on
+
+When in doubt about what to work on, open the plan and pick the highest-priority unchecked item from Phase 6 (post-table iteration). That's where the harness improves.
+
 ## Narrowed scope — what we optimize (2026-04-24)
 
 The 7 pipeline stages are intentionally unequal:

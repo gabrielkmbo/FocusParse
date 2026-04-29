@@ -2,6 +2,8 @@
 
 Lean operational card. **Running context + scope + changelog live in [`.claude/memory/MEMORY.md`](.claude/memory/MEMORY.md)** and the files it indexes — read them on init. Product goals + architecture: [`README.md`](README.md) and the active plan in [`plans/`](plans/).
 
+> **Research framework.** Every change to this repo is judged by whether it moves a cell in the headline 4-method × 2-task × 2-metric table that drives the paper claim. See **[`MEMORY.md` → "Research framework"](.claude/memory/MEMORY.md)** for the table spec, the development priority (FocusParse harness is the product; comparator methods are scaffolding), and the active plan at [`plans/2026-04-29-research-driven-eval-framework.md`](plans/2026-04-29-research-driven-eval-framework.md).
+
 ## What this repo does
 
 FocusParse runs a hierarchical, budget-aware agentic workflow over documents from the `gabrielbo/parser-bench` benchmark and emits citation-grounded answers + trajectory traces. Consumes `parser-bench` **read-only** as a git submodule at `third_party/parser-bench/`.
