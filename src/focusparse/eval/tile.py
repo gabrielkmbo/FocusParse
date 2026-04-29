@@ -23,6 +23,7 @@ import logging
 import math
 import random
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -43,6 +44,36 @@ TILE_SIZES: dict[str, int] = {
 # Keep the same default for parity.
 _MAX_IMAGE_DIM = 7680
 _NOISE_PAGE_DPI = 300  # match the staged gold pages' DPI
+
+# Headline-table protocol (Phase 3 of the 2026-04-29 plan): each example
+# exposes BOTH a tiled summary view (input b) AND the full page list
+# (input c). Tile-size for the summary view is sampled per-example with
+# weights below — middle-heavy because 4up is the most realistic "search
+# a few pages" experience.
+_AGENTIC_TILE_SIZES: tuple[int, ...] = (2, 4, 8)
+_AGENTIC_TILE_WEIGHTS: tuple[float, ...] = (0.25, 0.5, 0.25)
+
+
+@dataclass
+class AgenticMultiPageInput:
+    """Per-example input bundle for the `agentic_multi_page` protocol.
+
+    Each method consumes what it needs:
+      * Base VLM: only `summary_view`.
+      * ReAct / Agent baseline: `summary_view` as initial input + tool
+        access to read pages from `page_list` / `pdf_path`.
+      * Our harness (FocusWorkflow): `page_list` + `pdf_path`. The
+        summary view is recorded in trajectory metadata but the pipeline's
+        router/localizer only operates on real pages.
+
+    `summary_tile_size` is recorded per-example so the headline table
+    can be split by tile-size if needed (appendix experiment).
+    """
+
+    summary_view: Path | None
+    summary_tile_size: int  # 2, 4, or 8
+    page_list: list[Path] = field(default_factory=list)
+    pdf_path: Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +157,72 @@ def prepare_tiled_images(
             exc,
         )
         return support_pages
+
+
+def sample_agentic_tile_size(example_id: str) -> int:
+    """Deterministically sample a tile size in {2, 4, 8} for an example.
+
+    Seed = first 8 hex chars of `sha256(example_id)`. Same id → same size
+    across runs, so cache lookups stay stable. Weights are middle-heavy
+    so 4-up dominates (the most realistic "scan 4 pages at a glance" case).
+    """
+    seed = int(hashlib.sha256(example_id.encode()).hexdigest()[:8], 16)
+    rng = random.Random(seed)
+    return rng.choices(_AGENTIC_TILE_SIZES, weights=_AGENTIC_TILE_WEIGHTS, k=1)[0]
+
+
+def prepare_agentic_multi_page(
+    example: BenchmarkExample,
+    *,
+    staged_pages: list[Path],
+    pdf_path: Path | None,
+    cache_dir: Path,
+    noise_cache_dir: Path | None = None,
+) -> AgenticMultiPageInput:
+    """Build the per-example bundle for the `agentic_multi_page` protocol.
+
+    Returns the summary view (a tiled composition at a per-example tile
+    size in {2, 4, 8}) plus the full page list. Methods consume what
+    they need:
+      * Base VLM uses only `summary_view`.
+      * Tool-using methods get the full bundle.
+
+    The summary view is content-addressed by `<example_id>_summary_<n>up.png`
+    so reruns hit the cache. When tiling fails (no pages or composition
+    error), `summary_view` is None and the methods that need it fall back
+    to the staged-pages path.
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resolve real, on-disk pages for the page list.
+    page_list = [p for p in staged_pages if p.exists()]
+    tile_size = sample_agentic_tile_size(example.id)
+
+    # Compose the summary view by reusing prepare_tiled_images. When too
+    # few pages exist to tile, summary_view is None — the caller
+    # gracefully degrades.
+    summary_paths = prepare_tiled_images(
+        example,
+        tile_size,
+        staged_pages=page_list,
+        pdf_path=pdf_path,
+        tile_cache_dir=cache_dir,
+        noise_cache_dir=noise_cache_dir,
+    )
+    # `prepare_tiled_images` returns either a single composed tile or a
+    # fallback list of staged pages. We only treat it as a summary when it
+    # composed (returns exactly 1 path that looks like a tile).
+    summary_view: Path | None = None
+    if len(summary_paths) == 1 and "_tiled_" in summary_paths[0].name:
+        summary_view = summary_paths[0]
+
+    return AgenticMultiPageInput(
+        summary_view=summary_view,
+        summary_tile_size=tile_size,
+        page_list=page_list,
+        pdf_path=pdf_path,
+    )
 
 
 def make_contact_sheet(

@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -105,6 +106,17 @@ async def run_simple_eval(
                 pdfs_root=pdfs_root,
                 tile_cache_dir=output_dir / "tiles",
             )
+            # Simple-agent slice: for `agentic_multi_page` we only show the
+            # model the summary view (slot 0). The page list is also in
+            # `images` for tool-using methods, but the Base VLM has no
+            # tools so it would just see redundant input.
+            agentic_meta: dict[str, object] | None = None
+            if protocol == "agentic_multi_page":
+                agentic_meta = _agentic_summary_meta(
+                    example, images_root, pdfs_root, output_dir / "tiles"
+                )
+                if images:
+                    images = images[:1]
             try:
                 image_pages = _ordered_pages_for_images(example, images, protocol)
                 result: WorkflowResult = await agent.run(example, images, image_pages=image_pages)
@@ -116,6 +128,8 @@ async def run_simple_eval(
                     image_dims_by_page=image_dims,
                     image_pages=image_pages,
                 )
+                if agentic_meta is not None:
+                    record["agentic_meta"] = agentic_meta
                 cache_path.write_text(json.dumps(record, default=str))
             except Exception as exc:
                 logger.exception("Example %s failed: %s", example.id, exc)
@@ -255,6 +269,25 @@ async def run_focus_eval(
             # Focus agent always sees all pages — routing is its job.
             images = [_resolve(images_root, p) for p in (example.page_images or [])]
             pdf_path = _resolve_pdf_path(pdfs_root, example)
+            # For `agentic_multi_page` we also compose the summary view so
+            # the per-example record carries `summary_tile_size` for
+            # appendix breakdowns. The focus pipeline itself only consumes
+            # real pages (its `_images_by_page` ignores non-page-named
+            # files), so prepending the summary view is harmless.
+            agentic_meta: dict[str, object] | None = None
+            if protocol == "agentic_multi_page":
+                agentic_images = _prepare_images(
+                    example,
+                    protocol=protocol,
+                    images_root=images_root,
+                    pdfs_root=pdfs_root,
+                    tile_cache_dir=output_dir / "tiles",
+                )
+                if agentic_images:
+                    images = agentic_images
+                agentic_meta = _agentic_summary_meta(
+                    example, images_root, pdfs_root, output_dir / "tiles"
+                )
             try:
                 result: WorkflowResult = await workflow.run(
                     example, images, protocol=protocol, pdf_path=pdf_path
@@ -263,6 +296,8 @@ async def run_focus_eval(
                 record = _score_and_record(
                     example, result, protocol=protocol, image_dims_by_page=image_dims
                 )
+                if agentic_meta is not None:
+                    record["agentic_meta"] = agentic_meta
                 cache_path.write_text(json.dumps(record, default=str))
             except Exception as exc:
                 logger.exception("Example %s failed: %s", example.id, exc)
@@ -323,8 +358,18 @@ def _prepare_images(
     contact-sheet PNG, mirroring parser-bench's `prepare_tiled_images`.
     Requires a PDF for noise-rendering when N > len(staged_pages); falls
     back to staged-pages-only when no PDF is wired.
+
+    `agentic_multi_page` is the headline-table protocol: returns
+    `[summary_view, ...page_list]` where `summary_view` is a per-example
+    tiled composition at a sampled tile size in {2,4,8}. Caller is
+    responsible for slicing — `run_simple_eval` takes only `[summary_view]`,
+    `run_focus_eval` keeps the full list.
     """
-    from focusparse.eval.tile import TILE_SIZES, prepare_tiled_images
+    from focusparse.eval.tile import (
+        TILE_SIZES,
+        prepare_agentic_multi_page,
+        prepare_tiled_images,
+    )
 
     all_pages = [_resolve(images_root, p) for p in (example.page_images or [])]
     supporting_pages = list(example.supporting_pages or [])
@@ -353,7 +398,60 @@ def _prepare_images(
             tile_cache_dir=cache_dir,
         )
 
+    if protocol == "agentic_multi_page":
+        cache_dir = tile_cache_dir or (images_root.parent / "tile_cache")
+        pdf_path = _resolve_pdf_path(pdfs_root, example) if pdfs_root else None
+        bundle = prepare_agentic_multi_page(
+            example,
+            staged_pages=all_pages,
+            pdf_path=pdf_path,
+            cache_dir=cache_dir,
+        )
+        out: list[Path] = []
+        if bundle.summary_view is not None:
+            out.append(bundle.summary_view)
+        out.extend(bundle.page_list)
+        return out
+
     raise ValueError(f"Unknown protocol: {protocol!r}")
+
+
+def _agentic_summary_meta(
+    example: BenchmarkExample,
+    images_root: Path,
+    pdfs_root: Path | None,
+    tile_cache_dir: Path | None,
+) -> dict[str, object]:
+    """Per-example metadata for the agentic_multi_page protocol.
+
+    Returns `{summary_tile_size, has_summary_view}`. Cheap (no rendering;
+    `prepare_agentic_multi_page` is content-addressed so reuse hits the
+    cache when called repeatedly with the same example/cache_dir). Useful
+    for recording in per-example records so the headline table can be
+    split by tile-size as an appendix experiment.
+    """
+    from focusparse.eval.tile import sample_agentic_tile_size
+
+    return {
+        "summary_tile_size": sample_agentic_tile_size(example.id),
+        # `has_summary_view` is the truthiness of the summary path; we
+        # compute it lazily by checking the cache at lookup time.
+        "summary_view_cached": _summary_view_cached(example, images_root, tile_cache_dir),
+    }
+
+
+def _summary_view_cached(
+    example: BenchmarkExample,
+    images_root: Path,
+    tile_cache_dir: Path | None,
+) -> bool:
+    """Check whether a summary-view PNG already exists on disk."""
+    from focusparse.eval.tile import sample_agentic_tile_size
+
+    cache_dir = tile_cache_dir or (images_root.parent / "tile_cache")
+    n = sample_agentic_tile_size(example.id)
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", example.id)
+    return (cache_dir / f"{safe_id}_tiled_{n}up.png").exists()
 
 
 def _resolve(images_root: Path, rel_or_abs: str) -> Path:

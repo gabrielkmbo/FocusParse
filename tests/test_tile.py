@@ -288,3 +288,106 @@ def test_tile_sizes_table_exposes_supported_protocols(protocol, n_tile):
     """Sanity check on the protocol → n_tile mapping that the harness reads."""
     assert protocol.startswith("tiled_")
     assert n_tile in (2, 4, 8)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: agentic_multi_page protocol (b+c hybrid)
+# ---------------------------------------------------------------------------
+
+
+def test_sample_agentic_tile_size_is_deterministic():
+    from focusparse.eval.tile import sample_agentic_tile_size
+
+    assert sample_agentic_tile_size("ex-A") == sample_agentic_tile_size("ex-A")
+    assert sample_agentic_tile_size("ex-B") == sample_agentic_tile_size("ex-B")
+    for eid in ("a", "b", "c", "d", "e"):
+        assert sample_agentic_tile_size(eid) in (2, 4, 8)
+
+
+def test_sample_agentic_tile_size_distribution_is_middle_heavy():
+    """Over many distinct ids, 4 should dominate (weight=0.5 vs 0.25/0.25)."""
+    from focusparse.eval.tile import sample_agentic_tile_size
+
+    counts = {2: 0, 4: 0, 8: 0}
+    for i in range(2000):
+        counts[sample_agentic_tile_size(f"ex-{i}")] += 1
+    assert counts[4] > counts[2]
+    assert counts[4] > counts[8]
+    assert counts[4] > 1.5 * counts[2]
+    assert counts[4] > 1.5 * counts[8]
+
+
+def test_prepare_agentic_multi_page_composes_summary_when_enough_pages(
+    tmp_path, parser_bench_submodule_present
+):
+    """≥ tile_size staged pages → composes a summary view PNG."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse.eval.tile import prepare_agentic_multi_page, sample_agentic_tile_size
+
+    pages = [
+        _write_solid_png(tmp_path / f"p{i}.png", color=(i * 30, 0, 0), size=(100, 100))
+        for i in range(8)
+    ]
+    example = _benchmark_example(
+        example_id="ex-bundle-A",
+        page_images=[f"p{i}.png" for i in range(8)],
+    )
+    cache_dir = tmp_path / "agentic_cache"
+
+    bundle = prepare_agentic_multi_page(
+        example,
+        staged_pages=pages,
+        pdf_path=None,
+        cache_dir=cache_dir,
+    )
+    assert len(bundle.page_list) == 8
+    assert bundle.summary_tile_size == sample_agentic_tile_size("ex-bundle-A")
+    assert bundle.summary_view is not None
+    assert bundle.summary_view.exists()
+
+
+def test_prepare_agentic_multi_page_handles_zero_pages(tmp_path, parser_bench_submodule_present):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse.eval.tile import prepare_agentic_multi_page
+
+    example = _benchmark_example(example_id="ex-empty")
+    cache_dir = tmp_path / "agentic_cache"
+
+    bundle = prepare_agentic_multi_page(
+        example,
+        staged_pages=[],
+        pdf_path=None,
+        cache_dir=cache_dir,
+    )
+    assert bundle.page_list == []
+    assert bundle.summary_view is None
+    # tile_size always set; the field is non-optional.
+    assert bundle.summary_tile_size in (2, 4, 8)
+
+
+def test_prepare_agentic_multi_page_is_content_addressed(tmp_path, parser_bench_submodule_present):
+    """Re-call with the same example.id → same summary view file (no recompose)."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse.eval.tile import prepare_agentic_multi_page
+
+    pages = [
+        _write_solid_png(tmp_path / f"p{i}.png", color=(0, i * 30, 0), size=(100, 100))
+        for i in range(8)
+    ]
+    example = _benchmark_example(
+        example_id="ex-cache",
+        page_images=[f"p{i}.png" for i in range(8)],
+    )
+    cache_dir = tmp_path / "agentic_cache"
+
+    b1 = prepare_agentic_multi_page(example, staged_pages=pages, pdf_path=None, cache_dir=cache_dir)
+    assert b1.summary_view is not None
+    mtime = b1.summary_view.stat().st_mtime
+
+    b2 = prepare_agentic_multi_page(example, staged_pages=pages, pdf_path=None, cache_dir=cache_dir)
+    assert b2.summary_view == b1.summary_view
+    assert b2.summary_view.stat().st_mtime == mtime
+    assert b2.summary_tile_size == b1.summary_tile_size

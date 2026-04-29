@@ -37,9 +37,20 @@ _SIMPLE_PROTOCOLS = frozenset(
         "tiled_2up",
         "tiled_4up",
         "tiled_8up",
+        # Headline-table protocol: the simple agent gets only the per-example
+        # tiled summary view (slot 0 of the prepared images list).
+        "agentic_multi_page",
     }
 )
-_FOCUS_PROTOCOLS = frozenset({"focus_default"})
+_FOCUS_PROTOCOLS = frozenset(
+    {
+        "focus_default",
+        # Headline-table protocol: the focus pipeline gets the full page
+        # list; the summary view is recorded in trajectory metadata but
+        # not directly consumed by the deterministic stages.
+        "agentic_multi_page",
+    }
+)
 
 
 def _protocol_matches_agent(agent: str, protocol: str) -> bool:
@@ -190,6 +201,7 @@ def _parse_args() -> argparse.Namespace:
             "tiled_4up",
             "tiled_8up",
             "focus_default",
+            "agentic_multi_page",
         ],
     )
     parser.add_argument(
