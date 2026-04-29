@@ -101,6 +101,12 @@ def _rescore_one(
     record["bbox_iou"] = float(iou)
     record["evidence_reward"] = float(evidence)
     record["is_lazy"] = int(len(tool_calls) == 0 or not predicted_bboxes)
+    # Backfill the `domain` field for older predictions written before
+    # 2026-04-29 (when the harness started recording it). Reads from the
+    # BenchmarkExample we already loaded.
+    if "domain" not in record or record.get("domain") is None:
+        domain = getattr(example, "domain", None)
+        record["domain"] = str(domain) if domain is not None else None
     return record
 
 
@@ -154,7 +160,14 @@ def _aggregate(per_example: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def rescore_run(run_summary_path: Path, benchmark_jsonl: Path) -> dict[str, Any]:
-    """Re-score one run's predictions in place. Returns the new aggregate."""
+    """Re-score one run's predictions in place. Returns the new aggregate.
+
+    The returned dict is the `_overall` aggregate. Per-domain aggregates
+    are written to the summary's `aggregate_by_domain` field but not
+    returned (callers that want them read the file).
+    """
+    from focusparse.eval.metrics import aggregate_by_domain as _agg_by_domain
+
     bench = _load_benchmark(benchmark_jsonl)
     summary = json.loads(run_summary_path.read_text())
 
@@ -184,8 +197,11 @@ def rescore_run(run_summary_path: Path, benchmark_jsonl: Path) -> dict[str, Any]
         per_example.append(record)
 
     new_overall = _aggregate(per_example)
+    by_domain_metrics = _agg_by_domain(per_example)
+    by_domain_dump = {k: v.model_dump() for k, v in by_domain_metrics.items()}
     old_overall = summary.get("overall", {})
     summary["overall"] = new_overall
+    summary["aggregate_by_domain"] = by_domain_dump
     summary["_rescored"] = True
     summary["_old_overall"] = old_overall
     run_summary_path.write_text(json.dumps(summary, default=str, indent=2))
@@ -203,6 +219,7 @@ def rescore_run(run_summary_path: Path, benchmark_jsonl: Path) -> dict[str, Any]
             "evidence_reward_mean": new_overall.get("evidence_reward_mean"),
             "lazy_answer_rate": new_overall.get("lazy_answer_rate"),
         }
+        rj["aggregate_by_domain"] = by_domain_dump
         rj["_rescored"] = True
         run_json.write_text(json.dumps(rj, default=str, indent=2))
 
@@ -221,6 +238,12 @@ def main() -> int:
         type=Path,
         default=Path.home() / ".cache" / "focusparse" / "hf_staging" / "benchmark.jsonl",
         help="Path to staged benchmark.jsonl (default: ~/.cache/focusparse/hf_staging/benchmark.jsonl).",
+    )
+    parser.add_argument(
+        "--by-domain",
+        action="store_true",
+        default=False,
+        help="Also print a per-domain table (datasheet vs finance) with bootstrapped CIs.",
     )
     args = parser.parse_args()
 
@@ -255,6 +278,33 @@ def main() -> int:
             f"{new['accuracy'] * 100:7.1f}%  "
             f"{old.get('page_recall', 0):7.2f} → {new['page_recall']:7.2f}"
         )
+
+    if args.by_domain:
+        print()
+        print(f"{'run':52s} {'domain':12s} {'n':>4s} {'acc':>9s}  {'$/correct':>15s}")
+        print("-" * 100)
+        for t in targets:
+            summary = json.loads(t.read_text())
+            by_domain = summary.get("aggregate_by_domain", {})
+            for domain in ("_overall", "datasheet", "finance"):
+                m = by_domain.get(domain)
+                if not m:
+                    continue
+                ci = m.get("accuracy_ci") or [0.0, 0.0]
+                acc_pct = m.get("accuracy", 0.0) * 100
+                ci_lo_pct = ci[0] * 100
+                ci_hi_pct = ci[1] * 100
+                cpc = m.get("usd_per_correct")
+                cpc_str = f"${cpc:.4f}" if cpc is not None else "n/a"
+                cpc_ci = m.get("usd_per_correct_ci")
+                if cpc_ci:
+                    cpc_str += f" [${cpc_ci[0]:.3f}, ${cpc_ci[1]:.3f}]"
+                print(
+                    f"{t.stem:52s} {domain:12s} {m.get('n', 0):>4d} "
+                    f"{acc_pct:5.1f}% [{ci_lo_pct:4.1f}, {ci_hi_pct:4.1f}]  "
+                    f"{cpc_str:>15s}"
+                )
+            print()
     return 0
 
 

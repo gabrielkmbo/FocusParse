@@ -24,7 +24,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from focusparse.eval.metrics import AggregateMetrics, aggregate
+from focusparse.eval.metrics import AggregateMetrics, aggregate, aggregate_by_domain
 from focusparse.eval.scoring import (
     max_iou_over_alternates,
     page_recall,
@@ -124,6 +124,7 @@ async def run_simple_eval(
         per_example.append(record)
 
     aggregated: AggregateMetrics = aggregate(per_example)
+    aggregated_by_domain = aggregate_by_domain(per_example)
     stage_aggregate = _aggregate_stages(per_example)
 
     run_manifest: dict[str, Any] = {
@@ -136,6 +137,7 @@ async def run_simple_eval(
         "started_at": started_at,
         "ended_at": time.time(),
         "aggregate": aggregated.model_dump(),
+        "aggregate_by_domain": {k: v.model_dump() for k, v in aggregated_by_domain.items()},
         "stage_aggregate": stage_aggregate.model_dump(),
         "env_snapshot": _env_snapshot(),
     }
@@ -147,6 +149,7 @@ async def run_simple_eval(
     return {
         "manifest": run_manifest,
         "aggregate": aggregated,
+        "aggregate_by_domain": aggregated_by_domain,
         "stage_aggregate": stage_aggregate,
         "per_example": per_example,
         "output_dir": str(output_dir),
@@ -260,6 +263,7 @@ async def run_focus_eval(
         per_example.append(record)
 
     aggregated: AggregateMetrics = aggregate(per_example)
+    aggregated_by_domain = aggregate_by_domain(per_example)
     stage_aggregate = _aggregate_stages(per_example)
 
     run_manifest: dict[str, Any] = {
@@ -272,6 +276,7 @@ async def run_focus_eval(
         "started_at": started_at,
         "ended_at": time.time(),
         "aggregate": aggregated.model_dump(),
+        "aggregate_by_domain": {k: v.model_dump() for k, v in aggregated_by_domain.items()},
         "stage_aggregate": stage_aggregate.model_dump(),
         "env_snapshot": _env_snapshot(),
     }
@@ -283,6 +288,7 @@ async def run_focus_eval(
     return {
         "manifest": run_manifest,
         "aggregate": aggregated,
+        "aggregate_by_domain": aggregated_by_domain,
         "stage_aggregate": stage_aggregate,
         "per_example": per_example,
         "output_dir": str(output_dir),
@@ -616,6 +622,10 @@ def _score_and_record(
     record = {
         "example_id": example.id,
         "protocol": protocol,
+        # `domain` is recorded so `aggregate_by_domain` can bucket without
+        # re-loading the benchmark. Stem (`"datasheet"`/`"finance"`) is
+        # extracted at aggregation time via `metrics._domain_stem`.
+        "domain": str(getattr(example, "domain", "")) or None,
         "answer_pred": result.answer,
         "answer_gold": example.answer,
         "answer_correct": answer,
