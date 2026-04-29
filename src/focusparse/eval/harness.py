@@ -170,6 +170,138 @@ async def run_simple_eval(
     }
 
 
+async def run_comparator_eval(
+    examples: Iterable[BenchmarkExample],
+    *,
+    backend_client: ModelClient,
+    backend: str,
+    model: str,
+    agent_kind: str,  # "react" | "agent_baseline"
+    protocol: str,
+    output_dir: Path,
+    images_root: Path,
+    limit: int | None = None,
+    resume: bool = True,
+    pdfs_root: Path | None = None,
+    tool_set: str = "full",
+) -> dict[str, Any]:
+    """Run a comparator agent (ReAct loop or generic Agent baseline) over examples.
+
+    Mirrors the contract of `run_simple_eval` / `run_focus_eval` so the
+    matrix harness can dispatch to all four method types uniformly.
+    The comparator agent's tool belt is resolved from `tool_set`
+    (minimal → 2 tools; full → 4 tools).
+
+    Distinguishes from the focus path by *not* having any FocusParse
+    stage machine — just a think→act→observe loop. This is the
+    architectural ablation that makes the headline-table claim falsifiable.
+    """
+    from focusparse.pipeline.agent_baseline import AgentBaselineAgent
+    from focusparse.pipeline.react_agent import ReActAgent
+    from focusparse.tools import resolve_tool_set
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pred_dir = output_dir / "predictions"
+    pred_dir.mkdir(parents=True, exist_ok=True)
+
+    tools = resolve_tool_set(tool_set)
+    if agent_kind == "react":
+        agent = ReActAgent(backend_client=backend_client, tools=tools)
+    elif agent_kind == "agent_baseline":
+        agent = AgentBaselineAgent(backend_client=backend_client, tools=tools)
+    else:
+        raise ValueError(f"Unknown comparator agent_kind: {agent_kind!r}")
+
+    per_example: list[dict[str, Any]] = []
+    started_at = time.time()
+    n = 0
+    for example in examples:
+        if limit is not None and n >= limit:
+            break
+        n += 1
+
+        cache_path = pred_dir / f"{_safe_id(example.id)}.json"
+        record: dict[str, Any] | None = None
+        if resume and cache_path.exists():
+            try:
+                record = json.loads(cache_path.read_text())
+                record["cache_hit"] = True
+            except (json.JSONDecodeError, OSError):
+                record = None
+
+        if record is None:
+            images = _prepare_images(
+                example,
+                protocol=protocol,
+                images_root=images_root,
+                pdfs_root=pdfs_root,
+                tile_cache_dir=output_dir / "tiles",
+            )
+            agentic_meta: dict[str, object] | None = None
+            if protocol == "agentic_multi_page":
+                agentic_meta = _agentic_summary_meta(
+                    example, images_root, pdfs_root, output_dir / "tiles"
+                )
+            pdf_path = _resolve_pdf_path(pdfs_root, example) if pdfs_root else None
+            try:
+                result: WorkflowResult = await agent.run(
+                    example,
+                    images,
+                    pdf_path=pdf_path,
+                    crop_cache_dir=output_dir / "crops",
+                    text_layer_cache_dir=output_dir / "text_layer",
+                )
+                image_dims = _image_dims_by_page(example, images)
+                record = _score_and_record(
+                    example,
+                    result,
+                    protocol=protocol,
+                    image_dims_by_page=image_dims,
+                )
+                if agentic_meta is not None:
+                    record["agentic_meta"] = agentic_meta
+                cache_path.write_text(json.dumps(record, default=str))
+            except Exception as exc:
+                logger.exception("Example %s failed: %s", example.id, exc)
+                record = _error_record(example, protocol=protocol, error=str(exc))
+
+        per_example.append(record)
+
+    aggregated: AggregateMetrics = aggregate(per_example)
+    aggregated_by_domain = aggregate_by_domain(per_example)
+    stage_aggregate = _aggregate_stages(per_example)
+
+    run_manifest: dict[str, Any] = {
+        "agent": agent_kind,
+        "tool_set": tool_set,
+        "backend": backend,
+        "model": model,
+        "protocol": protocol,
+        "n_examples": n,
+        "limit": limit,
+        "started_at": started_at,
+        "ended_at": time.time(),
+        "aggregate": aggregated.model_dump(),
+        "aggregate_by_domain": {k: v.model_dump() for k, v in aggregated_by_domain.items()},
+        "stage_aggregate": stage_aggregate.model_dump(),
+        "env_snapshot": _env_snapshot(),
+    }
+    (output_dir / "run.json").write_text(json.dumps(run_manifest, default=str, indent=2))
+    (output_dir / "per_example.jsonl").write_text(
+        "\n".join(json.dumps(r, default=str) for r in per_example) + ("\n" if per_example else "")
+    )
+
+    return {
+        "manifest": run_manifest,
+        "aggregate": aggregated,
+        "aggregate_by_domain": aggregated_by_domain,
+        "stage_aggregate": stage_aggregate,
+        "per_example": per_example,
+        "output_dir": str(output_dir),
+    }
+
+
 async def run_focus_eval(
     examples: Iterable[BenchmarkExample],
     *,

@@ -53,9 +53,27 @@ _FOCUS_PROTOCOLS = frozenset(
 )
 
 
+_COMPARATOR_PROTOCOLS = frozenset(
+    {
+        # Comparator agents (react / agent_baseline) consume the same
+        # protocols as the simple agent, but the recommended one for the
+        # headline table is `agentic_multi_page`.
+        "full_doc",
+        "oracle_page",
+        "oracle_crop",
+        "tiled_2up",
+        "tiled_4up",
+        "tiled_8up",
+        "agentic_multi_page",
+    }
+)
+
+
 def _protocol_matches_agent(agent: str, protocol: str) -> bool:
     if agent == "focus":
         return protocol in _FOCUS_PROTOCOLS
+    if agent in ("react", "agent_baseline"):
+        return protocol in _COMPARATOR_PROTOCOLS
     return protocol in _SIMPLE_PROTOCOLS
 
 
@@ -82,7 +100,11 @@ def main() -> int:
         return 2
 
     # Deferred imports so --help works without heavy deps.
-    from focusparse.eval.harness import run_focus_eval, run_simple_eval
+    from focusparse.eval.harness import (
+        run_comparator_eval,
+        run_focus_eval,
+        run_simple_eval,
+    )
     from focusparse.eval.hf_loader import dataset_fingerprint, materialize_split
     from focusparse.eval.schemas import EvalRunResults, PerProtocolResults
     from focusparse.models.tiers import TierRouter
@@ -145,6 +167,23 @@ def main() -> int:
                 tool_set=args.tool_set,
             )
         )
+    elif args.agent in ("react", "agent_baseline"):
+        result = asyncio.run(
+            run_comparator_eval(
+                examples,
+                backend_client=backend_client,
+                backend=reasoner.provider,
+                model=reasoner.model,
+                agent_kind=args.agent,
+                protocol=args.protocol,
+                output_dir=run_dir,
+                images_root=args.staging_dir,
+                limit=args.limit,
+                resume=args.resume,
+                pdfs_root=args.pdfs_root,
+                tool_set=args.tool_set,
+            )
+        )
     else:
         result = asyncio.run(
             run_simple_eval(
@@ -189,7 +228,16 @@ def main() -> int:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--agent", choices=["simple", "focus"], default="simple")
+    parser.add_argument(
+        "--agent",
+        choices=["simple", "focus", "react", "agent_baseline"],
+        default="simple",
+        help=(
+            "Method type. simple = Base VLM (no tools); focus = FocusParse "
+            "stage machine; react = ReAct loop comparator; agent_baseline = "
+            "thinner generic-prompt comparator."
+        ),
+    )
     parser.add_argument(
         "--protocol",
         required=True,
