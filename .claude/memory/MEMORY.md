@@ -131,6 +131,29 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-04-29 — Headline-table Phase 1: domain split + bootstrap CIs (8 cells filled)
+
+`eval/metrics.py` gains `aggregate_by_domain` + `bootstrap_ci` (1000 resamples, seed=42 default). Per-example records now carry `domain`. Re-aggregating the cached n=148 results (no model re-runs) fills the first 8 cells of the headline table:
+
+| Method                         | Datasheets (n=100)       | Finance (n=47)           |
+| ------------------------------ | ------------------------ | ------------------------ |
+| Base VLM (simple/full_doc)     | **50.0%** [39.0, 60.0]   | **36.2%** [23.4, 48.9]   |
+| Base VLM cost                  | $0.0113 [$0.009, $0.015] | $0.0150 [$0.011, $0.023] |
+| Our harness +4 (focus_default) | **44.0%** [34.0, 54.0]   | **31.9%** [19.1, 44.7]   |
+| Our harness +4 cost            | $0.0180 [$0.015, $0.024] | $0.0199 [$0.014, $0.032] |
+
+**Base VLM nominally leads both domains by 6pp (datasheet) and 4pp (finance).** CIs overlap heavily, so this is not a statistically significant Base-VLM win — but Our harness has no measurable advantage either at this scoring strictness. The focus pipeline's localization is great (bbox_iou=0.73 vs simple's 0.38) but answer prose can't pass strict exact_match.
+
+This is the ground truth Phase 6 (iterate on inspect / expand / tools) is supposed to fix. Top candidates to close the gap:
+
+1. Inspector LLM-driven dispatch (sub-phase 2g step 2) — likely the biggest accuracy lift across the board.
+2. Multi-scale evidence packets — give the reasoner both tight + context crops.
+3. Re-A/B item 5 (graph) and item 3 (loop) at n=148 with the new scorer.
+
+Note: rescoring also slightly updated cached numbers (focus 41.2→40.1, simple 46.6→45.6) due to the `_score_numeric` floor at `max(|gold|, 1.0)` change in the parser-bench parity commit. Within sample variance.
+
+457 tests pass.
+
 ### 2026-04-27 — Full validation eval: simple-agent matrix at parser-bench parity
 
 148-example HF validation split (gold filter applied; 71 stress rows excluded).
