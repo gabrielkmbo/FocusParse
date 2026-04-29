@@ -127,7 +127,12 @@ def main() -> int:
     )
     fingerprint = dataset_fingerprint(ds)
 
-    config_key = f"focusparse_{args.agent}_{args.protocol}_{tier_sha8}"
+    # tool_set in the key so +2 / +4 variants of the same agent don't
+    # collide on disk (the headline-table sweep runs both per agent).
+    # Suffix is "" for the historical default ("full") so legacy paths
+    # under results/hf/full-eval-v1/ keep matching.
+    tool_suffix = "" if args.tool_set == "full" else f"_t{args.tool_set}"
+    config_key = f"focusparse_{args.agent}_{args.protocol}_{tier_sha8}{tool_suffix}"
     run_dir = args.output_dir / config_key
     run_dir.mkdir(parents=True, exist_ok=True)
     output_path = args.output_dir / f"{config_key}.json"
