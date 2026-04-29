@@ -128,11 +128,14 @@ def _summarize_get_text_layer(out: dict[str, Any]) -> str:
 class _LayoutDetectInput(BaseModel):
     """Adapter input for the layout_detect tool.
 
-    The underlying `detect_layout` function takes raw PNG bytes; agents
-    pass an image path, which we read at the runner boundary.
+    The underlying `detect_layout` function takes raw PNG bytes plus
+    page + width/height metadata. Agents only need to provide the image
+    path and the page number; we extract dimensions from the PNG header
+    at the runner boundary.
     """
 
     image_path: str
+    page: int = 1
     confidence_threshold: float = 0.3
 
 
@@ -148,23 +151,48 @@ async def _layout_detect_runner(
     if not image_path.exists():
         raise FileNotFoundError(f"Image not found: {image_path}")
     png_bytes = image_path.read_bytes()
+    # Pull width/height from the PNG header so the agent doesn't have to
+    # know them. PIL handles arbitrary PNG without loading the full pixel
+    # buffer when we only call .size.
+    from PIL import Image
+
+    with Image.open(image_path) as im:
+        image_width, image_height = im.size
     result = await _detect_layout(
         png_bytes,
+        page=inp.page,
+        image_width=image_width,
+        image_height=image_height,
         endpoint_url=layout_endpoint_url,
         hf_token=hf_token,
         cache_dir=layout_cache_dir,
         confidence_threshold=inp.confidence_threshold,
     )
-    # `detect_layout` returns a list of dicts; surface the count + first 8.
-    return {"n_regions": len(result), "regions": result[:8]}
+    # `detect_layout` returns a `LayoutDetectionOutput` with `.boxes`.
+    # Surface a JSON-serializable summary the LLM can read back.
+    boxes = [
+        {
+            "label": b.label,
+            "bbox": list(b.bbox),
+            "score": b.score,
+            "figure_class": b.figure_class,
+        }
+        for b in (result.boxes or [])
+    ]
+    return {
+        "page": inp.page,
+        "image_width": image_width,
+        "image_height": image_height,
+        "n_regions": len(boxes),
+        "regions": boxes[:8],
+    }
 
 
 def _summarize_layout_detect(out: dict[str, Any]) -> str:
     n = out.get("n_regions", 0)
-    types = sorted(
-        {r.get("label") or r.get("region_type") or "?" for r in out.get("regions") or []}
-    )
-    return f"n_regions={n}, types={types}"
+    types = sorted({r.get("label") or "?" for r in out.get("regions") or []})
+    page = out.get("page", "?")
+    return f"page={page}, n_regions={n}, types={types}"
 
 
 async def _run_python_runner(
