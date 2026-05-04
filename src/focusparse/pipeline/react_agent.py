@@ -36,7 +36,11 @@ from pydantic import ValidationError
 from focusparse.models.base import ModelClient, ModelResponse
 from focusparse.pipeline.workflow import WorkflowResult
 from focusparse.tools import ToolSpec
-from focusparse.traces.recorder import TrajectoryRecorder, TrajectoryStep
+from focusparse.traces.recorder import (
+    EvidencePacketSummary,
+    TrajectoryRecorder,
+    TrajectoryStep,
+)
 
 if TYPE_CHECKING:
     from focusparse._parser_bench import BenchmarkExample
@@ -212,6 +216,21 @@ class ReActAgent:
             )
             answer = answer or _last_text_fallback(conversation) or "Unanswerable"
 
+        # Trace schema v2 (2026-05-04): snapshot the citations the model
+        # committed to as a best-effort evidence_snapshot so the per-trace
+        # viewer can render them. ReAct doesn't build EvidencePackets, so
+        # the summary uses citation page+bbox plus blank crops/text.
+        recorder.set_evidence_snapshot(
+            [
+                EvidencePacketSummary(
+                    packet_id=f"react_pkt_{i:03d}",
+                    page=int(c.get("page", 0)) if isinstance(c, dict) else 0,
+                    bbox_norm=_coerce_bbox(c.get("bbox") if isinstance(c, dict) else None),
+                    provenance_tool="react_citation",
+                )
+                for i, c in enumerate(citations)
+            ]
+        )
         trace = recorder.finalize(answer=answer, citations=citations)
         telemetry = {
             "tokens_in": total_tokens_in,
@@ -292,6 +311,17 @@ def _last_text_fallback(turns: list[str]) -> str | None:
         if t.startswith("agent:"):
             return t[len("agent:") :].strip()
     return None
+
+
+def _coerce_bbox(raw: Any) -> tuple[float, float, float, float]:
+    """Best-effort 4-float bbox for a model citation. Defaults to full page."""
+    if isinstance(raw, list | tuple) and len(raw) == 4:
+        try:
+            x0, y0, x1, y1 = (float(v) for v in raw)
+            return (x0, y0, x1, y1)
+        except (TypeError, ValueError):
+            pass
+    return (0.0, 0.0, 1.0, 1.0)
 
 
 class _ReActTurn:
