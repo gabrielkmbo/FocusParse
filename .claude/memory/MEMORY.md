@@ -131,6 +131,60 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-04 — Trace schema v1 → v2 + ReAct failure mode reclassified
+
+**Schema bump.** `traces/export.py::SCHEMA_VERSION = "2"`. Added optional
+`evidence_snapshot: list[EvidencePacketSummary] | None = None` to `RunTrace`
+so the per-trace HTML viewer (Phase 6 sub-plan) can render packets + crops
+without re-running the pipeline. v1 records remain readable (snapshot field
+defaults to None). Wired into `FocusWorkflow` (snapshots `EvidenceEvent.packets`)
+and `ReActAgent` (snapshots citation refs as a comparator-style minimal
+summary). Per-example record (`harness._score_and_record`) now also persists
+`obs_summary` and `confidence` per step — they were on the in-memory step but
+dropped during JSON serialization.
+
+**ReAct failure mode reclassified — diagnostic report kills the path-hallucination narrative.**
+
+`scripts/diagnose_predictions.py` mines `predictions/*.json` per spec.
+Run on `results/hf/headline-v1/`. Headline-v1's "ReAct hallucinates paths"
+explanation (in the 2026-04-29 entry below) is **wrong about the dominant
+mechanism**:
+
+| Spec              | accuracy | lazy_rate | empty_cite | premature_final | tool_err_rate |
+| ----------------- | -------- | --------- | ---------- | --------------- | ------------- |
+| Base VLM          | 38.8%    | 100%      | 4.8%       | —               | 0.0%          |
+| ReAct +2          | 15.6%    | 83.0%     | 6.8%       | **78.9%**       | 2.9%          |
+| ReAct +4          | 19.0%    | 79.6%     | 3.4%       | **76.2%**       | 3.5%          |
+| Agent baseline +2 | 11.6%    | 100%      | 100%       | 100%            | 0.0%          |
+| Agent baseline +4 | 12.2%    | 100%      | 100%       | 99.3%           | 0.0%          |
+| Our harness +2    | 38.8%    | 12.2%     | 12.2%      | —               | 0.0%          |
+| Our harness +4    | 39.5%    | 15.0%     | 15.0%      | —               | 0.0%          |
+
+**The dominant ReAct +4 failure is `premature_final` at 76.2%** — the model
+emits `final_answer` on iteration 0 with **zero tool calls**. Tool-error
+rate is only 3.5% (8 errors total in 226 steps); hallucinated paths
+(`<uploaded_doc>`, `document.pdf`) appear in ~4 calls total. Path
+hallucination is real but tiny. The actual lever is forcing the model to
+ground in tool output before answering.
+
+Agent baseline +4 is even more degenerate: 99.3% premature-final. Its
+generic prompt + 4-iteration budget produces an agent that essentially
+never calls tools.
+
+**4-question rubric for the Track C ReAct fix:**
+
+1. **Cell:** ReAct +4 / Overall / accuracy (and per-domain).
+2. **Expected lift:** +5 to +10pp from a citation-required prompt
+   (cuts premature-final from 76% → ~30%); +0 to +1pp from path-fairness
+   alone.
+3. **Mechanism:** require `≥1 tool call AND ≥1 citation` before
+   `final_answer`; abstain instead of guess. Should raise
+   `(answer_correct AND |citations| > 0)` rate, which is what
+   `score_evidence_reward` keys on.
+4. **A/B at n=148**, bootstrapped CIs. Three-way decision rule (ship the
+   fix regardless of direction; only the headline-table claim narrows
+   or widens accordingly).
+
 ### 2026-04-29 — Headline table v1 filled (Phase 5; n=148, all 28 cells)
 
 `results/hf/headline-v1/headline_table.{json,md,html}`. Protocol: `agentic_multi_page`. Reasoner: gpt-5.4. 95% bootstrap CIs (1000 resamples, seed=42).
