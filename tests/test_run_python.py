@@ -16,6 +16,7 @@ suite. Marked `slow` so devs can skip with `-m "not slow"` when iterating.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -167,3 +168,84 @@ save_image(big)
     assert res.exit_code == 0, res.stderr
     assert "ok (40, 40)" in res.stdout
     assert len(res.new_image_refs) == 1
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-04 — Phase 3: new_image_paths surfaces absolute paths to the agent
+# ---------------------------------------------------------------------------
+
+
+async def test_new_image_paths_round_trip(tmp_path):
+    """save_image → new_image_paths is a 1:1 list of absolute on-disk PNGs."""
+    src = Image.new("RGB", (16, 16), color=(0, 200, 0))
+    src.save(tmp_path / "g.png", format="PNG")
+
+    code = """
+img = images["g"]
+save_image(img)
+save_image(img.resize((32, 32)))
+"""
+    res = await run_python(
+        RunPythonInput(code=code, image_refs=["g"]),
+        image_cache_dir=tmp_path,
+    )
+    assert res.exit_code == 0
+    assert len(res.new_image_paths) == len(res.new_image_refs) == 2
+    for p in res.new_image_paths:
+        path = Path(p)
+        assert path.is_absolute()
+        assert path.is_file()
+        assert path.suffix == ".png"
+
+
+async def test_new_image_paths_empty_without_cache_dir():
+    """No cache_dir => paths empty, but refs still populated (in-memory only)."""
+    code = """
+from PIL import Image
+img = Image.new('RGB', (8, 8), color=(1, 2, 3))
+save_image(img)
+"""
+    res = await run_python(RunPythonInput(code=code))
+    assert res.exit_code == 0
+    # The contract that matters for the agent: paths are empty when no cache
+    # was supplied (we have nowhere to write the PNG to). Refs are still
+    # computed from the raw bytes so callers know images were produced.
+    assert res.new_image_paths == []
+    assert len(res.new_image_refs) == 1
+
+
+async def test_new_image_paths_match_refs_pairwise(tmp_path):
+    """The path filename's stem equals the corresponding new_image_ref."""
+    src = Image.new("RGB", (8, 8), color=(123, 45, 67))
+    src.save(tmp_path / "src.png", format="PNG")
+    code = """
+img = images["src"]
+save_image(img)
+"""
+    res = await run_python(
+        RunPythonInput(code=code, image_refs=["src"]),
+        image_cache_dir=tmp_path,
+    )
+    assert res.exit_code == 0
+    assert len(res.new_image_paths) == 1
+    assert Path(res.new_image_paths[0]).stem == res.new_image_refs[0]
+
+
+async def test_image_refs_accept_absolute_path_input(tmp_path):
+    """Crop-ref-style absolute paths in image_refs become sandbox dict keys."""
+    src = Image.new("RGB", (12, 12), color=(0, 0, 99))
+    crop_path = tmp_path / "crop.png"
+    src.save(crop_path, format="PNG")
+
+    abs_ref = str(crop_path)
+    code = f"""
+ref = {abs_ref!r}
+img = images[ref]
+print("got", img.size)
+"""
+    res = await run_python(
+        RunPythonInput(code=code, image_refs=[abs_ref]),
+        image_cache_dir=tmp_path,
+    )
+    assert res.exit_code == 0, res.stderr
+    assert "got (12, 12)" in res.stdout

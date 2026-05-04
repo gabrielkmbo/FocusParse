@@ -175,3 +175,30 @@ def test_bbox_norm_field_optional_helper():
     field_info = bbox_norm_field(optional=True)
     assert field_info.default is None
     assert "null" in (field_info.description or "")
+
+
+def test_summarize_run_python_includes_new_paths():
+    """Phase 3: agent observation surfaces absolute output paths."""
+    from focusparse.tools import _summarize_run_python
+
+    summary = _summarize_run_python(
+        {
+            "stdout": "ok",
+            "new_image_refs": ["abc123def456"],
+            "new_image_paths": ["/tmp/cache/abc123def456.png"],
+            "exit_code": 0,
+        }
+    )
+    assert "n_new_images=1" in summary
+    assert "/tmp/cache/abc123def456.png" in summary
+
+
+def test_summarize_run_python_falls_back_when_no_paths():
+    """Backwards compat: when only refs are present (no cache), summary still works."""
+    from focusparse.tools import _summarize_run_python
+
+    summary = _summarize_run_python(
+        {"stdout": "ok", "new_image_refs": ["a", "b"], "new_image_paths": [], "exit_code": 0}
+    )
+    assert "n_new_images=2" in summary
+    assert "new_paths=" not in summary
