@@ -56,9 +56,13 @@ _REACT_SYSTEM_PROMPT = (
     "Each turn, output STRICT JSON in one of two shapes:\n"
     '  {"thought": "...", "action": "<tool_name>", "action_input": {...}}\n'
     '  {"thought": "...", "final_answer": "...", "citations": [{"page": N, "bbox": [x0,y0,x1,y1]}]}\n'
-    "Citations use normalized [0,1] bbox coordinates. When you have enough "
-    "evidence, emit `final_answer`. Do not add extra keys. Do not wrap in "
-    "markdown other than a single ```json fence."
+    "Citations use normalized [0,1] bbox coordinates against the source page. "
+    "BEFORE emitting `final_answer`, you MUST call at least one tool and "
+    "include at least one citation pointing to the region of the page that "
+    "supports your answer. If after using tools you still cannot find a "
+    "supporting region, answer the literal string 'Unanswerable' with an "
+    "empty citations list — do not guess. Do not add extra keys. Do not "
+    "wrap in markdown other than a single ```json fence."
 )
 
 
@@ -283,21 +287,50 @@ def _tool_block(tools: list[ToolSpec]) -> str:
     return "\n".join(lines)
 
 
+_PAGE_IN_FILENAME_RE = re.compile(r"_page_(\d+)")
+
+
+def _page_number_from_filename(name: str) -> int | None:
+    m = _PAGE_IN_FILENAME_RE.search(name)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
 def _initial_user_turn(
     example: BenchmarkExample,
     images: list[Path],
     pdf_path: Path | None,
 ) -> str:
+    """Compose the agent's first user turn.
+
+    The 2026-05-04 path-fairness fix (Phase 6 sub-plan, Track C1) enumerates
+    each page-image path verbatim with its source page number so the LLM
+    can use the exact strings as tool inputs instead of inventing
+    `<uploaded_doc>` or `document.pdf`. Tool runners reject any other path,
+    so this is correctness, not hand-holding.
+    """
     parts = [f"Question: {example.question}"]
     domain = getattr(example, "domain", None)
     if domain is not None:
         parts.append(f"Domain: {str(domain).split('.')[-1].lower()}")
     if pdf_path is not None:
-        parts.append(f"PDF available at: {pdf_path}")
+        parts.append(f"PDF path (use this string verbatim for `doc_path` args): {pdf_path}")
     if images:
         parts.append(
-            f"You are shown {len(images)} image(s). Use tools to inspect specific "
-            "regions or read native PDF text to answer."
+            "Available page images (use these strings verbatim for `image_path` args, "
+            "and cite the matching source page number in `final_answer`):"
+        )
+        for img in images:
+            page = _page_number_from_filename(img.name)
+            page_str = f"  (page {page})" if page is not None else ""
+            parts.append(f"  - {img}{page_str}")
+        parts.append(
+            "Tool inputs that reference doc_path or image_path MUST be one of "
+            "the strings listed above; the runner will reject any other path."
         )
     return "user: " + "\n".join(parts)
 
