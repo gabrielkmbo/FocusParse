@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Submodule-shadowing avoidance: importing `get_text_layer` (the function)
 # directly into this `__init__` namespace would overwrite the
@@ -134,9 +134,28 @@ class _LayoutDetectInput(BaseModel):
     at the runner boundary.
     """
 
-    image_path: str
-    page: int = 1
-    confidence_threshold: float = 0.3
+    image_path: str = Field(
+        ...,
+        description=(
+            "Absolute path to the page PNG you want to analyze. Use one of "
+            "the available_page_images strings supplied in the initial user "
+            "turn — any other path will be rejected by the runner."
+        ),
+        examples=[
+            "/Users/me/.cache/focusparse/hf_staging/data/processed/AN040_EN/images/AN040_EN_page_0003_300dpi.png"
+        ],
+    )
+    page: int = Field(
+        default=1,
+        ge=1,
+        description="1-indexed page number; echoed back in the response.",
+    )
+    confidence_threshold: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Drop boxes with score below this; 0.3 is the default.",
+    )
 
 
 async def _layout_detect_runner(
