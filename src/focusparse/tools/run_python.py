@@ -128,6 +128,16 @@ class RunPythonOutput(BaseModel):
             "subsequent call to chain transformations."
         ),
     )
+    new_image_paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Absolute paths to PNGs written for each `save_image(img)` call. "
+            "1:1 with new_image_refs. Pass either the ref (16-char stem) or "
+            "the full path back as `image_refs` in a subsequent call — both "
+            "resolve to the same image inside the sandbox. Empty when no "
+            "new_image_cache_dir was supplied."
+        ),
+    )
     exit_code: int = Field(
         default=0, description="0 on success, 1 on Python exception, 2 on infrastructure error."
     )
@@ -220,10 +230,13 @@ async def run_python(
         )
 
     new_refs: list[str] = []
+    new_paths: list[str] = []
     for png_bytes in payload.get("images", []):
         ref = hashlib.sha256(png_bytes).hexdigest()[:16]
         if new_image_cache_dir is not None:
-            (new_image_cache_dir / f"{ref}.png").write_bytes(png_bytes)
+            out_path = new_image_cache_dir / f"{ref}.png"
+            out_path.write_bytes(png_bytes)
+            new_paths.append(str(out_path))
         new_refs.append(ref)
 
     # Use the payload's exit_code (set by the user-code try/except) rather
@@ -234,6 +247,7 @@ async def run_python(
         stdout=payload.get("stdout", ""),
         stderr=payload.get("stderr", ""),
         new_image_refs=new_refs,
+        new_image_paths=new_paths,
         exit_code=int(payload_exit) if payload_exit is not None else -1,
         timed_out=timed_out,
     )

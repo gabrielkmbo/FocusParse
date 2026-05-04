@@ -34,12 +34,13 @@ from pydantic import BaseModel, Field
 # `import focusparse.tools.get_text_layer as mod` callers (the existing
 # tests). Alias to underscore-prefixed names to keep the package's
 # submodule attributes intact.
-from focusparse.tools.get_text_layer import GetTextLayerInput
+from focusparse.tools.get_text_layer import GetTextLayerInput, GetTextLayerOutput
 from focusparse.tools.get_text_layer import get_text_layer as _get_text_layer
-from focusparse.tools.inspect_region import InspectRegionInput
+from focusparse.tools.inspect_region import InspectRegionInput, InspectRegionOutput
 from focusparse.tools.inspect_region import inspect_region as _inspect_region
+from focusparse.tools.layout_detect import LayoutDetectionOutput
 from focusparse.tools.layout_detect import detect_layout as _detect_layout
-from focusparse.tools.run_python import RunPythonInput
+from focusparse.tools.run_python import RunPythonInput, RunPythonOutput
 from focusparse.tools.run_python import run_python as _run_python
 
 
@@ -238,19 +239,16 @@ async def _run_python_runner(
 
 def _summarize_run_python(out: dict[str, Any]) -> str:
     stdout = (out.get("stdout") or "").strip().replace("\n", " ")[:300]
-    n_new = len(out.get("new_image_refs") or [])
-    return f"stdout={stdout!r}, n_new_images={n_new}, exit_code={out.get('exit_code')}"
+    paths = out.get("new_image_paths") or []
+    n_new = len(out.get("new_image_refs") or paths)
+    paths_part = f", new_paths={paths[:2]}" if paths else ""
+    return f"stdout={stdout!r}, n_new_images={n_new}{paths_part}, exit_code={out.get('exit_code')}"
 
 
 # ---------------------------------------------------------------------------
 # Specs + registry
 # ---------------------------------------------------------------------------
 
-
-from focusparse.tools.get_text_layer import GetTextLayerOutput
-from focusparse.tools.inspect_region import InspectRegionOutput
-from focusparse.tools.layout_detect import LayoutDetectionOutput
-from focusparse.tools.run_python import RunPythonOutput
 
 INSPECT_REGION_SPEC = ToolSpec(
     name="inspect_region",
