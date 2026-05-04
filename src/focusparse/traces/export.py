@@ -1,8 +1,12 @@
 """SFT-ready JSONL export for trajectory traces.
 
-Schema version 1 (the contract with the future FocusTrain repo). Changes here
-are breaking — bump `SCHEMA_VERSION` and add a dated section to
-`.claude/memory/MEMORY.md` describing the migration.
+Schema version 2 (2026-05-04). Changes here are breaking — bump
+`SCHEMA_VERSION` and add a dated section to `.claude/memory/MEMORY.md`
+describing the migration.
+
+v1 → v2: added `evidence_snapshot` (list of `EvidencePacketSummary`,
+optional). v1 records remain readable; v2 readers should treat the
+field as nullable.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from pathlib import Path
 
 from focusparse.traces.recorder import RunTrace
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 
 def coverage_recall(predicted_pages: set[int], gold_pages: set[int]) -> float:
@@ -42,7 +46,13 @@ def passes_sft_filter(
 
 
 def trace_to_sft_record(trace: RunTrace, *, teacher_tier: str = "frontier") -> dict:
-    """Serialize a RunTrace to the v1 SFT JSONL record shape."""
+    """Serialize a RunTrace to the v2 SFT JSONL record shape.
+
+    v2 (2026-05-04) adds `evidence_snapshot` — the final packets the
+    reasoner saw at finalize time. None for legacy traces / comparator
+    runs that don't snapshot.
+    """
+    snapshot = trace.evidence_snapshot
     return {
         "schema_version": SCHEMA_VERSION,
         "example_id": trace.example_id,
@@ -66,6 +76,9 @@ def trace_to_sft_record(trace: RunTrace, *, teacher_tier: str = "frontier") -> d
             }
             for s in trace.steps
         ],
+        "evidence_snapshot": (
+            [p.model_dump(mode="json") for p in snapshot] if snapshot is not None else None
+        ),
         "final": {
             "answer": trace.final_answer,
             "citations": trace.final_citations,
