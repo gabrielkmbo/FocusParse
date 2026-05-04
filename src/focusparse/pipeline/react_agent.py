@@ -35,7 +35,7 @@ from pydantic import ValidationError
 
 from focusparse.models.base import ModelClient, ModelResponse
 from focusparse.pipeline.workflow import WorkflowResult
-from focusparse.tools import ToolSpec
+from focusparse.tools import ToolSpec, format_agent_tool_block
 from focusparse.traces.recorder import (
     EvidencePacketSummary,
     TrajectoryRecorder,
@@ -274,17 +274,15 @@ class ReActAgent:
 
 
 def _tool_block(tools: list[ToolSpec]) -> str:
-    """Render the tool registry into a system-prompt block."""
-    lines = ["Available tools:"]
-    for t in tools:
-        schema = t.input_model.model_json_schema()
-        # Compress the schema to its top-level properties to keep prompt
-        # tokens bounded. The agent gets the field names + types; the
-        # description carries the use-when-to-call guidance.
-        props = schema.get("properties", {})
-        props_str = ", ".join(f"{k}: {v.get('type', '?')}" for k, v in list(props.items())[:8])
-        lines.append(f"- {t.name}({props_str})\n    {t.description}")
-    return "\n".join(lines)
+    """Render the tool registry into a system-prompt block.
+
+    Delegates to `format_agent_tool_block` (Phase 2, 2026-05-04). ReAct uses
+    `careful` mode — full schemas + worked examples + chaining notes — so
+    the LLM sees `bbox_norm` as "array of 4 numbers" instead of `?` and
+    learns the pixel→norm conversion rule for chaining layout_detect into
+    inspect_region.
+    """
+    return format_agent_tool_block(tools, mode="careful")
 
 
 _PAGE_IN_FILENAME_RE = re.compile(r"_page_(\d+)")

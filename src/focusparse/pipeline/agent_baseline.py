@@ -26,8 +26,8 @@ from __future__ import annotations
 import logging
 
 from focusparse.models.base import ModelClient
-from focusparse.pipeline.react_agent import ReActAgent, _tool_block
-from focusparse.tools import ToolSpec
+from focusparse.pipeline.react_agent import ReActAgent
+from focusparse.tools import ToolSpec, format_agent_tool_block
 
 logger = logging.getLogger(__name__)
 
@@ -71,4 +71,14 @@ class AgentBaselineAgent(ReActAgent):
         )
 
     def _system_prompt(self) -> str:
-        return _AGENT_BASELINE_SYSTEM_PROMPT + "\n\n" + _tool_block(self.tools)
+        # AgentBaseline keeps the generic, terser tool block per the active
+        # plan's "comparator differences" note — the prompt-effort axis
+        # between ReAct and AgentBaseline is the variable that lets us
+        # attribute lift to ReAct's careful prompting vs the loop-existing
+        # baseline. format_agent_tool_block(mode='generic') gives a
+        # name+desc+field-names rendering, no examples or chaining notes.
+        return (
+            _AGENT_BASELINE_SYSTEM_PROMPT
+            + "\n\n"
+            + format_agent_tool_block(self.tools, mode="generic")
+        )
