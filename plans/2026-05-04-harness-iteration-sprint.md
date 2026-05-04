@@ -57,7 +57,7 @@ Datasheets nominally ahead (+2.9pp); Finance behind (-4.2pp); Overall within sam
   but default off due to broken-scorer A/Bs in 2026-04-27. Need re-A/B under current
   scoring + post-rerank conditions. Phases 4-5 levers.
 - **Focus +4 inspector calls deterministic_inspector exactly once per example**
-  (mean_tool_calls = 1.00). The inspector is the _one_ deterministic decision point;
+  (mean*tool_calls = 1.00). The inspector is the \_one* deterministic decision point;
   changing it to LLM-dispatch fans this out into N targeted tool calls.
 
 ## Desired End State
@@ -896,3 +896,8 @@ Append the v2 table to `.claude/memory/MEMORY.md` and write the sprint summary:
   scope" sections.
 - **Headline-v1 results**: `results/hf/headline-v1/headline_table.{json,md,html}`.
 - **Diagnostic baseline**: `results/diagnostics/headline-v1/report.md` (this session).
+
+---
+
+**What's NOT in this plan** (per user priorities, 2026-05-04): cross-model appendix,
+comparator polish, oracle ceilings, Phase 8 work, trace schema bumps beyond v2.
