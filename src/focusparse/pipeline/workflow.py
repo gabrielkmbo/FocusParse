@@ -36,7 +36,12 @@ from focusparse.pipeline.region_reranker import rerank_regions
 from focusparse.pipeline.router import route_pages
 from focusparse.pipeline.verifier import verify_answer
 from focusparse.tools.get_text_layer import GetTextLayerInput, get_text_layer
-from focusparse.traces.recorder import RunTrace, TrajectoryRecorder, TrajectoryStep
+from focusparse.traces.recorder import (
+    EvidencePacketSummary,
+    RunTrace,
+    TrajectoryRecorder,
+    TrajectoryStep,
+)
 
 if TYPE_CHECKING:
     from focusparse._parser_bench import BenchmarkExample
@@ -455,6 +460,10 @@ class FocusWorkflow:
 
         # Convert packet-id citations back to {page, bbox} dicts.
         citations = _citations_from_packets(answer_event.citations, evidence.packets)
+        # Trace schema v2 (2026-05-04): snapshot the final evidence the
+        # reasoner saw so the per-trace HTML viewer can render packets +
+        # crops without re-running the pipeline.
+        recorder.set_evidence_snapshot([_packet_to_summary(p) for p in evidence.packets])
         trace = recorder.finalize(answer=answer_event.answer, citations=citations)
 
         telemetry = _make_telemetry(reasoner_response)
@@ -857,6 +866,22 @@ def _citations_from_packets(
             continue
         out.append({"page": pkt.page, "bbox": list(pkt.bbox_norm)})
     return out
+
+
+def _packet_to_summary(p: EvidencePacket) -> EvidencePacketSummary:
+    """JSON-safe view of a packet for the trace v2 evidence_snapshot."""
+    return EvidencePacketSummary(
+        packet_id=p.packet_id,
+        page=p.page,
+        bbox_norm=p.bbox_norm,
+        region_type=p.region_type,
+        local_crop_ref=p.local_crop_ref,
+        linked_crop_refs=list(p.linked_crop_refs),
+        text_layer_snippet=p.text_layer_snippet,
+        ocr_snippet=p.ocr_snippet,
+        confidence=p.confidence,
+        provenance_tool=p.provenance.tool if p.provenance else None,
+    )
 
 
 def _make_telemetry(response: ModelResponse) -> dict[str, Any]:
