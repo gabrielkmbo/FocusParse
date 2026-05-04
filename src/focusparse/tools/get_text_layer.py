@@ -33,11 +33,22 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from focusparse.tools._schemas import bbox_norm_field
+
 
 class GetTextLayerInput(BaseModel):
-    doc_path: str  # local path to the PDF
-    page: int = Field(ge=1, description="1-indexed page number")
-    bbox_norm: tuple[float, float, float, float] | None = None
+    doc_path: str = Field(
+        ...,
+        description="Absolute path to the source PDF on disk.",
+        examples=["/Users/me/.cache/focusparse/pdfs/AN040_EN.pdf"],
+    )
+    page: int = Field(
+        ...,
+        ge=1,
+        description="1-indexed page number.",
+        examples=[3],
+    )
+    bbox_norm: list[float] | None = bbox_norm_field(optional=True)
 
 
 class TextSpan(BaseModel):
@@ -48,17 +59,41 @@ class TextSpan(BaseModel):
     without re-reading the page dimensions.
     """
 
-    text: str
-    bbox: tuple[float, float, float, float]
-    confidence: float = 1.0  # native text layer is treated as ground truth
+    text: str = Field(..., description="The span's text content.")
+    bbox: tuple[float, float, float, float] = Field(
+        ...,
+        description=(
+            "Absolute PDF-point coordinates [x0, y0, x1, y1], top-left origin. "
+            "Divide by page_width / page_height to get bbox_norm."
+        ),
+    )
+    confidence: float = Field(
+        default=1.0,
+        description="Native text layer is ground truth; always 1.0.",
+    )
 
 
 class GetTextLayerOutput(BaseModel):
-    text: str  # joined plain text, newlines preserved between blocks
-    source: str  # "native" | "empty_native"
-    spans: list[TextSpan] = Field(default_factory=list)
-    page_width: float = 0.0  # PDF points
-    page_height: float = 0.0
+    text: str = Field(
+        ...,
+        description="Joined plain text, spans separated by single spaces.",
+    )
+    source: str = Field(
+        ...,
+        description=(
+            "'native' = PDF text layer found and returned. "
+            "'empty_native' = scanned/image-only PDF; no text layer. "
+            "Caller should escalate to inspect_region(mode='element') for OCR."
+        ),
+    )
+    spans: list[TextSpan] = Field(
+        default_factory=list,
+        description="Per-span breakdown with bbox and text, in reading order.",
+    )
+    page_width: float = Field(
+        default=0.0, description="Page width in PDF points (1pt = 1/72 inch)."
+    )
+    page_height: float = Field(default=0.0, description="Page height in PDF points.")
 
 
 async def get_text_layer(
