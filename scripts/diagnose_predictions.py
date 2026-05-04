@@ -123,13 +123,12 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
             diag.empty_citation_rate += 1
             if record.get("answer_correct", 0.0) >= 1.0:
                 diag.correct_but_no_citations_rate += 1
-        if is_comparator and first_step_was_final:
-            # premature_final = comparator emitted final_answer at iter 0 with
-            # no prior tool call. Tracks the dominant failure mode.
-            if per_example_tool_calls == 0:
-                if diag.premature_final_rate is None:
-                    diag.premature_final_rate = 0.0
-                diag.premature_final_rate += 1
+        # premature_final = comparator emitted final_answer at iter 0 with
+        # no prior tool call. Tracks the dominant failure mode.
+        if is_comparator and first_step_was_final and per_example_tool_calls == 0:
+            if diag.premature_final_rate is None:
+                diag.premature_final_rate = 0.0
+            diag.premature_final_rate += 1
 
     n = max(diag.n_examples, 1)
     diag.lazy_answer_rate /= n
