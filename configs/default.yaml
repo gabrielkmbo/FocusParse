@@ -54,8 +54,14 @@ endpoints:
 # local parser-bench clone at the path below.
 dataset:
   source: hf
+  # Pinned 2026-05-04 to the HEAD of gabrielbo/parser-bench's main branch.
+  # The headline-v1 run (2026-04-29) did not pin a revision; sprint A/Bs
+  # under this plan should run against this fixed SHA so comparisons stay
+  # apples-to-apples even if the benchmark advances mid-sprint.
+  # Override with `--hf-revision <sha>` on `scripts/run_hf_eval.py` or via
+  # env var FOCUSPARSE_DATASET_REVISION.
   hf_repo: gabrielbo/parser-bench
-  revision: null # pin once benchmark stabilizes (FOCUSPARSE_DATASET_REVISION)
+  revision: 3774c67f8b814392b6d04c939e904f749a3f52eb
   local_root: null # absolute path to a parser-bench checkout, or null
 
 # NFS (processed docs — mirrors parser-bench contract).
@@ -70,7 +76,10 @@ cache:
 
 # Trace export defaults.
 traces:
-  schema_version: "1"
+  # v2 (2026-05-04): RunTrace gains evidence_snapshot. The runtime constant
+  # in src/focusparse/traces/export.py is the load-bearing version; this
+  # YAML field is informational only.
+  schema_version: "2"
   sft_filter:
     min_coverage: 0.8 # AgenticOCR dual threshold — coverage recall
     min_iou: 0.3 # AgenticOCR dual threshold — spatial IoU
