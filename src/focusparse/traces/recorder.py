@@ -3,8 +3,8 @@
 Every pipeline @step records a `TrajectoryStep`. At run end, `RunTrace` is
 serialized to JSONL for later SFT (AgenticOCR recipe) or GRPO.
 
-Schema contract: changes to TrajectoryStep fields require bumping
-`traces.schema_version` in `configs/default.yaml` and a note in MEMORY.md.
+Schema contract: changes to TrajectoryStep / RunTrace fields require bumping
+`SCHEMA_VERSION` in `traces/export.py` and a note in MEMORY.md.
 """
 
 from __future__ import annotations
@@ -17,19 +17,44 @@ from pydantic import BaseModel, Field
 
 class TrajectoryStep(BaseModel):
     """One step in a pipeline run."""
+
     step_index: int
-    stage: str                                 # "plan" | "route_pages" | "localize" | ...
-    tier: str                                  # "cheap" | "mid" | "frontier"
-    action: str                                # e.g. "llm_call" | "tool_call" | "deterministic"
-    tool: str | None = None                    # for tool_call: the tool name
+    stage: str  # "plan" | "route_pages" | "localize" | ...
+    tier: str  # "cheap" | "mid" | "frontier"
+    action: str  # e.g. "llm_call" | "tool_call" | "deterministic"
+    tool: str | None = None  # for tool_call: the tool name
     args: dict[str, Any] = Field(default_factory=dict)
-    obs_ref: str | None = None                 # content-addressed ref into cache
-    obs_summary: str | None = None             # short human-readable summary
+    obs_ref: str | None = None  # content-addressed ref into cache
+    obs_summary: str | None = None  # short human-readable summary
     tokens_in: int = 0
     tokens_out: int = 0
     latency_ms: int = 0
     usd: float | None = None
     confidence: float | None = None
+
+
+class EvidencePacketSummary(BaseModel):
+    """JSON-safe subset of `evidence.packet.EvidencePacket` for snapshotting.
+
+    Captured at workflow finalize time so the per-trace viewer (Phase 6
+    sub-plan, 2026-05-04) can render what the reasoner saw without
+    re-running the pipeline. Optional fields default to None so a
+    comparator agent (ReAct, AgentBaseline) that doesn't construct
+    `EvidencePacket`s can still snapshot whatever final tool outputs it
+    has — pass a list of summaries with `local_crop_ref` set when a tool
+    produced a crop, and the rest defaulted.
+    """
+
+    packet_id: str
+    page: int
+    bbox_norm: tuple[float, float, float, float]
+    region_type: str | None = None
+    local_crop_ref: str | None = None
+    linked_crop_refs: list[str] = Field(default_factory=list)
+    text_layer_snippet: str | None = None
+    ocr_snippet: str | None = None
+    confidence: float = 1.0
+    provenance_tool: str | None = None
 
 
 class RunTrace(BaseModel):
@@ -40,6 +65,9 @@ class RunTrace(BaseModel):
     final_answer: str | None = None
     final_citations: list[dict[str, Any]] = Field(default_factory=list)
     reward: dict[str, float] | None = None
+    # Schema v2 (2026-05-04): the final evidence the reasoner saw, snapshotted
+    # at finalize time. Optional; legacy v1 traces serialize as None.
+    evidence_snapshot: list[EvidencePacketSummary] | None = None
     started_at: float = Field(default_factory=time.time)
     ended_at: float | None = None
 
@@ -55,6 +83,15 @@ class TrajectoryRecorder:
 
     def record(self, step: TrajectoryStep) -> None:
         self._trace.steps.append(step)
+
+    def set_evidence_snapshot(self, packets: list[EvidencePacketSummary]) -> None:
+        """Attach the final evidence packets the reasoner saw to the trace.
+
+        Callers convert their workflow's `EvidencePacket` (or comparator
+        tool outputs) to `EvidencePacketSummary` first; this keeps the
+        trace schema decoupled from the in-memory packet shape.
+        """
+        self._trace.evidence_snapshot = list(packets)
 
     def finalize(
         self,
