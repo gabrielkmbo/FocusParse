@@ -25,7 +25,7 @@ import os
 from pathlib import Path
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -37,17 +37,45 @@ _DEFAULT_MAX_RETRIES = 3
 
 
 class DetectedBox(BaseModel):
-    label: str
-    bbox: tuple[float, float, float, float]  # absolute pixel coords (x0, y0, x1, y1)
-    score: float
-    figure_class: str | None = None  # e.g. "bar_chart" | "line_chart" | "logo"
+    label: str = Field(
+        ...,
+        description=(
+            "Region label from RT-DETRv2: text, picture, chart, table, "
+            "caption, section_header, footnote, list-item, formula, "
+            "page-header, page-footer, title."
+        ),
+    )
+    bbox: tuple[float, float, float, float] = Field(
+        ...,
+        description=(
+            "ABSOLUTE PIXEL coordinates [x0, y0, x1, y1] in the source image. "
+            "Divide each by image_width / image_height (returned alongside) "
+            "to convert to bbox_norm before passing to inspect_region or "
+            "get_text_layer."
+        ),
+    )
+    score: float = Field(..., description="Detection confidence in [0,1].")
+    figure_class: str | None = Field(
+        default=None,
+        description=(
+            "Secondary classification for picture regions: bar_chart | "
+            "line_chart | pie_chart | logo | diagram | photo | None."
+        ),
+    )
 
 
 class LayoutDetectionOutput(BaseModel):
-    page: int
-    width: int
-    height: int
-    boxes: list[DetectedBox]
+    page: int = Field(..., description="1-indexed page number echoed from input.")
+    width: int = Field(..., description="Source image width in pixels.")
+    height: int = Field(..., description="Source image height in pixels.")
+    boxes: list[DetectedBox] = Field(
+        ...,
+        description=(
+            "Detected regions, ordered as the model returned them. Use to "
+            "discover where text / charts / tables live on a page before "
+            "drilling in with inspect_region."
+        ),
+    )
 
 
 class StubResponseError(RuntimeError):
