@@ -99,6 +99,7 @@ class FocusWorkflow:
         tool_set: str = "full",
         use_react_inspector: bool = False,
         multi_scale_packets: bool = False,
+        chart_to_table_enabled: bool = False,
     ) -> None:
         self.backend_client = backend_client
         self.config = config
@@ -141,6 +142,11 @@ class FocusWorkflow:
         # `EvidencePacket.multi_scale_crops`. Default off pending the n=148
         # A/B (~$3-5 expected cost; ~+2-5pp predicted lift).
         self.multi_scale_packets = multi_scale_packets
+        # Phase 6 #7 (sprint Phase 3): chart_to_table extraction. Gated
+        # on plan.question_family inside the inspector so it only fires
+        # for axis_value_interpolation / candlestick_ohlc_extraction
+        # questions — most n=148 examples don't pay this cost.
+        self.chart_to_table_enabled = chart_to_table_enabled
 
     def _client_for(self, role: str) -> ModelClient | None:
         """Resolve a role-scoped client via `tier_router`, else return None.
@@ -616,6 +622,7 @@ class FocusWorkflow:
                 text_layer_cache_dir=self._text_layer_cache_dir(),
                 auto_zoom=self.auto_zoom,
                 multi_scale=self.multi_scale_packets,
+                chart_to_table_enabled=self.chart_to_table_enabled,
             )
             evidence = result.evidence
             n_real_packets = sum(
@@ -661,6 +668,7 @@ class FocusWorkflow:
             text_layer_cache_dir=self._text_layer_cache_dir(),
             auto_zoom=self.auto_zoom,
             multi_scale=self.multi_scale_packets,
+            chart_to_table_enabled=self.chart_to_table_enabled,
         )
         n_real_packets = sum(
             1 for p in evidence.packets if p.provenance.tool != "skeleton_inspector_fallback"
@@ -948,6 +956,8 @@ def _packet_to_summary(p: EvidencePacket) -> EvidencePacketSummary:
         multi_scale_crops=[c.model_dump(mode="json") for c in p.multi_scale_crops],
         text_layer_snippet=p.text_layer_snippet,
         ocr_snippet=p.ocr_snippet,
+        chart_csv=p.chart_csv,
+        chart_extraction_confidence=p.chart_extraction_confidence,
         confidence=p.confidence,
         provenance_tool=p.provenance.tool if p.provenance else None,
     )

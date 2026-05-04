@@ -121,15 +121,25 @@ async def answer_from_evidence(
 def _render_packet_line(packet) -> str:
     """One descriptor line for a packet in the reasoner's prompt.
 
-    Sprint Phase 2: when multi_scale_crops is populated, names how many
-    image scales the reasoner will see for this packet so it knows to
-    cross-reference (tight crop = exact-bbox detail; context crop =
-    surrounding caption / legend / axis labels).
+    Sprint Phase 2: multi_scale_crops annotation tells the reasoner how
+    many image scales it will see (tight + context).
+    Sprint Phase 3: when chart_csv is populated, the reasoner sees a
+    code-fenced CSV block beneath the descriptor so axis-value
+    interpolation questions land on hard data instead of guesses.
     """
     base = f"- {packet.packet_id}: page {packet.page}, bbox {packet.bbox_norm}"
     n_scales = len(packet.multi_scale_crops)
     if n_scales >= 2:
         base += f" — {n_scales} image scales (tight + context)"
+    if packet.chart_csv:
+        conf = packet.chart_extraction_confidence
+        conf_str = f" (confidence={conf:.2f})" if conf is not None else ""
+        base += (
+            f"\n  Chart extraction{conf_str} — treat as advisory; "
+            "verify against the crop:\n  ```csv\n  "
+            + "\n  ".join(packet.chart_csv.splitlines())
+            + "\n  ```"
+        )
     return base
 
 

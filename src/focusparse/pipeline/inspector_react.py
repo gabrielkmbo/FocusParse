@@ -122,6 +122,7 @@ async def react_inspect(
     text_layer_cache_dir: Path | None = None,
     auto_zoom: bool = False,
     multi_scale: bool = False,
+    chart_to_table_enabled: bool = False,
 ) -> ReActInspectorResult:
     """LLM-driven inspector dispatch.
 
@@ -178,6 +179,10 @@ async def react_inspect(
         # helper's existing logic — it already chooses image/element/region
         # correctly per region type. The LLM's mode pick is ADVISORY for
         # this iteration; phase 1b can plumb it through.
+        chart_active = chart_to_table_enabled and (
+            (plan.question_family or "")
+            in {"axis_value_interpolation", "candlestick_ohlc_extraction"}
+        )
         packet = await _inspect_one_region(
             idx,
             region,
@@ -187,6 +192,7 @@ async def react_inspect(
             text_layer_cache_dir=text_layer_cache_dir,
             auto_zoom=auto_zoom,
             multi_scale=multi_scale,
+            chart_extraction_active=chart_active,
         )
         packets.append(packet)
 

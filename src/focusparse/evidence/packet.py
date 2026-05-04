@@ -72,6 +72,14 @@ class EvidencePacket(BaseModel):
     ocr_snippet: str | None = None
     text_layer_snippet: str | None = None  # deterministic PDF text for this bbox
 
+    # Sprint Phase 3 (Phase 6 #7): chart_to_table extraction. Populated only
+    # when the inspector ran chart_to_table on a chart region for an
+    # axis-value-interpolation / candlestick question. Reasoner sees this
+    # CSV alongside the crop so it can answer numerically when the visual
+    # alone is ambiguous.
+    chart_csv: str | None = None
+    chart_extraction_confidence: float | None = None
+
     # Structure
     linked_neighbor_types: list[str] = Field(default_factory=list)  # e.g. ["legend", "caption"]
     evidence_edges: list[str] = Field(default_factory=list)  # EdgeType values

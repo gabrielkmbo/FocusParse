@@ -58,6 +58,10 @@ class EvidencePacketSummary(BaseModel):
     multi_scale_crops: list[dict] = Field(default_factory=list)
     text_layer_snippet: str | None = None
     ocr_snippet: str | None = None
+    # Sprint Phase 3 (2026-05-04, Phase 6 #7): chart_to_table extraction.
+    # Populated only on chart regions for chart-reading questions.
+    chart_csv: str | None = None
+    chart_extraction_confidence: float | None = None
     confidence: float = 1.0
     provenance_tool: str | None = None
 

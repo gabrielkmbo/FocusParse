@@ -172,6 +172,7 @@ def main() -> int:
                 tool_set=args.tool_set,
                 use_react_inspector=args.react_inspector,
                 multi_scale_packets=args.multi_scale_packets,
+                chart_to_table_enabled=args.chart_to_table,
             )
         )
     elif args.agent in ("react", "agent_baseline"):
@@ -330,6 +331,16 @@ def _parse_args() -> argparse.Namespace:
         "wider 30%%-padded context crop per region. The reasoner sees both "
         "via EvidencePacket.multi_scale_crops. Default off pending the "
         "n=148 A/B (~+2-5pp predicted lift across both domains).",
+    )
+    parser.add_argument(
+        "--chart-to-table",
+        action="store_true",
+        default=False,
+        help="Phase 6 #7 / sprint Phase 3: run chart_to_table on chart "
+        "regions for axis_value_interpolation / candlestick_ohlc_extraction "
+        "questions. The reasoner sees the extracted CSV alongside the crop. "
+        "Default off; gated by question family + figure_class so cost stays "
+        "bounded. Predicted +2-4pp on Finance accuracy.",
     )
     parser.add_argument(
         "--tool-set",

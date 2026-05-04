@@ -34,6 +34,8 @@ from pydantic import BaseModel, Field
 # `import focusparse.tools.get_text_layer as mod` callers (the existing
 # tests). Alias to underscore-prefixed names to keep the package's
 # submodule attributes intact.
+from focusparse.tools.chart_to_table import ChartToTableInput, ChartToTableOutput
+from focusparse.tools.chart_to_table import chart_to_table as _chart_to_table
 from focusparse.tools.get_text_layer import GetTextLayerInput, GetTextLayerOutput
 from focusparse.tools.get_text_layer import get_text_layer as _get_text_layer
 from focusparse.tools.inspect_region import InspectRegionInput, InspectRegionOutput
@@ -245,6 +247,24 @@ def _summarize_run_python(out: dict[str, Any]) -> str:
     return f"stdout={stdout!r}, n_new_images={n_new}{paths_part}, exit_code={out.get('exit_code')}"
 
 
+async def _chart_to_table_runner(
+    inp: ChartToTableInput,
+    *,
+    crop_cache_dir: Path | None = None,
+    **_unused: Any,
+) -> dict[str, Any]:
+    out = await _chart_to_table(inp, crop_cache_dir=crop_cache_dir)
+    return out.model_dump()
+
+
+def _summarize_chart_to_table(out: dict[str, Any]) -> str:
+    n_points = out.get("n_points", 0)
+    confidence = out.get("confidence", 0.0)
+    csv_preview = (out.get("table_csv") or "").splitlines()[1:3]  # skip header, take 2 rows
+    preview = "; ".join(csv_preview)
+    return f"n_points={n_points}, confidence={confidence:.2f}, preview={preview!r}"
+
+
 # ---------------------------------------------------------------------------
 # Specs + registry
 # ---------------------------------------------------------------------------
@@ -315,6 +335,24 @@ RUN_PYTHON_SPEC = ToolSpec(
 )
 
 
+CHART_TO_TABLE_SPEC = ToolSpec(
+    name="chart_to_table",
+    description=(
+        "Extract tabular data (x, y) from a chart crop via gridline peak "
+        "detection + axis OCR. Use ONLY for chart-reading questions where "
+        "exact axis-value interpolation matters (axis_value_interpolation, "
+        "candlestick_ohlc_extraction). For other question types, "
+        "inspect_region(mode='image') + the reasoner's visual reading is "
+        "sufficient. Returns CSV with header `x_value,y_value`; confidence "
+        "is advisory (verifier should double-check)."
+    ),
+    input_model=ChartToTableInput,
+    runner=_chart_to_table_runner,
+    summarize=_summarize_chart_to_table,
+    output_model=ChartToTableOutput,
+)
+
+
 _MINIMAL_TOOLS: tuple[ToolSpec, ...] = (INSPECT_REGION_SPEC, GET_TEXT_LAYER_SPEC)
 _FULL_TOOLS: tuple[ToolSpec, ...] = (
     INSPECT_REGION_SPEC,
@@ -322,9 +360,10 @@ _FULL_TOOLS: tuple[ToolSpec, ...] = (
     LAYOUT_DETECT_SPEC,
     RUN_PYTHON_SPEC,
 )
+_FULL_PLUS_CHART_TOOLS: tuple[ToolSpec, ...] = _FULL_TOOLS + (CHART_TO_TABLE_SPEC,)
 
 
-def resolve_tool_set(name: Literal["minimal", "full"]) -> list[ToolSpec]:
+def resolve_tool_set(name: Literal["minimal", "full", "full+chart"]) -> list[ToolSpec]:
     """Return the ordered tool list for a given `--tool-set` name.
 
     minimal = inspect_region + get_text_layer  (universal "see-and-read"
@@ -342,6 +381,12 @@ def resolve_tool_set(name: Literal["minimal", "full"]) -> list[ToolSpec]:
         return list(_MINIMAL_TOOLS)
     if name == "full":
         return list(_FULL_TOOLS)
+    if name == "full+chart":
+        # Sprint Phase 3 (2026-05-04): adds chart_to_table for the
+        # finance-cell A/B. Agents see the spec and may call it; the
+        # FocusWorkflow pipeline gates the call by question_family +
+        # figure_class so cost stays bounded.
+        return list(_FULL_PLUS_CHART_TOOLS)
     raise ValueError(f"Unknown tool set: {name!r}")
 
 
@@ -400,6 +445,18 @@ _CHAINS_WITH: dict[str, list[str]] = {
             "chain transformations."
         ),
     ],
+    "chart_to_table": [
+        (
+            "Pre-feed: pass an inspect_region.crop_ref of a chart region "
+            "(figure_class ∈ {bar_chart, line_chart, candlestick}) as crop_ref. "
+            "The tool reads the PNG directly."
+        ),
+        (
+            "Post-feed: parse the returned table_csv (header `x_value,y_value`) "
+            "in your reasoner; treat confidence < 0.5 as advisory and verify "
+            "against the raw chart crop."
+        ),
+    ],
 }
 
 
@@ -423,6 +480,13 @@ _WHEN_TO_USE: dict[str, list[str]] = {
         "LANCZOS upsample tiny crops (axis labels, footnote text).",
         "Annotate / overlay onto a crop for human-readable answer evidence.",
         "Compute over chart pixels (peak detection, OCR confidence aggregation).",
+    ],
+    "chart_to_table": [
+        "Convert a bar/line/candlestick chart crop into CSV (x, y rows).",
+        "Use only when the question asks for an exact axis-value reading "
+        "(e.g. 'What was the value at x=2024?').",
+        "For descriptive questions about trends/colors/labels, use "
+        "inspect_region(mode='image') instead — chart_to_table is overkill.",
     ],
 }
 
@@ -460,6 +524,9 @@ _EXAMPLE_CALLS: dict[str, dict[str, Any]] = {
             "save_image(out)\n"
         ),
         "image_refs": ["/Users/me/cache/crops/abc123.png"],
+    },
+    "chart_to_table": {
+        "crop_ref": "/Users/me/cache/crops/chart_abc123.png",
     },
 }
 

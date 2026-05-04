@@ -121,6 +121,12 @@ _EVIDENCE_TYPE_BOOST = 1.5
 _DEFAULT_MAX_CROPS = 8
 _MIN_TEXT_LAYER_CHARS = 4  # anything shorter is "basically empty"
 
+# Sprint Phase 3 (Phase 6 #7): question families where chart_to_table CSV
+# extraction is worth the cost. Other question types use inspect_region
+# (visual reading) only.
+_CHART_QUESTION_FAMILIES = frozenset({"axis_value_interpolation", "candlestick_ohlc_extraction"})
+_CHART_FIGURE_CLASSES = frozenset({"bar_chart", "line_chart", "candlestick"})
+
 
 async def inspect_regions(
     question: QuestionEvent,
@@ -133,6 +139,7 @@ async def inspect_regions(
     text_layer_cache_dir: Path | None = None,
     auto_zoom: bool = False,
     multi_scale: bool = False,
+    chart_to_table_enabled: bool = False,
 ) -> EvidenceEvent:
     """Produce real `EvidencePacket`s via the tool belt.
 
@@ -169,6 +176,10 @@ async def inspect_regions(
         key=lambda r: -_rank_score(r, boosted_types),
     )[:max_crops]
 
+    chart_extraction_active = (
+        chart_to_table_enabled and (plan.question_family or "") in _CHART_QUESTION_FAMILIES
+    )
+
     packets: list[EvidencePacket] = []
     for idx, region in enumerate(ranked):
         packet = await _inspect_one_region(
@@ -180,6 +191,7 @@ async def inspect_regions(
             text_layer_cache_dir=text_layer_cache_dir,
             auto_zoom=auto_zoom,
             multi_scale=multi_scale,
+            chart_extraction_active=chart_extraction_active,
         )
         packets.append(packet)
     return EvidenceEvent(packets=packets)
@@ -200,6 +212,7 @@ async def _inspect_one_region(
     text_layer_cache_dir: Path | None,
     auto_zoom: bool = False,
     multi_scale: bool = False,
+    chart_extraction_active: bool = False,
 ) -> EvidencePacket:
     """Run the tool chain for one region and bundle the outputs into a packet."""
     page_image = images_by_page.get(region.page)
@@ -317,6 +330,36 @@ async def _inspect_one_region(
         except (FileNotFoundError, ValueError) as exc:
             logger.debug("inspect_region(element) failed for %s: %s", packet_id, exc)
 
+    # --- 3. (Phase 6 #7 / sprint Phase 3) chart_to_table extraction.
+    # Fires only when the question is a chart-reading family AND the region
+    # is a chart-class figure AND the tight crop succeeded. Best-effort:
+    # failures collapse confidence; the reasoner still has the raw crop.
+    chart_csv: str | None = None
+    chart_extraction_confidence: float | None = None
+    if (
+        chart_extraction_active
+        and is_visual
+        and crop_ref
+        and crop_ref != page_thumbnail_ref
+        and _region_is_chart(region)
+    ):
+        try:
+            from focusparse.tools.chart_to_table import (
+                ChartToTableInput,
+                chart_to_table,
+            )
+
+            chart_out = await chart_to_table(
+                ChartToTableInput(crop_ref=crop_ref),
+                crop_cache_dir=crop_cache_dir,
+            )
+            if chart_out.table_csv:
+                chart_csv = chart_out.table_csv
+                chart_extraction_confidence = chart_out.confidence
+                crop_signals.append(f"chart_to_table:n={chart_out.n_points}")
+        except Exception as exc:  # noqa: BLE001 — chart extraction is advisory
+            logger.debug("chart_to_table failed for %s: %s", packet_id, exc)
+
     commit_level = "image" if is_visual else "element"
     provenance_tool = "deterministic_inspector" if crop_signals else "skeleton_inspector_fallback"
     return EvidencePacket(
@@ -329,6 +372,8 @@ async def _inspect_one_region(
         multi_scale_crops=multi_scale_crops,
         ocr_snippet=ocr_snippet,
         text_layer_snippet=text_layer_snippet,
+        chart_csv=chart_csv,
+        chart_extraction_confidence=chart_extraction_confidence,
         commit_level=commit_level,
         provenance=PacketProvenance(
             tool=provenance_tool,
@@ -342,6 +387,21 @@ async def _inspect_one_region(
 # ---------------------------------------------------------------------------
 # Ranking helpers
 # ---------------------------------------------------------------------------
+
+
+def _region_is_chart(region: RegionCandidate) -> bool:
+    """True when the region's figure_class signals a chart we can extract.
+
+    figure_class is carried as a `figure_class:<name>` entry in
+    `supporting_signals` (see `localizer.py` / `expander.py`). We pull
+    the first match; absence of the signal returns False so chart_to_table
+    only fires on regions the layout endpoint classified as charts.
+    """
+    for sig in region.supporting_signals or []:
+        if sig.startswith("figure_class:"):
+            fc = sig.split(":", 1)[1].strip().lower()
+            return fc in _CHART_FIGURE_CLASSES
+    return False
 
 
 def _bbox_area(bbox: tuple[float, float, float, float]) -> float:

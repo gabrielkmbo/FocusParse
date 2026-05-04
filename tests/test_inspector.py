@@ -56,6 +56,7 @@ def _region(
     bbox_norm: tuple[float, float, float, float],
     region_type: str | None = None,
     score: float = 0.8,
+    supporting_signals: list[str] | None = None,
 ) -> RegionCandidate:
     return RegionCandidate(
         region_id=region_id,
@@ -63,6 +64,7 @@ def _region(
         bbox_norm=bbox_norm,
         region_type=region_type,
         score=score,
+        supporting_signals=supporting_signals or [],
     )
 
 
@@ -1017,3 +1019,108 @@ async def test_multi_scale_skipped_when_no_pdf(tmp_path, monkeypatch):
         multi_scale=True,
     )
     assert ev.packets[0].multi_scale_crops == []
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-04 sprint Phase 3: chart_to_table conditional (Phase 6 #7)
+# ---------------------------------------------------------------------------
+
+
+async def test_chart_to_table_fires_only_for_chart_question_families(tmp_path, monkeypatch):
+    """chart_to_table runs when (a) the flag is on, (b) plan.question_family ∈
+    {axis_value_interpolation, candlestick_ohlc_extraction}, and (c) the region
+    has figure_class:bar_chart|line_chart|candlestick.
+
+    All three conditions must hold; otherwise the helper is silent.
+    """
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+
+    chart_calls: list = []
+
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None):
+        from focusparse.tools.chart_to_table import ChartToTableOutput
+
+        chart_calls.append({"crop_ref": inp.crop_ref})
+        return ChartToTableOutput(
+            table_csv="x_value,y_value\n0,5\n1,10",
+            confidence=0.7,
+            n_points=2,
+        )
+
+    monkeypatch.setattr(
+        "focusparse.tools.chart_to_table.chart_to_table",
+        _fake_chart_to_table,
+    )
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    chart_region = _region(
+        region_id="chart0",
+        page=1,
+        bbox_norm=(0.1, 0.2, 0.5, 0.6),
+        score=0.9,
+        region_type="picture",
+        supporting_signals=["figure_class:bar_chart"],
+    )
+
+    # Case 1: chart family + chart figure_class + flag on → fires.
+    plan = _plan()
+    plan = plan.model_copy(update={"question_family": "axis_value_interpolation"})
+    ev = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=[chart_region]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=True,
+    )
+    assert len(chart_calls) == 1
+    assert ev.packets[0].chart_csv == "x_value,y_value\n0,5\n1,10"
+    assert ev.packets[0].chart_extraction_confidence == 0.7
+
+    # Case 2: same chart, but non-chart question family → no extraction.
+    chart_calls.clear()
+    plan2 = plan.model_copy(update={"question_family": "single_value_lookup"})
+    ev2 = await inspect_regions(
+        _q(),
+        plan2,
+        RegionsEvent(candidates=[chart_region]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=True,
+    )
+    assert chart_calls == []
+    assert ev2.packets[0].chart_csv is None
+
+    # Case 3: chart family but the flag is off → no extraction.
+    ev3 = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=[chart_region]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=False,
+    )
+    assert chart_calls == []
+    assert ev3.packets[0].chart_csv is None
+
+    # Case 4: chart family + flag on, but the region is a text region → no extraction.
+    text_region = _region(
+        region_id="t0",
+        page=1,
+        bbox_norm=(0.05, 0.10, 0.95, 0.15),
+        score=0.95,
+        region_type="text",
+    )
+    ev4 = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=[text_region]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=True,
+    )
+    assert chart_calls == []
+    assert ev4.packets[0].chart_csv is None

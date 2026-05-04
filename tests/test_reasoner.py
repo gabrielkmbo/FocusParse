@@ -163,3 +163,40 @@ def test_render_packet_line_single_scale_does_not_annotate() -> None:
     )
     line = _render_packet_line(p)
     assert "image scales" not in line
+
+
+# ---------------------------------------------------------------------------
+# Sprint Phase 3: chart_csv rendering in the prompt
+# ---------------------------------------------------------------------------
+
+
+def test_render_packet_line_includes_chart_csv_when_present() -> None:
+    """Phase 3: chart_to_table CSV appears in a fenced code block."""
+    p = _packet(
+        local_crop_ref="/cache/chart.png",
+    )
+    p.chart_csv = "x_value,y_value\n0.0,2.5\n1.0,3.7"
+    p.chart_extraction_confidence = 0.78
+    line = _render_packet_line(p)
+    assert "Chart extraction" in line
+    assert "confidence=0.78" in line
+    assert "```csv" in line
+    assert "x_value,y_value" in line
+    assert "0.0,2.5" in line
+
+
+def test_render_packet_line_omits_chart_csv_when_none() -> None:
+    p = _packet()
+    line = _render_packet_line(p)
+    assert "Chart extraction" not in line
+    assert "```csv" not in line
+
+
+def test_render_packet_line_chart_without_confidence_renders_advisory() -> None:
+    p = _packet()
+    p.chart_csv = "x_value,y_value\n5,10"
+    p.chart_extraction_confidence = None
+    line = _render_packet_line(p)
+    assert "Chart extraction" in line
+    assert "advisory" in line
+    assert "confidence=" not in line
