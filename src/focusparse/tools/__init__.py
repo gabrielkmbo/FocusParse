@@ -568,7 +568,15 @@ def _format_field_line(
 ) -> str:
     """One-line field render: name (type, required/default) — description; example: ..."""
     type_str = _render_type(prop, defs=defs)
-    req_str = "required" if required else f"default={prop.get('default', 'none')!r}"
+    if required:
+        req_str = "required"
+    elif "default" in prop:
+        # Pydantic only emits the `default` key for fixed defaults; fields with
+        # `default_factory=list` etc. are absent here, which we render as
+        # "optional" rather than the misleading literal string "none".
+        req_str = f"default={prop['default']!r}"
+    else:
+        req_str = "optional"
     desc = prop.get("description") or ""
     line = f"  {name} ({type_str}, {req_str})"
     if desc:

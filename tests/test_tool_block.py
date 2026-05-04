@@ -162,3 +162,17 @@ def test_examples_appear_inline_with_fields(careful: str) -> None:
     """Each user-facing field with examples renders an `example: ...` line."""
     # `bbox_norm` example appears at least twice (inspect_region + get_text_layer).
     assert careful.count("example: [0.1, 0.2, 0.5, 0.6]") >= 2
+
+
+def test_default_factory_renders_as_optional_not_none(careful: str) -> None:
+    """run_python.image_refs uses default_factory=list; must not show "default='none'".
+
+    Regression for the cosmetic glitch where Pydantic's missing `default` key
+    on default_factory fields was rendered as the literal string 'none'.
+    """
+    assert "default='none'" not in careful
+    # The image_refs field is the canonical default_factory case; confirm it
+    # renders as "optional" instead.
+    rp_idx = careful.index("### run_python")
+    rp_block = careful[rp_idx:]
+    assert "image_refs (array of string, optional)" in rp_block
