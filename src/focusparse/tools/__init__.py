@@ -66,6 +66,10 @@ class ToolSpec:
     # back. Default: `repr()`. Tools with long outputs (crop refs,
     # layout boxes) override this with a one-paragraph rendering.
     summarize: Callable[[Any], str] = repr
+    # Optional Pydantic output model rendered into the prompt's "Returns:"
+    # section (Phase 2, 2026-05-04). Tools without a typed output stay
+    # readable; the renderer just skips the Returns block for them.
+    output_model: type[BaseModel] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +247,11 @@ def _summarize_run_python(out: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+from focusparse.tools.get_text_layer import GetTextLayerOutput
+from focusparse.tools.inspect_region import InspectRegionOutput
+from focusparse.tools.layout_detect import LayoutDetectionOutput
+from focusparse.tools.run_python import RunPythonOutput
+
 INSPECT_REGION_SPEC = ToolSpec(
     name="inspect_region",
     description=(
@@ -254,6 +263,7 @@ INSPECT_REGION_SPEC = ToolSpec(
     input_model=InspectRegionInput,
     runner=_inspect_region_runner,
     summarize=_summarize_inspect_region,
+    output_model=InspectRegionOutput,
 )
 
 
@@ -267,6 +277,7 @@ GET_TEXT_LAYER_SPEC = ToolSpec(
     input_model=GetTextLayerInput,
     runner=_get_text_layer_runner,
     summarize=_summarize_get_text_layer,
+    output_model=GetTextLayerOutput,
 )
 
 
@@ -280,22 +291,29 @@ LAYOUT_DETECT_SPEC = ToolSpec(
     input_model=_LayoutDetectInput,
     runner=_layout_detect_runner,
     summarize=_summarize_layout_detect,
+    output_model=LayoutDetectionOutput,
 )
 
 
 RUN_PYTHON_SPEC = ToolSpec(
     name="run_python",
     description=(
-        "Run sandboxed Python over previously-cropped images for "
-        "coding-driven zoom (e.g. LANCZOS upsample, peak detection). "
-        "Allowlist: PIL, numpy, matplotlib, scipy. Pass `image_refs` "
-        "(content-addressed crop ids from prior tool calls); the sandbox "
-        "exposes them as `images: dict[ref, PIL.Image]` and `save_image(img)` "
-        "for outputs."
+        "Run sandboxed Python over previously-cropped images. "
+        "Use for coding-driven zoom (LANCZOS upsample of tiny crops), "
+        "peak detection on chart axes, or PIL-based annotation. "
+        "Inside the sandbox: `images` is a dict keyed by the strings "
+        "you passed as `image_refs`; values are PIL.Image objects. "
+        "Call `save_image(img)` to return a new PNG (re-feedable as "
+        "`image_refs` in a subsequent call). `print(...)` is captured "
+        "into stdout. "
+        "Allowlist: PIL, numpy, matplotlib, scipy, plus io/math/statistics/"
+        "hashlib/json/base64/itertools/functools. Forbidden: os, subprocess, "
+        "open(), exec(), eval(), socket. Wall-time cap is 15s by default."
     ),
     input_model=RunPythonInput,
     runner=_run_python_runner,
     summarize=_summarize_run_python,
+    output_model=RunPythonOutput,
 )
 
 
@@ -327,3 +345,285 @@ def resolve_tool_set(name: Literal["minimal", "full"]) -> list[ToolSpec]:
     if name == "full":
         return list(_FULL_TOOLS)
     raise ValueError(f"Unknown tool set: {name!r}")
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-04 Phase 2 — agent-prompt tool block renderer
+# ---------------------------------------------------------------------------
+
+
+# Per-tool chaining notes. The LLM sees these in the prompt's "Chains
+# with:" section. Each note names the contract that's invisible from the
+# bare schema (coordinate system mismatch, ref/path identity).
+_CHAINS_WITH: dict[str, list[str]] = {
+    "inspect_region": [
+        (
+            "Pre-feed: layout_detect's regions[i].bbox is in PIXELS — divide by "
+            "image_width / image_height to produce bbox_norm before calling "
+            "inspect_region."
+        ),
+        (
+            "Post-feed: crop_ref (an absolute path) → run_python.image_refs[0] "
+            "for upsample / draw / peak detection. The same string is the key "
+            "in the sandbox's `images` dict."
+        ),
+    ],
+    "get_text_layer": [
+        (
+            "Pre-feed: same pixel→norm conversion as inspect_region when chaining "
+            "from layout_detect."
+        ),
+        (
+            "Escalation: when source='empty_native' (scanned PDF), call "
+            "inspect_region(mode='element') to OCR the same bbox."
+        ),
+    ],
+    "layout_detect": [
+        (
+            "Post-feed: each regions[i].bbox is pixel-space — convert by dividing "
+            "[x0, y0, x1, y1] by [image_width, image_height, image_width, "
+            "image_height] before passing to inspect_region.bbox_norm or "
+            "get_text_layer.bbox_norm."
+        ),
+        (
+            "Pair with figure_class: when label='picture' and figure_class='bar_chart', "
+            "follow up with run_python on inspect_region's crop for axis-tick reading."
+        ),
+    ],
+    "run_python": [
+        (
+            "Pre-feed: pass an inspect_region.crop_ref (absolute path) directly as "
+            "image_refs[0]; the sandbox keys `images[ref]` by the exact string you "
+            "passed."
+        ),
+        (
+            "Post-feed: each save_image(img) yields a 16-char ref in new_image_refs. "
+            "Pass that ref back as image_refs in a subsequent run_python call to "
+            "chain transformations."
+        ),
+    ],
+}
+
+
+# When-to-use notes for each tool. Concrete + use-case-driven so the LLM
+# picks the right primitive instead of defaulting to inspect_region.
+_WHEN_TO_USE: dict[str, list[str]] = {
+    "inspect_region": [
+        "Pull a specific region's text or visual.",
+        "Get a usable PNG you can re-feed to run_python for zoom / transform.",
+    ],
+    "get_text_layer": [
+        "Read native PDF text — deterministic and free.",
+        "Filter to a specific bbox to extract a caption / footnote / table cell.",
+        "Try this BEFORE inspect_region(mode='element') unless you know the PDF is scanned.",
+    ],
+    "layout_detect": [
+        "Discover regions on a page when you don't yet know what's there.",
+        "Identify chart vs table vs text before deciding which inspect_region mode to use.",
+    ],
+    "run_python": [
+        "LANCZOS upsample tiny crops (axis labels, footnote text).",
+        "Annotate / overlay onto a crop for human-readable answer evidence.",
+        "Compute over chart pixels (peak detection, OCR confidence aggregation).",
+    ],
+}
+
+
+# Worked example calls. Each is a JSON-shaped dict the LLM can copy. They
+# are validated against the tool's input_model in tests/test_tool_block.py
+# so a broken example fails the build, not the user.
+_EXAMPLE_CALLS: dict[str, dict[str, Any]] = {
+    "inspect_region": {
+        "doc_path": "/Users/me/.cache/focusparse/pdfs/AN040_EN.pdf",
+        "page": 3,
+        "bbox_norm": [0.10, 0.20, 0.50, 0.60],
+        "mode": "image",
+    },
+    "get_text_layer": {
+        "doc_path": "/Users/me/.cache/focusparse/pdfs/AN040_EN.pdf",
+        "page": 3,
+        "bbox_norm": [0.10, 0.20, 0.50, 0.60],
+    },
+    "layout_detect": {
+        "image_path": (
+            "/Users/me/.cache/focusparse/hf_staging/data/processed/"
+            "AN040_EN/images/AN040_EN_page_0003_300dpi.png"
+        ),
+        "page": 3,
+        "confidence_threshold": 0.3,
+    },
+    "run_python": {
+        "code": (
+            "from PIL import Image\n"
+            "ref = image_refs[0]\n"
+            "img = images[ref]\n"
+            "out = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)\n"
+            "print('upsampled', img.size, '->', out.size)\n"
+            "save_image(out)\n"
+        ),
+        "image_refs": ["/Users/me/cache/crops/abc123.png"],
+    },
+}
+
+
+def format_agent_tool_block(
+    tools: list[ToolSpec],
+    *,
+    mode: Literal["careful", "generic"] = "careful",
+) -> str:
+    """Render an agent-readable tool block for the system prompt.
+
+    careful: full per-tool description + field schemas (descriptions +
+        examples) + Returns block + When-to-use + Chains-with + worked
+        example call. Used by ReActAgent and the future LLM-driven
+        inspector.
+    generic: name + description + field-name list only. Used by
+        AgentBaseline; keeps the prompt thin since the comparator row's
+        budget is tighter by design.
+    """
+    if mode == "generic":
+        return _format_generic(tools)
+    return _format_careful(tools)
+
+
+def _format_generic(tools: list[ToolSpec]) -> str:
+    lines = ["Available tools:"]
+    for t in tools:
+        schema = t.input_model.model_json_schema()
+        props = schema.get("properties", {})
+        names = ", ".join(list(props.keys())[:8])
+        lines.append(f"- {t.name}({names})\n    {t.description}")
+    return "\n".join(lines)
+
+
+def _format_careful(tools: list[ToolSpec]) -> str:
+    parts = ["Available tools:"]
+    for t in tools:
+        parts.append(_format_one_tool_careful(t))
+    return "\n\n".join(parts)
+
+
+def _format_one_tool_careful(spec: ToolSpec) -> str:
+    lines = [f"### {spec.name}", "", spec.description, ""]
+
+    # Inputs.
+    lines.append("Inputs:")
+    schema = spec.input_model.model_json_schema()
+    required = set(schema.get("required") or [])
+    properties = schema.get("properties") or {}
+    defs = schema.get("$defs") or {}
+    for name, prop in properties.items():
+        lines.append(_format_field_line(name, prop, required=name in required, defs=defs))
+    lines.append("")
+
+    # Returns.
+    if spec.output_model is not None:
+        out_schema = spec.output_model.model_json_schema()
+        out_props = out_schema.get("properties") or {}
+        if out_props:
+            lines.append("Returns:")
+            for name, prop in out_props.items():
+                desc = prop.get("description") or ""
+                # Description-only line; keep it short and skip type/example
+                # decoration to bound prompt growth.
+                if desc:
+                    lines.append(f"  {name} — {desc}")
+                else:
+                    lines.append(f"  {name}")
+            lines.append("")
+
+    # When to use.
+    when = _WHEN_TO_USE.get(spec.name)
+    if when:
+        lines.append("When to use:")
+        for w in when:
+            lines.append(f"  - {w}")
+        lines.append("")
+
+    # Chains with.
+    chains = _CHAINS_WITH.get(spec.name)
+    if chains:
+        lines.append("Chains with:")
+        for c in chains:
+            lines.append(f"  - {c}")
+        lines.append("")
+
+    # Example call.
+    example = _EXAMPLE_CALLS.get(spec.name)
+    if example is not None:
+        import json as _json
+
+        body = _json.dumps({"action": spec.name, "action_input": example}, indent=2)
+        lines.append("Example call:")
+        for ln in body.splitlines():
+            lines.append(f"  {ln}")
+
+    return "\n".join(lines).rstrip()
+
+
+def _format_field_line(
+    name: str,
+    prop: dict[str, Any],
+    *,
+    required: bool,
+    defs: dict[str, Any],
+) -> str:
+    """One-line field render: name (type, required/default) — description; example: ..."""
+    type_str = _render_type(prop, defs=defs)
+    req_str = "required" if required else f"default={prop.get('default', 'none')!r}"
+    desc = prop.get("description") or ""
+    line = f"  {name} ({type_str}, {req_str})"
+    if desc:
+        line += f" — {desc}"
+    examples = prop.get("examples")
+    if examples:
+        first = examples[0]
+        line += f"\n      example: {first!r}"
+    return line
+
+
+def _render_type(prop: dict[str, Any], *, defs: dict[str, Any]) -> str:
+    """Render a JSON-Schema property type for the prompt.
+
+    Special-cases:
+      - array(minItems=4, maxItems=4, items=number) -> "array of 4 numbers"
+      - enum -> "one of: a, b, c"
+      - $ref -> chase into $defs and recurse.
+    """
+    if "$ref" in prop:
+        ref = prop["$ref"].split("/")[-1]
+        target = defs.get(ref)
+        if target:
+            return _render_type(target, defs=defs)
+        return ref
+
+    if "anyOf" in prop:
+        # Collapse `T | None` to `T (nullable)`.
+        non_null = [p for p in prop["anyOf"] if p.get("type") != "null"]
+        nullable = len(non_null) != len(prop["anyOf"])
+        if len(non_null) == 1:
+            inner = _render_type(non_null[0], defs=defs)
+            return f"{inner} (nullable)" if nullable else inner
+        return " | ".join(_render_type(p, defs=defs) for p in prop["anyOf"])
+
+    if "enum" in prop:
+        return "one of: " + ", ".join(repr(v) for v in prop["enum"])
+
+    typ = prop.get("type", "?")
+    if typ == "array":
+        min_i = prop.get("minItems")
+        max_i = prop.get("maxItems")
+        items = prop.get("items") or {}
+        items_type = items.get("type", "?")
+        if min_i and min_i == max_i:
+            return f"array of {min_i} {items_type}s"
+        return f"array of {items_type}"
+    if typ == "integer":
+        bounds = []
+        if "minimum" in prop:
+            bounds.append(f"≥{prop['minimum']}")
+        if "maximum" in prop:
+            bounds.append(f"≤{prop['maximum']}")
+        suffix = f" ({', '.join(bounds)})" if bounds else ""
+        return f"integer{suffix}"
+    return typ
