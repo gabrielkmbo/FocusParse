@@ -293,3 +293,45 @@ async def test_agent_baseline_default_iterations_is_tighter_than_react():
     from focusparse.pipeline.react_agent import _DEFAULT_MAX_ITERATIONS as REACT_N
 
     assert BASELINE_N < REACT_N
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-04 path-fairness + citation-required prompt
+# ---------------------------------------------------------------------------
+
+
+async def test_react_prompt_requires_citations_before_final_answer(
+    parser_bench_submodule_present,
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    client = _ScriptedClient(['{"final_answer": "42", "citations": []}'])
+    agent = ReActAgent(backend_client=client, tools=[_stub_tool_spec()])
+    await agent.run(_example(), images=[])
+    system = client.calls[0]["system"]
+    # Citation-required clause from the 2026-05-04 fix.
+    assert "MUST call at least one tool" in system
+    assert "at least one citation" in system
+    assert "Unanswerable" in system
+
+
+async def test_react_initial_user_turn_enumerates_image_paths(
+    parser_bench_submodule_present, tmp_path
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    p1 = tmp_path / "doc_page_0003_300dpi.png"
+    p2 = tmp_path / "doc_page_0007_300dpi.png"
+    for p in (p1, p2):
+        p.write_bytes(b"")
+    client = _ScriptedClient(['{"final_answer": "42", "citations": []}'])
+    agent = ReActAgent(backend_client=client, tools=[_stub_tool_spec()])
+    await agent.run(_example(), images=[p1, p2], pdf_path=tmp_path / "doc.pdf")
+    user_turn = client.calls[0]["prompt"]
+    # Each image path appears verbatim with its source page number.
+    assert str(p1) in user_turn
+    assert str(p2) in user_turn
+    assert "(page 3)" in user_turn
+    assert "(page 7)" in user_turn
+    # Path-fairness clause asserts runner rejects other paths.
+    assert "verbatim" in user_turn
