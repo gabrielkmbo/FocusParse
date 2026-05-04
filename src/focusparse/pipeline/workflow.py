@@ -97,6 +97,7 @@ class FocusWorkflow:
         use_evidence_graph: bool = False,
         auto_zoom: bool = False,
         tool_set: str = "full",
+        use_react_inspector: bool = False,
     ) -> None:
         self.backend_client = backend_client
         self.config = config
@@ -125,6 +126,14 @@ class FocusWorkflow:
         if tool_set not in ("minimal", "full"):
             raise ValueError(f"tool_set must be 'minimal' or 'full', got {tool_set!r}")
         self.tool_set = tool_set
+        # Phase 6 candidate #1 (Phase 1 of the 2026-05-04 sprint): LLM-driven
+        # inspector dispatch. When True, _run_inspect routes through
+        # `inspector_react.react_inspect` which lets a mid-tier LLM pick
+        # which regions to inspect from the localizer's candidate list.
+        # Falls back to deterministic top-N when the LLM is unavailable
+        # or returns a malformed plan, so call sites without an
+        # inspector_dispatch tier still work.
+        self.use_react_inspector = use_react_inspector
 
     def _client_for(self, role: str) -> ModelClient | None:
         """Resolve a role-scoped client via `tier_router`, else return None.
@@ -584,6 +593,56 @@ class FocusWorkflow:
         step_counter: _StepCounter,
         retry_attempt: int = 0,
     ) -> EvidenceEvent:
+        # Phase 6 #1 / sprint Phase 1: LLM-driven inspector dispatch.
+        if self.use_react_inspector:
+            from focusparse.pipeline.inspector_react import react_inspect
+
+            inspector_client = self._client_for("inspector_dispatch")
+            result = await react_inspect(
+                question_event,
+                plan,
+                regions,
+                backend_client=inspector_client,
+                images_by_page=images_by_page,
+                pdf_path=pdf_path,
+                crop_cache_dir=self._role_cache_dir("crops"),
+                text_layer_cache_dir=self._text_layer_cache_dir(),
+                auto_zoom=self.auto_zoom,
+            )
+            evidence = result.evidence
+            n_real_packets = sum(
+                1 for p in evidence.packets if p.provenance.tool != "skeleton_inspector_fallback"
+            )
+            response = result.response
+            tier = (
+                "react_inspector_fallback"
+                if result.fallback_used
+                else ("mid" if response is not None else "deterministic")
+            )
+            action = "deterministic" if result.fallback_used or response is None else "llm_call"
+            recorder.record(
+                TrajectoryStep(
+                    step_index=step_counter.next(),
+                    stage="inspect",
+                    tier=tier,
+                    action=action,
+                    tool="react_inspector",
+                    args={
+                        "n_packets": len(evidence.packets),
+                        "n_real_packets": n_real_packets,
+                        "plan_size": result.plan_size,
+                        "fallback_used": result.fallback_used,
+                        "retry_attempt": retry_attempt,
+                    },
+                    obs_summary=(response.text[:200] if response and response.text else None),
+                    tokens_in=(response.tokens_in if response else 0),
+                    tokens_out=(response.tokens_out if response else 0),
+                    latency_ms=(response.latency_ms if response else 0),
+                    usd=(response.usd if response else None),
+                )
+            )
+            return evidence
+
         evidence = await inspect_regions(
             question_event,
             plan,

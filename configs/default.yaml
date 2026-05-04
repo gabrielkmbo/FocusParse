@@ -22,6 +22,10 @@ roles:
   planner: cheap
   router: cheap
   localizer_rerank: mid
+  # Sprint Phase 1 (2026-05-04): LLM-driven inspector dispatch (Phase 6 #1).
+  # Wired only when FocusWorkflow(use_react_inspector=True) — the
+  # deterministic inspector is the floor, this is the optional lift.
+  inspector_dispatch: mid
   reasoner: frontier
   verifier: mid
 

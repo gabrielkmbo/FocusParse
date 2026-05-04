@@ -170,6 +170,7 @@ def main() -> int:
                 use_evidence_graph=args.use_evidence_graph,
                 auto_zoom=args.auto_zoom,
                 tool_set=args.tool_set,
+                use_react_inspector=args.react_inspector,
             )
         )
     elif args.agent in ("react", "agent_baseline"):
@@ -308,6 +309,17 @@ def _parse_args() -> argparse.Namespace:
         help="Enable Phase 3 auto-zoom: tiny regions get a LANCZOS 2× upsample "
         "via the run_python sandbox before being handed to the reasoner. "
         "Default off pending an A/B.",
+    )
+    parser.add_argument(
+        "--react-inspector",
+        action="store_true",
+        default=False,
+        help="Phase 6 #1 / sprint Phase 1: route the inspect stage through "
+        "an LLM-driven dispatcher (focusparse.pipeline.inspector_react) "
+        "that picks which regions to inspect from the localizer's "
+        "candidate list. Falls back to deterministic top-N when no "
+        "inspector_dispatch tier client is available. Default off; flip "
+        "after the n=148 A/B shows ≥+3pp non-overlapping CI.",
     )
     parser.add_argument(
         "--tool-set",

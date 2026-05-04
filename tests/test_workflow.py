@@ -1209,3 +1209,74 @@ async def test_workflow_full_tool_set_respects_auto_zoom(
     client = _FakeClient('{"answer": "x", "citations": []}')
     workflow = FocusWorkflow(backend_client=client, auto_zoom=True, tool_set="full")
     assert workflow.auto_zoom is True
+
+
+# ---------------------------------------------------------------------------
+# Sprint Phase 1 (2026-05-04): use_react_inspector flag
+# ---------------------------------------------------------------------------
+
+
+async def test_workflow_react_inspector_default_off(parser_bench_submodule_present):
+    """use_react_inspector defaults to False; inspect step keeps the
+    deterministic_inspector tool name (no behavior change for v1 callers)."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+    client = _FakeClient('{"answer": "x", "citations": []}')
+    workflow = FocusWorkflow(backend_client=client)
+    assert workflow.use_react_inspector is False
+    images = [Path("datasheet-A_page_0003_300dpi.png")]
+    result = await workflow.run(_make_example(), images, protocol="focus")
+    inspect_steps = [s for s in result.trace.steps if s.stage == "inspect"]
+    assert len(inspect_steps) == 1
+    assert inspect_steps[0].tool == "deterministic_inspector"
+
+
+async def test_workflow_react_inspector_falls_back_without_tier_router(
+    parser_bench_submodule_present,
+):
+    """use_react_inspector=True without an inspector_dispatch tier client
+    runs the deterministic fallback inside react_inspect — trace shows
+    `react_inspector` tool with `fallback_used=True`."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+    client = _FakeClient('{"answer": "x", "citations": []}')
+    workflow = FocusWorkflow(backend_client=client, use_react_inspector=True)
+    images = [Path("datasheet-A_page_0003_300dpi.png")]
+    result = await workflow.run(_make_example(), images, protocol="focus")
+    inspect_steps = [s for s in result.trace.steps if s.stage == "inspect"]
+    assert len(inspect_steps) == 1
+    step = inspect_steps[0]
+    assert step.tool == "react_inspector"
+    assert step.args.get("fallback_used") is True
+
+
+async def test_workflow_react_inspector_uses_tier_router_when_present(
+    parser_bench_submodule_present,
+):
+    """When inspector_dispatch tier resolves to a real client, the react
+    inspector dispatches via LLM (tier=mid, action=llm_call)."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+    reasoner = _FakeClient('{"answer": "x", "citations": []}')
+    inspector = _FakeClient(
+        '{"thought": "pick the chart", "plan": [{"region_idx": 0, "mode": "image"}]}'
+    )
+
+    class _Router:
+        def client_for(self, role: str):
+            return inspector if role == "inspector_dispatch" else None
+
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_Router(),
+        use_react_inspector=True,
+    )
+    images = [Path("datasheet-A_page_0003_300dpi.png")]
+    result = await workflow.run(_make_example(), images, protocol="focus")
+    inspect_steps = [s for s in result.trace.steps if s.stage == "inspect"]
+    step = inspect_steps[0]
+    assert step.tool == "react_inspector"
+    assert step.action == "llm_call"
+    assert step.tier == "mid"
+    assert step.args.get("fallback_used") is False
+    assert step.tokens_in > 0  # the inspector LLM call was recorded
