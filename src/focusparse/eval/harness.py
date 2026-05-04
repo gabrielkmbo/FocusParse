@@ -840,21 +840,35 @@ def _score_and_record(
     # Trace as a plain dict so the stage-metrics module can read it without
     # depending on the workflow internals. Stages get summed across multi-
     # step instances (the verifier-loop case) by `compute_stage_metrics`.
+    # `obs_summary` and `confidence` are kept on disk so the per-trace
+    # viewer (Phase 6 sub-plan, 2026-05-04) can render what the LLM saw
+    # at each step. `evidence_snapshot` is the v2 field — the final
+    # packets the reasoner used; absent on v1 traces.
+    evidence_snapshot = getattr(result.trace, "evidence_snapshot", None)
     trace_dict = {
         "steps": [
             {
+                "step_index": step.step_index,
                 "stage": step.stage,
                 "tier": step.tier,
                 "action": step.action,
                 "tool": step.tool,
                 "args": step.args,
+                "obs_ref": step.obs_ref,
+                "obs_summary": step.obs_summary,
                 "tokens_in": step.tokens_in,
                 "tokens_out": step.tokens_out,
                 "usd": step.usd,
                 "latency_ms": step.latency_ms,
+                "confidence": step.confidence,
             }
             for step in result.trace.steps
-        ]
+        ],
+        "evidence_snapshot": (
+            [p.model_dump(mode="json") for p in evidence_snapshot]
+            if evidence_snapshot is not None
+            else None
+        ),
     }
 
     record = {
