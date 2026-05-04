@@ -22,12 +22,13 @@ roles:
   planner: cheap
   router: cheap
   localizer_rerank: mid
-  # Sprint Phase 1 (2026-05-04): LLM-driven inspector dispatch (Phase 6 #1).
-  # Wired only when FocusWorkflow(use_react_inspector=True) — the
-  # deterministic inspector is the floor, this is the optional lift.
-  inspector_dispatch: mid
   reasoner: frontier
   verifier: mid
+  # Sprint Phase 1 (2026-05-04): inspector_dispatch is added back in a
+  # follow-on commit AFTER the headline-v1 rebaseline run completes — the
+  # tier_sha8 hashes the resolved role map, so adding a role mid-run
+  # would split predictions across two namespaces and break the cell
+  # aggregation. Re-add via a separate commit before Phase 1 A/B.
 
 # Default budgets for `focus eval --agent focus`.
 # Override on the CLI: --budget tokens=120k,tool_calls=12,crops=8
