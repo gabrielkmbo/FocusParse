@@ -72,18 +72,69 @@ DEFAULT_CPU_S = 15
 DEFAULT_RSS_MB = 1024
 
 
+_RUN_PYTHON_CODE_EXAMPLE = (
+    "from PIL import Image\n"
+    "ref = image_refs[0]\n"
+    "img = images[ref]\n"
+    "out = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)\n"
+    "print('upsampled', img.size, '->', out.size)\n"
+    "save_image(out)\n"
+)
+
+
 class RunPythonInput(BaseModel):
-    code: str  # Python code the model wrote
-    image_refs: list[str] = Field(default_factory=list)  # cache keys to make available
-    wall_time_s: int = DEFAULT_WALL_TIME_S
+    code: str = Field(
+        ...,
+        description=(
+            "Python source. The sandbox exposes `images: dict[str, "
+            "PIL.Image]` keyed by the strings you pass in `image_refs`, "
+            "and `save_image(img)` to return new PNGs. `print(...)` output "
+            "is captured into stdout. Allowlist: PIL, numpy, matplotlib, "
+            "scipy, plus io/math/statistics/hashlib/json/base64/itertools/"
+            "functools. Forbidden: os, subprocess, open(), exec(), eval(), "
+            "socket. Wall-time cap is 15s by default."
+        ),
+        examples=[_RUN_PYTHON_CODE_EXAMPLE],
+    )
+    image_refs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Refs to images to expose inside the sandbox as `images[ref]`. "
+            "Accepts either 16-char content-addressed cache stems (from a "
+            "prior run_python's `new_image_refs`) OR absolute paths (e.g. "
+            "an `inspect_region.crop_ref`)."
+        ),
+        examples=[["/Users/me/cache/crops/abc123.png"]],
+    )
+    wall_time_s: int = Field(
+        default=DEFAULT_WALL_TIME_S,
+        ge=1,
+        le=60,
+        description="Wall-time budget in seconds; sandbox is killed past this.",
+    )
 
 
 class RunPythonOutput(BaseModel):
-    stdout: str
-    stderr: str = ""
-    new_image_refs: list[str] = Field(default_factory=list)
-    exit_code: int = 0
-    timed_out: bool = False
+    stdout: str = Field(..., description="Captured stdout from `print(...)` calls in the sandbox.")
+    stderr: str = Field(
+        default="",
+        description="Captured stderr; populated on exceptions or timeouts.",
+    )
+    new_image_refs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "16-char sha256 stems for each PNG saved via `save_image(img)`. "
+            "Re-feed these strings as `run_python.image_refs` in a "
+            "subsequent call to chain transformations."
+        ),
+    )
+    exit_code: int = Field(
+        default=0, description="0 on success, 1 on Python exception, 2 on infrastructure error."
+    )
+    timed_out: bool = Field(
+        default=False,
+        description="True if the sandbox was killed by the wall-time watchdog.",
+    )
 
 
 async def run_python(
