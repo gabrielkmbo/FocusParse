@@ -78,9 +78,7 @@ async def answer_from_evidence(
     the evidence packets. Pass it from the workflow's retry handler; pass
     None for first-attempt and routine answer calls.
     """
-    packet_list = "\n".join(
-        f"- {p.packet_id}: page {p.page}, bbox {p.bbox_norm}" for p in evidence.packets
-    )
+    packet_list = "\n".join(_render_packet_line(p) for p in evidence.packets)
     hint_block = ""
     if escalation_hint:
         hint_block = (
@@ -120,16 +118,44 @@ async def answer_from_evidence(
     )
 
 
+def _render_packet_line(packet) -> str:
+    """One descriptor line for a packet in the reasoner's prompt.
+
+    Sprint Phase 2: when multi_scale_crops is populated, names how many
+    image scales the reasoner will see for this packet so it knows to
+    cross-reference (tight crop = exact-bbox detail; context crop =
+    surrounding caption / legend / axis labels).
+    """
+    base = f"- {packet.packet_id}: page {packet.page}, bbox {packet.bbox_norm}"
+    n_scales = len(packet.multi_scale_crops)
+    if n_scales >= 2:
+        base += f" — {n_scales} image scales (tight + context)"
+    return base
+
+
 def _collect_packet_images(evidence: EvidenceEvent) -> list[Path]:
-    """Gather unique local_crop_ref paths in packet order.
+    """Gather unique crop_ref paths in packet order.
 
     Packets can share a page image (multiple bboxes on the same page). We
     deduplicate while preserving order so the reasoner doesn't see redundant
     attachments.
+
+    Sprint Phase 2 (2026-05-04, Phase 6 #6): when a packet has
+    `multi_scale_crops` populated (tight + context), enumerate every
+    scale's ref. Falls back to the legacy local_crop_ref / page_thumbnail
+    chain for packets without multi-scale.
     """
     seen: set[str] = set()
     images: list[Path] = []
     for p in evidence.packets:
+        if p.multi_scale_crops:
+            for scaled in p.multi_scale_crops:
+                ref = scaled.ref
+                if not ref or ref in seen:
+                    continue
+                seen.add(ref)
+                images.append(Path(ref))
+            continue
         ref = p.local_crop_ref or p.page_thumbnail_ref
         if not ref or ref in seen:
             continue
