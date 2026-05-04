@@ -98,6 +98,7 @@ class FocusWorkflow:
         auto_zoom: bool = False,
         tool_set: str = "full",
         use_react_inspector: bool = False,
+        multi_scale_packets: bool = False,
     ) -> None:
         self.backend_client = backend_client
         self.config = config
@@ -134,6 +135,12 @@ class FocusWorkflow:
         # or returns a malformed plan, so call sites without an
         # inspector_dispatch tier still work.
         self.use_react_inspector = use_react_inspector
+        # Phase 6 candidate #6 (sprint Phase 2): Multi-scale evidence packets.
+        # When True, the inspector renders both a tight crop and a wider
+        # ~30%-padded context crop per region; the reasoner sees both via
+        # `EvidencePacket.multi_scale_crops`. Default off pending the n=148
+        # A/B (~$3-5 expected cost; ~+2-5pp predicted lift).
+        self.multi_scale_packets = multi_scale_packets
 
     def _client_for(self, role: str) -> ModelClient | None:
         """Resolve a role-scoped client via `tier_router`, else return None.
@@ -608,6 +615,7 @@ class FocusWorkflow:
                 crop_cache_dir=self._role_cache_dir("crops"),
                 text_layer_cache_dir=self._text_layer_cache_dir(),
                 auto_zoom=self.auto_zoom,
+                multi_scale=self.multi_scale_packets,
             )
             evidence = result.evidence
             n_real_packets = sum(
@@ -652,6 +660,7 @@ class FocusWorkflow:
             crop_cache_dir=self._role_cache_dir("crops"),
             text_layer_cache_dir=self._text_layer_cache_dir(),
             auto_zoom=self.auto_zoom,
+            multi_scale=self.multi_scale_packets,
         )
         n_real_packets = sum(
             1 for p in evidence.packets if p.provenance.tool != "skeleton_inspector_fallback"
@@ -936,6 +945,7 @@ def _packet_to_summary(p: EvidencePacket) -> EvidencePacketSummary:
         region_type=p.region_type,
         local_crop_ref=p.local_crop_ref,
         linked_crop_refs=list(p.linked_crop_refs),
+        multi_scale_crops=[c.model_dump(mode="json") for c in p.multi_scale_crops],
         text_layer_snippet=p.text_layer_snippet,
         ocr_snippet=p.ocr_snippet,
         confidence=p.confidence,

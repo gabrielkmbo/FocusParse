@@ -931,3 +931,89 @@ async def test_auto_zoom_failure_keeps_original_crop(tmp_path, monkeypatch):
     # crop_ref came from inspect_region (unchanged), not run_python.
     assert "zoomed" not in ev.packets[0].local_crop_ref
     assert "run_python:zoom2x" not in (ev.packets[0].provenance.args_hash or "")
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-04 sprint Phase 2: multi-scale evidence packets (Phase 6 #6)
+# ---------------------------------------------------------------------------
+
+
+async def test_multi_scale_packets_default_off_produces_no_extra_crops(tmp_path, monkeypatch):
+    """multi_scale=False (default) keeps the existing single-crop behavior;
+    multi_scale_crops list stays empty so legacy traces / reasoner prompts
+    don't see the new field populated."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    regions = RegionsEvent(
+        candidates=[_region(region_id="r0", page=1, bbox_norm=(0.1, 0.2, 0.5, 0.6), score=0.9)]
+    )
+    ev = await inspect_regions(
+        _q(),
+        _plan(),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+    )
+    assert ev.packets[0].multi_scale_crops == []
+
+
+async def test_multi_scale_packets_renders_tight_plus_context(tmp_path, monkeypatch):
+    """multi_scale=True triggers a second inspect_region call for the
+    context (30%-padded) bbox; both crops land in multi_scale_crops as
+    ordered tight → context entries."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    regions = RegionsEvent(
+        candidates=[_region(region_id="r0", page=1, bbox_norm=(0.10, 0.20, 0.50, 0.60), score=0.9)]
+    )
+    ev = await inspect_regions(
+        _q(),
+        _plan(),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        multi_scale=True,
+    )
+    pkt = ev.packets[0]
+    assert len(pkt.multi_scale_crops) == 2
+    assert pkt.multi_scale_crops[0].scale == "tight"
+    assert pkt.multi_scale_crops[1].scale == "context"
+    # Context bbox is widened from the original by 0.30 on each side.
+    tight_bbox = pkt.multi_scale_crops[0].bbox_norm
+    context_bbox = pkt.multi_scale_crops[1].bbox_norm
+    assert tight_bbox == (0.10, 0.20, 0.50, 0.60)
+    assert context_bbox[0] == pytest.approx(0.0, abs=1e-6)
+    assert context_bbox[1] == pytest.approx(0.0, abs=1e-6)
+    assert context_bbox[2] == pytest.approx(0.80, abs=1e-6)
+    assert context_bbox[3] == pytest.approx(0.90, abs=1e-6)
+    # crop_signals provenance records the second call.
+    assert "inspect_region:context" in pkt.provenance.args_hash
+
+
+async def test_multi_scale_skipped_when_no_pdf(tmp_path, monkeypatch):
+    """multi_scale=True without a pdf_path has nothing to render — the
+    packet falls back gracefully with empty multi_scale_crops."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+
+    regions = RegionsEvent(
+        candidates=[_region(region_id="r0", page=1, bbox_norm=(0.1, 0.2, 0.5, 0.6), score=0.9)]
+    )
+    ev = await inspect_regions(
+        _q(),
+        _plan(),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=None,
+        multi_scale=True,
+    )
+    assert ev.packets[0].multi_scale_crops == []

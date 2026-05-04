@@ -171,6 +171,7 @@ def main() -> int:
                 auto_zoom=args.auto_zoom,
                 tool_set=args.tool_set,
                 use_react_inspector=args.react_inspector,
+                multi_scale_packets=args.multi_scale_packets,
             )
         )
     elif args.agent in ("react", "agent_baseline"):
@@ -320,6 +321,15 @@ def _parse_args() -> argparse.Namespace:
         "candidate list. Falls back to deterministic top-N when no "
         "inspector_dispatch tier client is available. Default off; flip "
         "after the n=148 A/B shows ≥+3pp non-overlapping CI.",
+    )
+    parser.add_argument(
+        "--multi-scale-packets",
+        action="store_true",
+        default=False,
+        help="Phase 6 #6 / sprint Phase 2: render both a tight crop and a "
+        "wider 30%%-padded context crop per region. The reasoner sees both "
+        "via EvidencePacket.multi_scale_crops. Default off pending the "
+        "n=148 A/B (~+2-5pp predicted lift across both domains).",
     )
     parser.add_argument(
         "--tool-set",

@@ -121,6 +121,7 @@ async def react_inspect(
     crop_cache_dir: Path | None = None,
     text_layer_cache_dir: Path | None = None,
     auto_zoom: bool = False,
+    multi_scale: bool = False,
 ) -> ReActInspectorResult:
     """LLM-driven inspector dispatch.
 
@@ -185,6 +186,7 @@ async def react_inspect(
             crop_cache_dir=crop_cache_dir,
             text_layer_cache_dir=text_layer_cache_dir,
             auto_zoom=auto_zoom,
+            multi_scale=multi_scale,
         )
         packets.append(packet)
 

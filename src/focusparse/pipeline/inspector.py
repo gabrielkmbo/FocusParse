@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from focusparse.evidence.packet import EvidencePacket, PacketProvenance
+from focusparse.evidence.packet import CropRef, EvidencePacket, PacketProvenance
 from focusparse.pipeline.events import (
     EvidenceEvent,
     PlanEvent,
@@ -132,6 +132,7 @@ async def inspect_regions(
     crop_cache_dir: Path | None = None,
     text_layer_cache_dir: Path | None = None,
     auto_zoom: bool = False,
+    multi_scale: bool = False,
 ) -> EvidenceEvent:
     """Produce real `EvidencePacket`s via the tool belt.
 
@@ -178,6 +179,7 @@ async def inspect_regions(
             crop_cache_dir=crop_cache_dir,
             text_layer_cache_dir=text_layer_cache_dir,
             auto_zoom=auto_zoom,
+            multi_scale=multi_scale,
         )
         packets.append(packet)
     return EvidenceEvent(packets=packets)
@@ -197,6 +199,7 @@ async def _inspect_one_region(
     crop_cache_dir: Path | None,
     text_layer_cache_dir: Path | None,
     auto_zoom: bool = False,
+    multi_scale: bool = False,
 ) -> EvidencePacket:
     """Run the tool chain for one region and bundle the outputs into a packet."""
     page_image = images_by_page.get(region.page)
@@ -210,6 +213,7 @@ async def _inspect_one_region(
     # --- 1. Always crop (image mode). The VLM reads this at `answer`. ---
     crop_ref = page_thumbnail_ref
     crop_signals: list[str] = []
+    multi_scale_crops: list[CropRef] = []
     if pdf_path is not None:
         try:
             crop_out = await inspect_region(
@@ -227,6 +231,31 @@ async def _inspect_one_region(
         except (FileNotFoundError, ValueError) as exc:
             # Missing PDF / invalid bbox → keep the page image as fallback.
             logger.debug("inspect_region(image) failed for %s: %s", packet_id, exc)
+
+    # --- 1a (Phase 6 #6 / sprint Phase 2). Multi-scale: also render a wider
+    # context crop (~30% pad) so the reasoner sees both tight + context for
+    # the same region. Skipped when the tight crop fell back to the page
+    # thumbnail (no PDF available, no point rendering a "wider" page image).
+    if multi_scale and crop_ref and crop_ref != page_thumbnail_ref:
+        context_bbox = _expand_bbox(region.bbox_norm, pad=0.30)
+        try:
+            ctx_out = await inspect_region(
+                InspectRegionInput(
+                    doc_path=str(pdf_path),
+                    page=region.page,
+                    bbox_norm=context_bbox,
+                    mode="image",
+                    expansion="none",  # already padded; don't double-expand
+                ),
+                cache_dir=crop_cache_dir,
+            )
+            multi_scale_crops = [
+                CropRef(ref=crop_ref, bbox_norm=region.bbox_norm, scale="tight"),
+                CropRef(ref=ctx_out.crop_ref, bbox_norm=context_bbox, scale="context"),
+            ]
+            crop_signals.append("inspect_region:context")
+        except (FileNotFoundError, ValueError) as exc:
+            logger.debug("inspect_region(context) failed for %s: %s", packet_id, exc)
 
     # --- 1b. Auto-zoom for tiny regions via run_python sandbox. ---
     if auto_zoom and crop_ref and crop_ref != page_thumbnail_ref:
@@ -297,6 +326,7 @@ async def _inspect_one_region(
         region_type=region.region_type,
         page_thumbnail_ref=page_thumbnail_ref,
         local_crop_ref=crop_ref,
+        multi_scale_crops=multi_scale_crops,
         ocr_snippet=ocr_snippet,
         text_layer_snippet=text_layer_snippet,
         commit_level=commit_level,
@@ -320,6 +350,27 @@ def _bbox_area(bbox: tuple[float, float, float, float]) -> float:
     w = max(0.0, x1 - x0)
     h = max(0.0, y1 - y0)
     return w * h
+
+
+def _expand_bbox(
+    bbox: tuple[float, float, float, float],
+    *,
+    pad: float,
+) -> tuple[float, float, float, float]:
+    """Pad a normalized bbox by `pad` on each side (clamped to [0,1]).
+
+    Used by the multi-scale inspector path to produce a "context" crop
+    around the same target region. `pad=0.30` widens by ~30% of page on
+    each side; the resulting bbox is then sliced via inspect_region with
+    `expansion="none"` so we don't double-pad.
+    """
+    x0, y0, x1, y1 = bbox
+    return (
+        max(0.0, x0 - pad),
+        max(0.0, y0 - pad),
+        min(1.0, x1 + pad),
+        min(1.0, y1 + pad),
+    )
 
 
 async def _zoom_crop(
