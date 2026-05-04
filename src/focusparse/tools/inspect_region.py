@@ -34,6 +34,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from focusparse.tools._schemas import bbox_norm_field
+
 _EXPANSION_FRACTIONS = {
     "none": 0.0,
     "default": 0.02,
@@ -42,24 +44,80 @@ _EXPANSION_FRACTIONS = {
 
 
 class InspectRegionInput(BaseModel):
-    doc_path: str  # local PDF path
-    page: int = Field(ge=1, description="1-indexed page number")
-    bbox_norm: tuple[float, float, float, float]  # (x0, y0, x1, y1) in [0,1]
-    mode: Literal["image", "element", "region"] = "element"
-    dpi: int = Field(default=300, ge=72, le=600)
-    rotation: int = Field(default=0)
-    expansion: Literal["none", "default", "aggressive"] = "default"
+    doc_path: str = Field(
+        ...,
+        description="Absolute path to the source PDF on disk.",
+        examples=["/Users/me/.cache/focusparse/pdfs/AN040_EN.pdf"],
+    )
+    page: int = Field(
+        ...,
+        ge=1,
+        description="1-indexed page number.",
+        examples=[3],
+    )
+    bbox_norm: list[float] = bbox_norm_field()
+    mode: Literal["image", "element", "region"] = Field(
+        default="element",
+        description=(
+            "image=crop only (cheapest, no OCR). element=crop+Tesseract OCR "
+            "(use when you know the region is text-bearing). region=crop+sub-"
+            "layout detection+per-sub-region OCR (use for mixed structures: "
+            "chart+legend+caption, table+notes)."
+        ),
+        examples=["element", "image", "region"],
+    )
+    dpi: int = Field(
+        default=300,
+        ge=72,
+        le=600,
+        description="Render DPI; 300 is the default and matches gold.",
+    )
+    rotation: int = Field(
+        default=0,
+        description="Page rotation in degrees (0/90/180/270).",
+    )
+    expansion: Literal["none", "default", "aggressive"] = Field(
+        default="default",
+        description=(
+            "Pad the crop bbox before slicing. default=2% on each side, aggressive=5%, none=tight."
+        ),
+    )
 
 
 class InspectRegionOutput(BaseModel):
-    crop_ref: str  # absolute path to the cached PNG crop
-    ocr_text: str | None = None
-    sub_regions: list[dict] = Field(default_factory=list)
-    confidence: float = 1.0  # OCR confidence in [0,1]; 1.0 when no OCR ran
-    tokens_used: int = 0  # reserved for a future LLM-based zoom path
-    latency_ms: int = 0
-    page_width_px: int = 0  # rendered page width at requested DPI
-    page_height_px: int = 0
+    crop_ref: str = Field(
+        ...,
+        description=(
+            "Absolute path to the cached PNG crop. Pass directly to "
+            "run_python.image_refs to manipulate via Python (LANCZOS upsample, "
+            "PIL annotation, peak detection)."
+        ),
+    )
+    ocr_text: str | None = Field(
+        default=None,
+        description=(
+            "Tesseract OCR output for the crop. None when mode='image' or tesseract is missing."
+        ),
+    )
+    sub_regions: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "Sub-detections inside the crop (mode='region' only). Each item is "
+            "{label, bbox_px, score, figure_class, ocr_text}; bbox_px is in the "
+            "crop's pixel space, not page space."
+        ),
+    )
+    confidence: float = Field(
+        default=1.0,
+        description="OCR confidence in [0,1]; 1.0 when no OCR ran.",
+    )
+    tokens_used: int = Field(
+        default=0,
+        description="Reserved for a future LLM-based zoom path; unused today.",
+    )
+    latency_ms: int = Field(default=0, description="End-to-end tool latency in ms.")
+    page_width_px: int = Field(default=0, description="Rendered page width at requested DPI.")
+    page_height_px: int = Field(default=0, description="Rendered page height at requested DPI.")
 
 
 async def inspect_region(
