@@ -320,6 +320,9 @@ async def run_focus_eval(
     use_evidence_graph: bool = False,
     auto_zoom: bool = False,
     tool_set: str = "full",
+    use_react_inspector: bool = False,
+    multi_scale_packets: bool = False,
+    chart_to_table_enabled: bool = False,
 ) -> dict[str, Any]:
     """Run `FocusWorkflow` over an iterable of examples.
 
@@ -378,6 +381,16 @@ async def run_focus_eval(
         # +2-tools ablation row of the headline table. Workflow validates
         # the value; harness just forwards.
         workflow_kwargs["tool_set"] = tool_set
+    if use_react_inspector:
+        # Sprint Phase 1 (2026-05-04, Phase 6 #1): LLM-driven inspector.
+        workflow_kwargs["use_react_inspector"] = True
+    if multi_scale_packets:
+        # Sprint Phase 2 (2026-05-04, Phase 6 #6): tight + context crops.
+        workflow_kwargs["multi_scale_packets"] = True
+    if chart_to_table_enabled:
+        # Sprint Phase 3 (2026-05-04, Phase 6 #7): chart_to_table extraction
+        # gated on question_family + figure_class inside the inspector.
+        workflow_kwargs["chart_to_table_enabled"] = True
     workflow = FocusWorkflow(**workflow_kwargs)
     per_example: list[dict[str, Any]] = []
 
