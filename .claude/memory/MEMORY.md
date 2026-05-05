@@ -131,6 +131,65 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-04 — Sprint kickoff (Phase 0 + Phase 1/2/3 implementation)
+
+**Active sprint:** `plans/2026-05-04-harness-iteration-sprint.md`. Five Phase 6
+candidates × hybrid cadence (per-candidate A/B + end-of-sprint headline-v2).
+Implementation done; A/Bs pending the rebaseline.
+
+**HF dataset pinned:** `gabrielbo/parser-bench` revision
+`3774c67f8b814392b6d04c939e904f749a3f52eb` (HEAD on main as of 2026-05-04).
+Headline-v1 (2026-04-29) didn't pin a revision; new sprint A/Bs all run
+against this fixed SHA. `configs/default.yaml::traces.schema_version` bumped
+"1" → "2" to match the runtime constant from the prior session.
+
+**Rebaseline run in flight:** `results/hf/headline-v1-rebaseline-v2/`. First
+attempt had two issues — (1) sourcing .env was needed in subprocesses;
+(2) `run_focus_eval` was missing the new sprint kwargs
+(`use_react_inspector`, `multi_scale_packets`, `chart_to_table_enabled`),
+crashing focus +2/+4 silently. Both fixed; 5 specs (Base VLM, ReAct +2/+4,
+Agent baseline +2/+4) ran to 147/148; focus +2/+4 backfilling now.
+
+**5-spec partial rebaseline (drift signal vs headline-v1, n=147):**
+
+| Method            | rebaseline-v2 acc | headline-v1 acc |
+| ----------------- | ----------------- | --------------- |
+| Base VLM          | 37.8%             | 39.2%           |
+| ReAct +2          | 13.5%             | 16.2%           |
+| ReAct +4          | 14.2%             | 19.6%           |
+| Agent baseline +2 | 8.1%              | 12.2%           |
+| Agent baseline +4 | 6.8%              | 12.2%           |
+
+All 5 cells dropped 1.4-5.4pp on the new dataset pin. Suggests the new HF
+revision has either harder examples or stricter scoring inputs; the Phase 1/2/3
+A/Bs now compare against the rebaselined 7-spec table, not headline-v1.
+
+**Phase 1/2/3 implementation shipped (default-off behind flags):**
+
+- Phase 1 (`pipeline/inspector_react.py`, `--react-inspector`): single-shot
+  LLM-driven dispatch via `inspector_dispatch` mid-tier client. Falls back to
+  deterministic top-N when no client / malformed plan.
+- Phase 2 (`evidence/packet.py::CropRef`, `--multi-scale-packets`): tight + 30%-pad
+  context crops on every packet. Reasoner sees both via doubled image inputs.
+- Phase 3 (`tools/chart_to_table.py`, `--chart-to-table`): pixel-pipeline
+  extraction (plot detection + axis OCR + linear interpolation → CSV). Gated on
+  `question_family ∈ {axis_value_interpolation, candlestick_ohlc_extraction}`
+  AND `region.figure_class ∈ {bar_chart, line_chart, candlestick}`.
+
+Plus shared infra:
+
+- `scripts/compare_headline_tables.py` — cell-by-cell delta with ship/hold/
+  revert gate markers. Used after every sprint A/B.
+- `tests/test_focus_harness.py::test_run_focus_eval_accepts_sprint_phase_flags`
+  — regression for the harness/workflow kwarg surface that the rebaseline
+  silent-crash exposed.
+
+**Standing context for next agent:** The infrastructure is ready. The moment
+the focus backfill lands, re-running `run_headline_eval.py --output-dir
+results/hf/headline-v1-rebaseline-v2 --resume` produces the canonical
+7-spec rebaseline_table.json. Then per-phase A/Bs each fire as one CLI
+invocation against that baseline.
+
 ### 2026-05-04 — Trace schema v1 → v2 + ReAct failure mode reclassified
 
 **Schema bump.** `traces/export.py::SCHEMA_VERSION = "2"`. Added optional
