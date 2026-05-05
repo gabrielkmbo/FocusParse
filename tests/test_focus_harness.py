@@ -497,3 +497,51 @@ async def test_run_focus_eval_resume_handles_legacy_records_without_stages(
     # not in `stages`). This is acceptable: legacy records don't break the
     # aggregate; once they're re-scored they'll carry full stage data.
     assert manifest["stage_aggregate"]["reasoning"]["answer_correct"] is not None
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-04 sprint regression: run_focus_eval accepts the Phase 1/2/3 flags.
+# This test exists because the rebaseline crashed silently when the harness
+# rejected `use_react_inspector` — kwarg drift between FocusWorkflow and
+# run_focus_eval doesn't surface in unit tests that instantiate the workflow
+# directly.
+# ---------------------------------------------------------------------------
+
+
+async def test_run_focus_eval_accepts_sprint_phase_flags(tmp_path, parser_bench_submodule_present):
+    """All three sprint flags can be passed without TypeError; off + on paths."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+
+    backend = _FakeClient('{"answer": "x", "citations": []}')
+
+    # Case 1: all flags default (False) — must work as a regression baseline.
+    result = await run_focus_eval(
+        [_make_example("ex-flags-off")],
+        backend_client=backend,
+        backend="fake",
+        model="fake",
+        protocol="focus_default",
+        output_dir=tmp_path / "off",
+        images_root=tmp_path / "off",
+    )
+    assert result is not None
+
+    # Case 2: all sprint flags explicitly on. Workflow still runs; behavior
+    # may differ but the call doesn't TypeError. The contract this test pins
+    # is the harness/workflow signature compatibility — the rebaseline run
+    # found a TypeError here because run_focus_eval was missing the new
+    # kwargs.
+    result_on = await run_focus_eval(
+        [_make_example("ex-flags-on")],
+        backend_client=_FakeClient('{"answer": "y", "citations": []}'),
+        backend="fake",
+        model="fake",
+        protocol="focus_default",
+        output_dir=tmp_path / "on",
+        images_root=tmp_path / "on",
+        use_react_inspector=True,
+        multi_scale_packets=True,
+        chart_to_table_enabled=True,
+    )
+    assert result_on is not None
