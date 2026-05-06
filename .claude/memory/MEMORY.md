@@ -212,6 +212,38 @@ n=148. Decision rule: ≥+3pp non-overlap → ship; ≤noise → pivot to Path B
 headline cell. The query-aware selection is correct on its own merits and
 becomes load-bearing as soon as Path A lands.
 
+**Update (later same evening)**: The B1.5 A/B finished at **50.7% Overall**
+on focus +4 — apparently restoring `+4 ≥ +2`. But pairwise packet-identity
+analysis between the three focus +4 runs (broken / B1 / B1.5) revealed:
+
+broken vs B1: 115/147 (78%) identical packet sets
+broken vs B1.5: 4/147 (2.7%) identical packet sets
+B1 vs B1.5: 4/147 (2.7%) identical packet sets
+
+**Two near-identical-code runs produce different packets in 97% of examples.**
+Of the 16 examples B1.5 fixed vs broken, zero had identical packets — they
+all sampled different upstream trajectories. The 6.8pp B1.5 lift is a
+different draw of the stochastic upstream stack, not the expand_context
+constants.
+
+**Immediate consequence:** single-run A/Bs at n=148 can't measure
+expand_context (or any inspect/expand-stage) changes. The run-to-run
+variance floor on focus +4 across this evening's three runs spans
+43.9% → 45.3% → 50.7% (~7pp), which is bigger than most predicted lifts
+in the sprint plan. To actually measure a change we need either:
+
+- Multiple runs averaged (3 × n=148 ≈ $6/data-point)
+- Cached upstream outputs (deterministic upstream, swap only the stage
+  under test) — best fit, requires plumbing
+- Paired comparison harness (same example_id seed across runs)
+- Lower upstream temperature (zero out planner/router/reranker
+  stochasticity — risky if the planner's emergent behavior depends on
+  sampling)
+
+**Path A still the right next move** but with the variance caveat: any
+A/B result needs ≥2 runs averaged before we ship-or-revert. Update the
+plan accordingly tomorrow.
+
 ### 2026-05-05 — Rebaseline-v2 lands; Our harness +2 leads, +4 inversion diagnosed
 
 `results/hf/headline-v1-rebaseline-v2/headline_table.{json,md,html}`. Same
