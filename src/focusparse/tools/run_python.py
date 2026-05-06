@@ -198,6 +198,7 @@ async def run_python(
             child_conn,
             inp.code,
             image_payloads,
+            list(inp.image_refs),
             DEFAULT_CPU_S,
             DEFAULT_RSS_MB,
         ),
@@ -262,6 +263,7 @@ def _child_main(
     pipe,
     code: str,
     image_payloads: dict[str, bytes],
+    image_refs: list[str],
     cpu_s: int,
     rss_mb: int,
 ) -> None:
@@ -308,6 +310,12 @@ def _child_main(
             "__name__": "__sandbox__",
             "__builtins__": builtins_dict,
             "images": _decode_images(image_payloads, preloaded.get("PIL.Image")),
+            # Original ref list as the agent supplied it. Lets the documented
+            # 5-line example template (`ref = image_refs[0]; img = images[ref]`)
+            # actually work. Refs that failed to load are still in this list
+            # but missing from `images`, so a KeyError surfaces as a useful
+            # diagnostic instead of a silent skip.
+            "image_refs": list(image_refs),
             "save_image": _make_save_image(preloaded.get("PIL.Image")),
             "_new_images_buffer": [],
         }
