@@ -30,7 +30,7 @@ import logging
 from pathlib import Path
 
 from focusparse.evidence.packet import EvidencePacket, PacketProvenance
-from focusparse.pipeline.events import EvidenceEvent, RegionCandidate, RegionsEvent
+from focusparse.pipeline.events import EvidenceEvent, PlanEvent, RegionCandidate, RegionsEvent
 from focusparse.pipeline.evidence_graph import (
     extract_figure_class,
     find_graph_neighbors,
@@ -54,7 +54,46 @@ _NEIGHBOR_TYPES: frozenset[str] = frozenset(
     }
 )
 
+# Map planner-vocab `evidence_types` (e.g. "caption", "footnote", "header") to
+# detector-vocab region_types the expander considers as neighbors. Mirrors
+# `inspector._EVIDENCE_TYPE_ALIASES` but scoped to *neighbor* selection — we
+# never attach "figure" or "chart" as a neighbor because those are siblings,
+# not annotations.
+_EVIDENCE_TYPE_TO_NEIGHBOR_TYPES: dict[str, frozenset[str]] = {
+    "caption": frozenset({"caption"}),
+    "footnote": frozenset({"footnote"}),
+    "header": frozenset({"page-header", "section_header", "section-header", "title"}),
+    "footer": frozenset({"page-footer"}),
+    "title": frozenset({"title", "section_header", "section-header"}),
+    "section_header": frozenset({"section_header", "section-header", "title"}),
+}
+
+# Reranker `needed_for` roles that indicate "this region is a context
+# dependency for the focus region." When the reranker (Phase 2 item 4)
+# tags a candidate with one of these, the expander attaches it even
+# without an explicit `plan.evidence_types` request.
+_RERANK_CONTEXT_ROLES: frozenset[str] = frozenset(
+    {
+        "legend_binding",
+        "axis_reading",
+        "caption_context",
+        "footnote_adjustment",
+        "table_cell_lookup",
+        "header_disambiguation",
+    }
+)
+
+# Minimum reranker `relevance` for a neighbor to be attached when the
+# reranker scored it but didn't tag a context role. Tuned to filter out
+# the "spatially nearby but irrelevant" cases that drove the +2 vs +4
+# inversion (see MEMORY.md 2026-05-05 entry).
+_DEFAULT_NEIGHBOR_RELEVANCE_THRESHOLD = 0.3
+
 _DEFAULT_MAX_NEIGHBORS_PER_PACKET = 4
+# Conservative cap when the planner gave no `evidence_types` hint AND the
+# reranker didn't run. Halves the spatial-only-fallback budget so a query-
+# blind expansion can't dominate the reasoner's image budget.
+_FALLBACK_MAX_NEIGHBORS_PER_PACKET = 2
 # Expand the packet's bbox by this fraction of the [0,1] range on each side
 # when testing for neighbor overlap. 0.08 ≈ ~1 inch on a Letter page at 300
 # DPI — enough to catch a caption a few text lines away.
@@ -70,6 +109,8 @@ async def expand_context(
     max_neighbors_per_packet: int = _DEFAULT_MAX_NEIGHBORS_PER_PACKET,
     adjacency_pad: float = _DEFAULT_ADJACENCY_PAD,
     use_evidence_graph: bool = False,
+    plan: PlanEvent | None = None,
+    relevance_threshold: float = _DEFAULT_NEIGHBOR_RELEVANCE_THRESHOLD,
 ) -> EvidenceEvent:
     """Attach annotation neighbors to each packet, or pass through unchanged.
 
@@ -84,8 +125,20 @@ async def expand_context(
         crop_cache_dir: where neighbor crop PNGs go. Content-addressed by
             `inspect_region` so repeated calls on the same region are free.
         max_neighbors_per_packet: cap (plan §2e says 4 to keep packets
-            compact).
+            compact). Halved automatically when neither `plan` nor the
+            reranker provided a relevance signal (see
+            `_FALLBACK_MAX_NEIGHBORS_PER_PACKET`).
         adjacency_pad: fractional bbox expansion for the overlap test.
+        plan: optional `PlanEvent`. When provided, `plan.evidence_types`
+            filters neighbor candidates to types the planner asked for
+            (e.g. "caption" → only attach captions). Without `plan` and
+            without reranker relevance scores, the expander falls back
+            to a tighter spatial-only budget — the rebaseline-v2 finding
+            (2026-05-05) showed that query-blind expansion attached ~13
+            neighbors per example and hurt 11 of 13 affected examples.
+        relevance_threshold: when the reranker (Phase 2 item 4) scored
+            candidates, neighbors below this threshold are filtered out
+            even if they overlap spatially. Default 0.3.
 
     Returns:
         An `EvidenceEvent` with the same packets, each potentially carrying
@@ -93,6 +146,19 @@ async def expand_context(
     """
     if regions is None or pdf_path is None:
         return evidence
+
+    # Resolve which neighbor region_types the planner permits. Empty set
+    # means "no planner hint" → fall back to the conservative budget.
+    permitted_neighbor_types = _resolve_permitted_neighbor_types(plan)
+    has_planner_hint = bool(permitted_neighbor_types)
+    has_rerank_signal = any(
+        c.relevance is not None or c.needed_for is not None for c in regions.candidates
+    )
+    effective_max = (
+        max_neighbors_per_packet
+        if (has_planner_hint or has_rerank_signal)
+        else _FALLBACK_MAX_NEIGHBORS_PER_PACKET
+    )
 
     # Group regions by page so the per-packet lookup is O(regions_on_page),
     # not O(total_regions). For long docs this matters.
@@ -130,13 +196,16 @@ async def expand_context(
         if graph_matches:
             neighbors_with_role: list[tuple[RegionCandidate, str]] = list(graph_matches)
         else:
-            # Fallback: original spatial-overlap heuristic for unknown
-            # primary types or when the graph found nothing.
+            # Fallback: spatial-overlap heuristic, but query-aware (filter
+            # by planner evidence_types and/or reranker relevance/needed_for).
             spatial = _pick_neighbors(
                 packet,
                 candidates_on_page,
-                max_n=max_neighbors_per_packet,
+                max_n=effective_max,
                 pad=adjacency_pad,
+                permitted_neighbor_types=permitted_neighbor_types,
+                has_planner_hint=has_planner_hint,
+                relevance_threshold=relevance_threshold,
             )
             neighbors_with_role = [(n, (n.region_type or "").lower() or "unknown") for n in spatial]
 
@@ -187,40 +256,103 @@ def _pick_neighbors(
     *,
     max_n: int,
     pad: float,
+    permitted_neighbor_types: frozenset[str] | None = None,
+    has_planner_hint: bool = False,
+    relevance_threshold: float = _DEFAULT_NEIGHBOR_RELEVANCE_THRESHOLD,
 ) -> list[RegionCandidate]:
     """Return up to `max_n` annotation-type regions adjacent to `packet`.
 
-    Selection:
+    Selection (query-aware as of 2026-05-05):
       * region_type must be in `_NEIGHBOR_TYPES`
       * must not BE the packet region (same bbox / same region_id)
       * padded packet bbox must overlap the candidate bbox
+      * AND at least one of the following:
+        - region_type ∈ permitted_neighbor_types (planner asked for this kind)
+        - cand.needed_for ∈ _RERANK_CONTEXT_ROLES (reranker tagged it as a
+          context dependency for this question)
+        - cand.relevance ≥ relevance_threshold (reranker scored it relevant)
+        - has_planner_hint is False AND cand.relevance is None (legacy
+          spatial-only fallback when no signals are present — capped by
+          the smaller `_FALLBACK_MAX_NEIGHBORS_PER_PACKET` upstream)
 
-    Ordering: we want the most relevant neighbors first when capping.
-    "Most relevant" is approximated as (smaller distance, higher score);
-    we sort by vertical distance to the packet center (captions below,
-    headers above), breaking ties by detector score descending.
+    Ordering: most-relevant first.
+      * Reranker-scored candidates outrank unscored ones (by relevance desc).
+      * Within unscored candidates: vertical distance ascending, then
+        detector score descending.
     """
     if not candidates:
         return []
+    permitted = permitted_neighbor_types or frozenset()
     packet_bbox = _pad_bbox(packet.bbox_norm, pad=pad)
     px_center_y = (packet.bbox_norm[1] + packet.bbox_norm[3]) / 2.0
 
-    matches: list[tuple[float, float, RegionCandidate]] = []
+    # Sort key tuple: (rerank_bucket, primary, secondary, tertiary).
+    # rerank_bucket: 0 = had relevance score; 1 = had needed_for role only;
+    #                2 = passed because planner asked for this region_type;
+    #                3 = legacy spatial-only fallback.
+    matches: list[tuple[int, float, float, float, RegionCandidate]] = []
     for cand in candidates:
         ctype = (cand.region_type or "").lower()
         if ctype not in _NEIGHBOR_TYPES:
             continue
         if _bbox_equal(cand.bbox_norm, packet.bbox_norm):
-            continue  # same region the packet already covers
+            continue
         if not _bbox_overlaps(packet_bbox, cand.bbox_norm):
             continue
-        cy = (cand.bbox_norm[1] + cand.bbox_norm[3]) / 2.0
-        # Primary key: vertical distance (closer wins).
-        # Secondary key: -score (higher detector confidence breaks ties).
-        matches.append((abs(cy - px_center_y), -float(cand.score), cand))
 
-    matches.sort(key=lambda t: (t[0], t[1]))
-    return [cand for _d, _s, cand in matches[:max_n]]
+        # Query-aware relevance gate.
+        rerank_bucket: int | None = None
+        primary: float = 0.0
+        if cand.needed_for and cand.needed_for in _RERANK_CONTEXT_ROLES:
+            rerank_bucket = 1
+            primary = -float(cand.relevance or 0.5)  # higher relevance = better
+        elif cand.relevance is not None:
+            if cand.relevance < relevance_threshold:
+                continue  # reranker scored it but said it's not relevant
+            rerank_bucket = 0
+            primary = -float(cand.relevance)
+        elif ctype in permitted:
+            rerank_bucket = 2
+            primary = 0.0
+        elif not has_planner_hint:
+            # Legacy spatial-only fallback (no planner hint, no reranker).
+            # Caller's `max_n` is already halved; this branch keeps the
+            # pre-2026-05-05 behavior bounded.
+            rerank_bucket = 3
+            primary = 0.0
+        else:
+            # Planner had hints but this region_type wasn't on the list and
+            # the reranker didn't tag it. Drop.
+            continue
+
+        cy = (cand.bbox_norm[1] + cand.bbox_norm[3]) / 2.0
+        secondary = abs(cy - px_center_y)  # vertical distance
+        tertiary = -float(cand.score)
+        matches.append((rerank_bucket, primary, secondary, tertiary, cand))
+
+    matches.sort(key=lambda t: (t[0], t[1], t[2], t[3]))
+    return [cand for _b, _p, _d, _s, cand in matches[:max_n]]
+
+
+def _resolve_permitted_neighbor_types(plan: PlanEvent | None) -> frozenset[str]:
+    """Map `plan.evidence_types` (planner vocab) to the set of detector-vocab
+    region_types the expander is allowed to attach as neighbors.
+
+    Returns an empty set when `plan` is None or `evidence_types` is empty;
+    callers fall back to the legacy spatial heuristic in that case (with a
+    tighter neighbor cap to bound noise).
+    """
+    if plan is None or not plan.evidence_types:
+        return frozenset()
+    permitted: set[str] = set()
+    for raw in plan.evidence_types:
+        key = (raw or "").strip().lower()
+        if not key:
+            continue
+        aliases = _EVIDENCE_TYPE_TO_NEIGHBOR_TYPES.get(key)
+        if aliases:
+            permitted |= aliases
+    return frozenset(permitted)
 
 
 def _pad_bbox(

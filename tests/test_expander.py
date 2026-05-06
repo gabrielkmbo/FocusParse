@@ -543,3 +543,288 @@ async def test_graph_walker_uses_expansion_hints_from_reranker(tmp_path, monkeyp
     # Both a caption and a title attach (one per rule).
     assert "caption" in types
     assert "title" in types  # graph role for section_header is "title"
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-05 sprint: query-aware neighbor selection (Phase 6 #3).
+#
+# The rebaseline-v2 finding: query-blind expand_context attached ~13
+# neighbors per example and hurt 11 of the 13 affected examples on +4 vs +2.
+# These tests pin the new selection signal precedence:
+#   1. Reranker `relevance` — drop below threshold; rank by score.
+#   2. Reranker `needed_for` ∈ context roles — attach.
+#   3. Planner `evidence_types` — attach matching region_types only.
+#   4. Spatial-only fallback — bounded to fewer neighbors.
+# ---------------------------------------------------------------------------
+
+
+from focusparse.pipeline.events import PlanEvent  # noqa: E402
+
+
+def _region_with_signals(
+    *,
+    page: int,
+    bbox_norm: tuple[float, float, float, float],
+    region_type: str,
+    score: float = 0.9,
+    relevance: float | None = None,
+    needed_for: str | None = None,
+) -> RegionCandidate:
+    return RegionCandidate(
+        region_id=f"r_{page}_{region_type}_{relevance}_{needed_for}",
+        page=page,
+        bbox_norm=bbox_norm,
+        region_type=region_type,
+        score=score,
+        relevance=relevance,
+        needed_for=needed_for,
+    )
+
+
+def _plan(
+    *,
+    evidence_types: list[str] | None = None,
+    question_family: str = "spec_table_cell_retrieval",
+) -> PlanEvent:
+    return PlanEvent(
+        question_family=question_family,
+        evidence_types=evidence_types or [],
+        budget_class="easy_local",
+        routing_policy="layout_first",
+        max_tool_calls=12,
+        max_crops=8,
+        max_vlm_calls=4,
+    )
+
+
+async def test_query_aware_filters_to_planner_evidence_types(tmp_path, monkeypatch):
+    """When plan asks for 'caption', only captions attach — not footnotes."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.10, 0.20, 0.50, 0.60))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                page=1,
+                bbox_norm=(0.10, 0.62, 0.50, 0.66),  # caption just below
+                region_type="caption",
+            ),
+            _region(
+                page=1,
+                bbox_norm=(0.10, 0.18, 0.50, 0.21),  # footnote just above
+                region_type="footnote",
+            ),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["caption"]),
+    )
+    types = out.packets[0].linked_neighbor_types
+    assert "caption" in types
+    assert "footnote" not in types  # planner didn't ask for footnotes
+
+
+async def test_query_aware_planner_no_hint_uses_fallback_max_2(tmp_path, monkeypatch):
+    """Without planner hint AND without rerank scores, max_neighbors halves
+    from 4 → 2 to bound noise (sprint 2026-05-05 rule)."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
+    )
+    # 4 spatially-adjacent annotations, ALL would attach without query awareness.
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.30, 0.52, 0.70, 0.56), region_type="caption"),
+            _region(page=1, bbox_norm=(0.30, 0.34, 0.70, 0.38), region_type="footnote"),
+            _region(page=1, bbox_norm=(0.30, 0.30, 0.70, 0.33), region_type="section_header"),
+            _region(page=1, bbox_norm=(0.30, 0.58, 0.70, 0.62), region_type="title"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=None,  # no hint
+    )
+    n_attached = len(out.packets[0].linked_crop_refs)
+    assert n_attached == 2  # _FALLBACK_MAX_NEIGHBORS_PER_PACKET, not 4
+
+
+async def test_query_aware_rerank_relevance_filters_low_scoring(tmp_path, monkeypatch):
+    """Reranker scored a candidate at 0.1 → drop it even if spatially adjacent."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.10, 0.20, 0.50, 0.60))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.10, 0.62, 0.50, 0.66),
+                region_type="caption",
+                relevance=0.1,  # below default 0.3 threshold
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.10, 0.16, 0.50, 0.19),
+                region_type="footnote",
+                relevance=0.8,  # above threshold
+            ),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+    )
+    types = out.packets[0].linked_neighbor_types
+    assert "footnote" in types
+    assert "caption" not in types  # below relevance threshold
+
+
+async def test_query_aware_rerank_needed_for_role_attaches(tmp_path, monkeypatch):
+    """Reranker tagged a region with `needed_for=caption_context` → attach
+    even without an explicit relevance score."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.10, 0.20, 0.50, 0.60))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.10, 0.62, 0.50, 0.66),
+                region_type="caption",
+                needed_for="caption_context",
+            ),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+    )
+    assert "caption" in out.packets[0].linked_neighbor_types
+
+
+async def test_query_aware_planner_hint_drops_unmatched_types(tmp_path, monkeypatch):
+    """When plan asks for 'caption' only, a `section_header` candidate is
+    dropped — even if it's spatially adjacent and the reranker didn't score it."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.10, 0.20, 0.50, 0.60))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.10, 0.16, 0.50, 0.19), region_type="section_header"),
+            _region(page=1, bbox_norm=(0.10, 0.62, 0.50, 0.66), region_type="caption"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["caption"]),
+    )
+    types = out.packets[0].linked_neighbor_types
+    assert "caption" in types
+    assert "section_header" not in types
+    assert "section-header" not in types
+
+
+async def test_query_aware_rerank_signal_unlocks_full_budget(tmp_path, monkeypatch):
+    """When reranker scored ANY candidate, the conservative max=2 cap is
+    relaxed back to max=4 (the reranker is the relevance signal)."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
+    )
+    # 4 candidates, all relevance=0.6 (above threshold), all inside the
+    # packet's 8% padded bbox (packet y=0.40-0.50, padded to 0.32-0.58).
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.52, 0.70, 0.56),
+                region_type="caption",
+                relevance=0.6,
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.34, 0.70, 0.38),
+                region_type="footnote",
+                relevance=0.6,
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.33, 0.70, 0.36),
+                region_type="section_header",
+                relevance=0.6,
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.55, 0.70, 0.57),
+                region_type="title",
+                relevance=0.6,
+            ),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=None,
+    )
+    assert len(out.packets[0].linked_crop_refs) == 4
+
+
+async def test_query_aware_relevance_orders_neighbors_by_score(tmp_path, monkeypatch):
+    """Higher-relevance neighbors come first when capping to max_n=2."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.52, 0.70, 0.56),
+                region_type="caption",
+                relevance=0.4,  # mid
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.34, 0.70, 0.38),
+                region_type="footnote",
+                relevance=0.9,  # highest
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.30, 0.70, 0.33),
+                region_type="title",
+                relevance=0.7,
+            ),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        max_neighbors_per_packet=2,  # explicit cap to test ordering
+    )
+    types = out.packets[0].linked_neighbor_types
+    # The 0.9 footnote and 0.7 title win over the 0.4 caption.
+    assert types[0] == "footnote"
+    assert types[1] == "title"
+    assert "caption" not in types

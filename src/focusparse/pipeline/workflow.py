@@ -261,6 +261,7 @@ class FocusWorkflow:
         # page numbers (parsed from filenames) rather than positional indices.
         images_by_page = _images_by_page(example, images)
         page_universe = sorted(images_by_page.keys())
+        _record_page_artifacts(recorder, images_by_page)
 
         # --- ROUTE_PAGES ---------------------------------------------------
         pages_text = await _extract_pages_text(
@@ -288,6 +289,15 @@ class FocusWorkflow:
                     "n_text_pages": n_text_pages,
                 },
             )
+        )
+        _add_debug_event(
+            recorder,
+            stage="route_pages",
+            event_type="candidate_pages",
+            payload={
+                "pages": [_page_candidate_to_debug(pc) for pc in pages.candidates],
+                "n_text_pages": n_text_pages,
+            },
         )
 
         # --- LOCALIZE / INSPECT / EXPAND (initial pass) -------------------
@@ -328,6 +338,7 @@ class FocusWorkflow:
             adjacency_pad=adjacency_pad,
             recorder=recorder,
             step_counter=step_counter,
+            plan=plan,
         )
 
         # --- ANSWER + VERIFY (initial pass) -------------------------------
@@ -430,6 +441,7 @@ class FocusWorkflow:
                     recorder=recorder,
                     step_counter=step_counter,
                     retry_attempt=retries_used,
+                    plan=plan,
                 )
             elif action == "expand_context":
                 adjacency_pad = min(adjacency_pad * _EXPAND_RETRY_FACTOR, _MAX_ADJACENCY_PAD)
@@ -441,6 +453,7 @@ class FocusWorkflow:
                     recorder=recorder,
                     step_counter=step_counter,
                     retry_attempt=retries_used,
+                    plan=plan,
                 )
             elif action == "escalate_reasoner":
                 # No state change — just feed the verifier's reason into the
@@ -482,7 +495,7 @@ class FocusWorkflow:
 
         # Convert packet-id citations back to {page, bbox} dicts.
         citations = _citations_from_packets(answer_event.citations, evidence.packets)
-        # Trace schema v2 (2026-05-04): snapshot the final evidence the
+        # Trace schema v2+ (2026-05-04): snapshot the final evidence the
         # reasoner saw so the per-trace HTML viewer can render packets +
         # crops without re-running the pipeline.
         recorder.set_evidence_snapshot([_packet_to_summary(p) for p in evidence.packets])
@@ -541,6 +554,16 @@ class FocusWorkflow:
                 },
             )
         )
+        _add_debug_event(
+            recorder,
+            stage="localize",
+            event_type="candidate_regions",
+            retry_attempt=retry_attempt,
+            payload={
+                "n_regions": len(regions.candidates),
+                "regions": [_region_to_debug(r) for r in regions.candidates[:50]],
+            },
+        )
         return regions
 
     async def _run_rerank(
@@ -591,6 +614,17 @@ class FocusWorkflow:
                 latency_ms=(response.latency_ms if response is not None else 0),
                 usd=(response.usd if response is not None else None),
             )
+        )
+        _add_debug_event(
+            recorder,
+            stage="rerank",
+            event_type="candidate_regions",
+            retry_attempt=retry_attempt,
+            payload={
+                "n_regions": len(reranked.candidates),
+                "n_scored": n_scored,
+                "regions": [_region_to_debug(r) for r in reranked.candidates[:50]],
+            },
         )
         return reranked
 
@@ -656,6 +690,20 @@ class FocusWorkflow:
                     usd=(response.usd if response else None),
                 )
             )
+            _record_packet_artifacts(recorder, evidence.packets, stage="inspect")
+            _add_debug_event(
+                recorder,
+                stage="inspect",
+                event_type="evidence_packets",
+                retry_attempt=retry_attempt,
+                payload={
+                    "n_packets": len(evidence.packets),
+                    "n_real_packets": n_real_packets,
+                    "plan_size": result.plan_size,
+                    "fallback_used": result.fallback_used,
+                    "packets": [_packet_to_debug(p) for p in evidence.packets],
+                },
+            )
             return evidence
 
         evidence = await inspect_regions(
@@ -688,6 +736,18 @@ class FocusWorkflow:
                 },
             )
         )
+        _record_packet_artifacts(recorder, evidence.packets, stage="inspect")
+        _add_debug_event(
+            recorder,
+            stage="inspect",
+            event_type="evidence_packets",
+            retry_attempt=retry_attempt,
+            payload={
+                "n_packets": len(evidence.packets),
+                "n_real_packets": n_real_packets,
+                "packets": [_packet_to_debug(p) for p in evidence.packets],
+            },
+        )
         return evidence
 
     async def _run_expand(
@@ -700,6 +760,7 @@ class FocusWorkflow:
         recorder: TrajectoryRecorder,
         step_counter: _StepCounter,
         retry_attempt: int = 0,
+        plan: PlanEvent | None = None,
     ) -> EvidenceEvent:
         # Tool-set ablation: when running with the +2-tools (minimal) belt
         # we skip expand_context entirely. The trace records a passthrough
@@ -718,6 +779,17 @@ class FocusWorkflow:
                     },
                 )
             )
+            _add_debug_event(
+                recorder,
+                stage="expand_context",
+                event_type="evidence_packets",
+                retry_attempt=retry_attempt,
+                payload={
+                    "n_packets": len(evidence.packets),
+                    "reason": "tool_set=minimal",
+                    "packets": [_packet_to_debug(p) for p in evidence.packets],
+                },
+            )
             return evidence
         expanded = await expand_context(
             evidence,
@@ -726,6 +798,7 @@ class FocusWorkflow:
             crop_cache_dir=self._role_cache_dir("crops"),
             adjacency_pad=adjacency_pad,
             use_evidence_graph=self.use_evidence_graph,
+            plan=plan,
         )
         n_with_neighbors = sum(1 for p in expanded.packets if p.linked_crop_refs)
         n_neighbors = sum(len(p.linked_crop_refs) for p in expanded.packets)
@@ -744,6 +817,20 @@ class FocusWorkflow:
                     "retry_attempt": retry_attempt,
                 },
             )
+        )
+        _record_packet_artifacts(recorder, expanded.packets, stage="expand_context")
+        _add_debug_event(
+            recorder,
+            stage="expand_context",
+            event_type="evidence_packets",
+            retry_attempt=retry_attempt,
+            payload={
+                "n_packets": len(expanded.packets),
+                "n_with_neighbors": n_with_neighbors,
+                "n_neighbors_attached": n_neighbors,
+                "adjacency_pad": adjacency_pad,
+                "packets": [_packet_to_debug(p) for p in expanded.packets],
+            },
         )
         return expanded
 
@@ -781,6 +868,18 @@ class FocusWorkflow:
                 usd=reasoner_response.usd,
                 confidence=answer_event.confidence,
             )
+        )
+        _add_debug_event(
+            recorder,
+            stage="answer",
+            event_type="answer",
+            retry_attempt=retry_attempt,
+            payload={
+                "answer": answer_event.answer,
+                "citations": list(answer_event.citations),
+                "confidence": answer_event.confidence,
+                "had_escalation_hint": bool(escalation_hint),
+            },
         )
         return answer_event, reasoner_response
 
@@ -824,12 +923,209 @@ class FocusWorkflow:
                 confidence=verdict.confidence,
             )
         )
+        _add_debug_event(
+            recorder,
+            stage="verify",
+            event_type="verdict",
+            retry_attempt=retry_attempt,
+            payload={
+                "supported": verdict.supported,
+                "reason": verdict.reason,
+                "next_action": verdict.next_action,
+                "confidence": verdict.confidence,
+                "diagnostics": verdict.diagnostics,
+            },
+        )
         return verdict, verify_response
 
 
 # ---------------------------------------------------------------------------
 # Helpers (pure, unit-testable)
 # ---------------------------------------------------------------------------
+
+
+def _add_debug_event(
+    recorder: TrajectoryRecorder,
+    *,
+    stage: str,
+    event_type: str,
+    payload: dict[str, Any],
+    retry_attempt: int = 0,
+    step_index: int | None = None,
+) -> None:
+    """Record one compact viewer/debug event."""
+    recorder.add_debug_event(
+        event_id=recorder.next_debug_event_id(stage, event_type),
+        stage=stage,
+        event_type=event_type,
+        step_index=step_index,
+        retry_attempt=retry_attempt,
+        payload=payload,
+    )
+
+
+def _record_page_artifacts(recorder: TrajectoryRecorder, images_by_page: dict[int, Path]) -> None:
+    for page, path in sorted(images_by_page.items()):
+        recorder.add_artifact(
+            artifact_id=f"page:{page}",
+            kind="page_image",
+            path=str(path),
+            page=page,
+            label=f"page {page}",
+        )
+
+
+def _record_packet_artifacts(
+    recorder: TrajectoryRecorder,
+    packets: list[EvidencePacket],
+    *,
+    stage: str,
+) -> None:
+    for packet in packets:
+        _record_ref_artifact(
+            recorder,
+            kind="thumbnail",
+            ref=packet.page_thumbnail_ref,
+            page=packet.page,
+            bbox_norm=packet.bbox_norm,
+            packet_id=packet.packet_id,
+            stage=stage,
+            label=f"{packet.packet_id} page thumbnail",
+        )
+        _record_ref_artifact(
+            recorder,
+            kind="crop",
+            ref=packet.local_crop_ref,
+            page=packet.page,
+            bbox_norm=packet.bbox_norm,
+            packet_id=packet.packet_id,
+            stage=stage,
+            label=f"{packet.packet_id} tight crop",
+        )
+        if packet.context_crop_ref:
+            _record_ref_artifact(
+                recorder,
+                kind="crop",
+                ref=packet.context_crop_ref,
+                page=packet.page,
+                bbox_norm=packet.bbox_norm,
+                packet_id=packet.packet_id,
+                stage=stage,
+                label=f"{packet.packet_id} context crop",
+            )
+        for i, crop in enumerate(packet.multi_scale_crops):
+            _record_ref_artifact(
+                recorder,
+                kind="crop",
+                ref=crop.ref,
+                page=packet.page,
+                bbox_norm=crop.bbox_norm,
+                packet_id=packet.packet_id,
+                stage=stage,
+                label=f"{packet.packet_id} {crop.scale} crop",
+                meta={"scale": crop.scale, "index": i},
+            )
+        for i, ref in enumerate(packet.linked_crop_refs):
+            neighbor_type = (
+                packet.linked_neighbor_types[i]
+                if i < len(packet.linked_neighbor_types)
+                else "linked"
+            )
+            _record_ref_artifact(
+                recorder,
+                kind="crop",
+                ref=ref,
+                page=packet.page,
+                packet_id=packet.packet_id,
+                stage=stage,
+                label=f"{packet.packet_id} {neighbor_type}",
+                meta={"neighbor_type": neighbor_type, "index": i},
+            )
+        if packet.chart_csv:
+            recorder.add_artifact(
+                artifact_id=f"chart_csv:{packet.packet_id}:{stage}",
+                kind="chart_csv",
+                ref=packet.packet_id,
+                page=packet.page,
+                bbox_norm=packet.bbox_norm,
+                packet_id=packet.packet_id,
+                stage=stage,
+                label=f"{packet.packet_id} chart CSV",
+                meta={"confidence": packet.chart_extraction_confidence},
+            )
+
+
+def _record_ref_artifact(
+    recorder: TrajectoryRecorder,
+    *,
+    kind: str,
+    ref: str | None,
+    page: int | None,
+    bbox_norm: tuple[float, float, float, float] | None = None,
+    packet_id: str | None = None,
+    stage: str | None = None,
+    label: str | None = None,
+    meta: dict[str, Any] | None = None,
+) -> None:
+    if not ref:
+        return
+    recorder.add_artifact(
+        artifact_id=f"{kind}:{packet_id or page or 'unknown'}:{Path(str(ref)).name}:{stage or ''}",
+        kind=kind,
+        path=str(ref) if Path(str(ref)).is_absolute() else None,
+        ref=str(ref),
+        page=page,
+        bbox_norm=bbox_norm,
+        packet_id=packet_id,
+        stage=stage,
+        label=label,
+        meta=meta or {},
+    )
+
+
+def _page_candidate_to_debug(pc: Any) -> dict[str, Any]:
+    return {
+        "page": pc.page,
+        "score": pc.score,
+        "reason_code": pc.reason_code,
+    }
+
+
+def _region_to_debug(region: Any) -> dict[str, Any]:
+    return {
+        "region_id": region.region_id,
+        "page": region.page,
+        "bbox_norm": list(region.bbox_norm),
+        "region_type": region.region_type,
+        "score": region.score,
+        "supporting_signals": list(region.supporting_signals),
+        "expansion_hints": list(region.expansion_hints),
+        "relevance": region.relevance,
+        "needed_for": region.needed_for,
+    }
+
+
+def _packet_to_debug(packet: EvidencePacket) -> dict[str, Any]:
+    return {
+        "packet_id": packet.packet_id,
+        "page": packet.page,
+        "bbox_norm": list(packet.bbox_norm),
+        "region_type": packet.region_type,
+        "local_crop_ref": packet.local_crop_ref,
+        "linked_crop_refs": list(packet.linked_crop_refs),
+        "linked_neighbor_types": list(packet.linked_neighbor_types),
+        "multi_scale_crops": [
+            {"ref": c.ref, "bbox_norm": list(c.bbox_norm), "scale": c.scale}
+            for c in packet.multi_scale_crops
+        ],
+        "text_layer_snippet": packet.text_layer_snippet,
+        "ocr_snippet": packet.ocr_snippet,
+        "chart_csv": packet.chart_csv,
+        "chart_extraction_confidence": packet.chart_extraction_confidence,
+        "confidence": packet.confidence,
+        "provenance_tool": packet.provenance.tool if packet.provenance else None,
+        "provenance_mode": packet.provenance.mode if packet.provenance else None,
+    }
 
 
 class _StepCounter:
@@ -945,7 +1241,7 @@ def _citations_from_packets(
 
 
 def _packet_to_summary(p: EvidencePacket) -> EvidencePacketSummary:
-    """JSON-safe view of a packet for the trace v2 evidence_snapshot."""
+    """JSON-safe view of a packet for the trace evidence_snapshot."""
     return EvidencePacketSummary(
         packet_id=p.packet_id,
         page=p.page,
