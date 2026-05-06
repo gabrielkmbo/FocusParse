@@ -533,15 +533,32 @@ def _rank_score(region: RegionCandidate, boosted_types: frozenset[str]) -> float
     """Score used only for top-N selection; packet.confidence still carries
     the raw detector score.
 
-    Applies a fixed multiplicative boost when a region's type matches any
-    requested evidence type. This lets a confident figure (score 0.6)
-    outrank a confident text region (score 0.85) when the planner asked
-    for figures — the core smoke-test observation this helper exists for.
+    Layered query-conditioning (signals stack multiplicatively):
+      1. Detector score — RT-DETRv2 confidence in this region.
+      2. Evidence-type boost (×1.5) when the planner asked for this kind.
+      3. Reranker relevance (Phase 2 item 4) — when present, multiplies
+         the score by `relevance` directly. The reranker is a mid-tier
+         LLM that read the question; it's the best per-region relevance
+         signal we have. Sprint 2026-05-05 (Phase B3) hook.
+      4. Reranker `needed_for=primary` boost (×1.3) — the rerank stage
+         tagged this region as the answer carrier; pull it forward even
+         when its detector score is mediocre.
+
+    When neither rerank nor planner signal is present, falls back to
+    raw detector score (the pre-rerank skeleton ordering).
     """
     base = float(region.score)
-    if not boosted_types:
-        return base
-    rtype = (region.region_type or "").lower()
-    if rtype and rtype in boosted_types:
-        return base * _EVIDENCE_TYPE_BOOST
-    return base
+    boosted = base
+    if boosted_types:
+        rtype = (region.region_type or "").lower()
+        if rtype and rtype in boosted_types:
+            boosted = base * _EVIDENCE_TYPE_BOOST
+    # Layer the reranker signals on top of the type-boosted score.
+    if region.relevance is not None:
+        # Reranker scored 0..1; treat 0.5 as neutral.
+        # `relevance × 2` keeps the magnitude similar to base score units
+        # (so a perfectly-relevant region effectively doubles).
+        boosted *= max(0.1, 2.0 * float(region.relevance))
+    if region.needed_for == "primary":
+        boosted *= 1.3
+    return boosted

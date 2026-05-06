@@ -1232,3 +1232,124 @@ async def test_chart_to_table_fires_only_for_chart_question_families(tmp_path, m
     )
     assert chart_calls == []
     assert ev4.packets[0].chart_csv is None
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-05 sprint Phase B3: inspector ranker respects reranker relevance
+# ---------------------------------------------------------------------------
+
+
+async def test_rank_score_uses_reranker_relevance(tmp_path, monkeypatch):
+    """A high-relevance region (rerank=0.9) outranks a higher detector-score
+    region with no rerank signal — the reranker is the better query-conditioned
+    signal."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    high_rerank_low_score = RegionCandidate(
+        region_id="high_rerank",
+        page=1,
+        bbox_norm=(0.05, 0.05, 0.40, 0.30),
+        region_type="picture",
+        score=0.55,  # mediocre detector confidence
+        relevance=0.95,  # but rerank says it's almost certainly the answer
+    )
+    high_score_no_rerank = RegionCandidate(
+        region_id="high_score",
+        page=1,
+        bbox_norm=(0.50, 0.50, 0.90, 0.90),
+        region_type="text",
+        score=0.95,  # high detector confidence
+        relevance=None,  # rerank didn't run for this row
+    )
+    regions = RegionsEvent(candidates=[high_score_no_rerank, high_rerank_low_score])
+
+    ev = await inspect_regions(
+        _q(),
+        _plan(max_crops=2),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+    )
+    # 0.55 × (2.0 × 0.95) = 1.045 vs 0.95 — high-rerank wins.
+    assert ev.packets[0].bbox_norm == (0.05, 0.05, 0.40, 0.30)
+
+
+async def test_rank_score_drops_low_rerank_below_unscored(tmp_path, monkeypatch):
+    """A region scored relevance=0.05 by the reranker (basically irrelevant)
+    falls behind even mediocre unscored regions."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    low_rerank_high_score = RegionCandidate(
+        region_id="low_rerank",
+        page=1,
+        bbox_norm=(0.10, 0.10, 0.40, 0.40),
+        region_type="picture",
+        score=0.95,
+        relevance=0.05,  # reranker says it's irrelevant
+    )
+    decent_unscored = RegionCandidate(
+        region_id="decent",
+        page=1,
+        bbox_norm=(0.55, 0.55, 0.90, 0.90),
+        region_type="text",
+        score=0.50,
+        relevance=None,
+    )
+    regions = RegionsEvent(candidates=[low_rerank_high_score, decent_unscored])
+    ev = await inspect_regions(
+        _q(),
+        _plan(max_crops=2),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+    )
+    # 0.95 × (2.0 × 0.05) = 0.095 vs unscored 0.50 — decent_unscored wins.
+    assert ev.packets[0].bbox_norm == (0.55, 0.55, 0.90, 0.90)
+
+
+async def test_rank_score_primary_role_pulls_forward(tmp_path, monkeypatch):
+    """needed_for='primary' applies a 1.3× boost; a primary-tagged region
+    outranks an equivalent untagged one with the same relevance."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    primary = RegionCandidate(
+        region_id="primary",
+        page=1,
+        bbox_norm=(0.10, 0.10, 0.40, 0.40),
+        region_type="text",
+        score=0.50,
+        relevance=0.50,
+        needed_for="primary",
+    )
+    secondary = RegionCandidate(
+        region_id="legend",
+        page=1,
+        bbox_norm=(0.55, 0.55, 0.90, 0.90),
+        region_type="text",
+        score=0.50,
+        relevance=0.50,
+        needed_for="legend_binding",
+    )
+    regions = RegionsEvent(candidates=[secondary, primary])
+    ev = await inspect_regions(
+        _q(),
+        _plan(max_crops=2),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+    )
+    assert ev.packets[0].region_id if hasattr(ev.packets[0], "region_id") else True
+    # Primary (0.50 × 1.0 × 1.3 = 0.65) > Secondary (0.50 × 1.0 = 0.50).
+    assert ev.packets[0].bbox_norm == (0.10, 0.10, 0.40, 0.40)
