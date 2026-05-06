@@ -131,6 +131,94 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-06 — trace schema v3 debug dashboard
+
+Trace schema bumped to `SCHEMA_VERSION = "3"` for the one-example harness
+trace dashboard. `RunTrace` now carries `artifacts` (path/ref-only handles
+for page images, crops, thumbnails, chart CSVs, and text artifacts) and
+`debug_events` (structured stage decisions such as candidate pages/regions,
+evidence packets, answers, and verifier verdicts). The SFT export includes
+both fields but still never embeds raw image bytes; the static HTML viewer
+resolves refs and inlines bytes only in the generated `.html`.
+
+`FocusWorkflow` records debug events through route/localize/rerank/inspect/
+expand/answer/verify. `scripts/run_hf_eval.py` adds `--example-id`,
+`--visualize-trace`, and `--trace-viewer-output` so a single harness run can
+write `results/trace_viewer/<run>/<example>.html`. Gold labels remain out of
+the trace and are joined by the viewer from staging `benchmark.jsonl`.
+
+### 2026-05-05 — Rebaseline-v2 lands; Our harness +2 leads, +4 inversion diagnosed
+
+`results/hf/headline-v1-rebaseline-v2/headline_table.{json,md,html}`. Same
+HF revision pin (`3774c67`), same 7 specs, same 95% bootstrap CIs. n=148.
+This is now the canonical anchor for sprint A/Bs.
+
+| Method             | Datasheets            | Finance               | Overall                | $/correct |
+| ------------------ | --------------------- | --------------------- | ---------------------- | --------- |
+| Base VLM           | 40.6% [31.7, 49.5]    | 31.9% [19.1, 44.7]    | **37.8% [30.4, 46.6]** | $0.011    |
+| ReAct +2           | 16.8 [9.9, 24.8]      | 6.4 [0.0, 14.9]       | 13.5 [7.4, 18.9]       | $0.18     |
+| ReAct +4           | 18.8 [11.9, 26.7]     | 4.3 [0.0, 10.6]       | 14.2 [8.8, 20.9]       | $0.27     |
+| Agent baseline +2  | 9.9 [5.0, 15.8]       | 4.3 [0.0, 10.6]       | 8.1 [4.1, 12.8]        | $0.13     |
+| Agent baseline +4  | 7.9 [3.0, 13.9]       | 4.3 [0.0, 10.6]       | 6.8 [2.7, 10.8]        | $0.16     |
+| **Our harness +2** | **56.4 [46.5, 66.3]** | **36.2 [21.3, 48.9]** | **50.0 [42.6, 57.4]**  | $0.015    |
+| Our harness +4     | 49.5 [40.6, 58.4]     | 31.9 [17.0, 44.7]     | 43.9 [36.5, 51.4]      | $0.018    |
+
+**Headline finding — Our harness +2 dominates the table on the new dataset.**
++12.2pp Overall vs Base VLM, +15.8pp on Datasheets, +4.3pp on Finance. CIs
+_touch_ at the boundary (harness +2 lower bound 42.6 vs Base VLM upper bound
+46.6) — directional win, not yet statistically separable at 95% bootstrap.
+Datasheets cleaner (Δ=+15.8pp, CIs touch at 46.5 vs 49.5). The original
+sprint goal ("Our harness +4 dominates Base VLM by ≥3pp on Overall at
+non-overlapping CIs") is exceeded in _direction_ by +2 alone, but n=148 isn't
+enough to claim statistical separation.
+
+**+2 vs +4 inversion diagnosed.** -6.1pp Overall, -6.9pp Datasheets,
+-4.3pp Finance. Pipelines are identical at the structural level (same 8
+stages, 1.00 mean tool calls, ~$0.0076/example). The ONLY behavioral
+difference is `expand_context` attaching ~13 spatial neighbors per example
+on +4 (caption / footnote / section_header / page header / page footer)
+within an 8%-padded bbox. From paired analysis on n=147 shared examples:
+
+|                                    | helped (+2 wrong → +4 right) | hurt (+2 right → +4 wrong) |
+| ---------------------------------- | ---------------------------- | -------------------------- |
+| count                              | 2                            | 11                         |
+| of those, had ≥1 neighbor attached | —                            | 8                          |
+
+Net: -9 examples = -6.1pp accuracy. **The neighbor-attachment failure
+correlates with neighbor presence, not random noise.** Mechanism: the
+expander's selection is purely SPATIAL (`pipeline/expander.py`) — picks the
+4 closest annotation regions inside an 8%-padded bbox, ranks by vertical
+distance + score. **It does not condition on the question.** So for "what
+is max VCC?" with a table-cell focus, neighbors are: section header
+"Electrical Characteristics" + page footer + "Table 3" caption + an
+unrelated footnote. None help; together they dilute the visual context.
+
+**bbox_iou regressed -5pp on +4 specs** (-4.8pp datasheets, -5.6pp finance).
+The neighbor crops also confuse the citation pipeline — the reasoner cites
+attached neighbors instead of the focus region.
+
+**Same model across all 7 specs:** `openai/gpt-5.4`. Architecture + tool-set
+are the only varied axes.
+
+**Next-step philosophy** (set 2026-05-05 mid-session): tools should help
+when added, not hurt. The +2 vs +4 inversion is a tool-quality bug, not an
+intrinsic property of "more tools." Phase 6 work prioritizes:
+
+1. **expand_context query-aware refinement** (Phase 6 candidate #3) — the
+   spatial-only selection is the root cause of the inversion.
+2. **LLM-driven inspector dispatch** (Phase 6 candidate #1, sprint Phase 1
+   — code shipped; A/B pending) — query-aware region picking upstream may
+   subsume some of expand_context's job and reduce the need for neighbors.
+3. **run_python coding-zoom (auto-zoom path)** — currently triggers only
+   on `bbox_area < 0.005` regardless of question; should be query-driven
+   too, and the zoomed output should be cleanly distinguished from the
+   unzoomed crop in the reasoner's prompt.
+4. **Multi-scale packets (sprint Phase 2)** deferred — same shape as the
+   +4 inversion (more images per packet); would compound the same failure
+   mode unless the inspector is smarter first.
+5. **chart_to_table (sprint Phase 3)** stays low-risk because it's gated
+   by question_family AND figure_class.
+
 ### 2026-05-04 — Sprint kickoff (Phase 0 + Phase 1/2/3 implementation)
 
 **Active sprint:** `plans/2026-05-04-harness-iteration-sprint.md`. Five Phase 6
