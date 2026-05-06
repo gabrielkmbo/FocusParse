@@ -84,16 +84,22 @@ _RERANK_CONTEXT_ROLES: frozenset[str] = frozenset(
 )
 
 # Minimum reranker `relevance` for a neighbor to be attached when the
-# reranker scored it but didn't tag a context role. Tuned to filter out
-# the "spatially nearby but irrelevant" cases that drove the +2 vs +4
-# inversion (see MEMORY.md 2026-05-05 entry).
-_DEFAULT_NEIGHBOR_RELEVANCE_THRESHOLD = 0.3
+# reranker scored it but didn't tag a context role. Tuned 0.3 → 0.5 on
+# 2026-05-05 (Phase B1.5) after the B1 A/B showed ~20% of packets still
+# attached 3-4 neighbors with relevance just above 0.3. Reasoner image
+# budget is finite; lower relevance scores fail to discriminate.
+_DEFAULT_NEIGHBOR_RELEVANCE_THRESHOLD = 0.5
 
-_DEFAULT_MAX_NEIGHBORS_PER_PACKET = 4
-# Conservative cap when the planner gave no `evidence_types` hint AND the
-# reranker didn't run. Halves the spatial-only-fallback budget so a query-
-# blind expansion can't dominate the reasoner's image budget.
-_FALLBACK_MAX_NEIGHBORS_PER_PACKET = 2
+# Per-packet neighbor cap. Tightened 4 → 2 on 2026-05-05 (Phase B1.5).
+# B1's max=4 produced too many marginal-relevance neighbors per packet
+# (mean 1.4 attached, distribution skewed: 20% of packets got 3-4).
+# At 2 per packet, even chart-heavy questions stay within a tolerable
+# image budget for the reasoner.
+_DEFAULT_MAX_NEIGHBORS_PER_PACKET = 2
+# Even tighter cap when the planner gave no `evidence_types` hint AND
+# the reranker didn't run. Halves the spatial-only-fallback budget so
+# a query-blind expansion can't dominate the reasoner's image budget.
+_FALLBACK_MAX_NEIGHBORS_PER_PACKET = 1
 # Expand the packet's bbox by this fraction of the [0,1] range on each side
 # when testing for neighbor overlap. 0.08 ≈ ~1 inch on a Letter page at 300
 # DPI — enough to catch a caption a few text lines away.

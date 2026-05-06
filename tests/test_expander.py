@@ -324,11 +324,17 @@ async def test_provenance_gets_expand_context_tag(tmp_path, monkeypatch):
         EvidenceEvent(packets=[figure]),
         regions=regions,
         pdf_path=tmp_path / "doc.pdf",
+        # Pre-Phase-B1.5 default behavior — kept as a regression test for the
+        # provenance tagging shape; the fallback budget tightening is
+        # exercised separately in test_query_aware_planner_no_hint_*.
+        max_neighbors_per_packet=4,
     )
     args_hash = out.packets[0].provenance.args_hash
-    # Prior inspector tag is preserved + our stamp appended.
+    # Prior inspector tag is preserved + our stamp appended. Without a
+    # planner hint or rerank signal, the legacy spatial fallback runs and
+    # caps at _FALLBACK_MAX_NEIGHBORS_PER_PACKET (1 as of Phase B1.5).
     assert "seed" in args_hash
-    assert "expand_context:n2" in args_hash
+    assert "expand_context:n1" in args_hash
 
 
 async def test_crop_failure_on_one_neighbor_does_not_crash(tmp_path, monkeypatch):
@@ -342,16 +348,29 @@ async def test_crop_failure_on_one_neighbor_does_not_crash(tmp_path, monkeypatch
     )
 
     figure = _packet(packet_id="p0", page=1, bbox_norm=(0.1, 0.3, 0.9, 0.5), region_type="picture")
+    # Tell the planner we want both kinds of neighbors so the new query-aware
+    # gate doesn't drop one. This is a "crop failure resilience" test, not
+    # a query-conditioning test.
     regions = RegionsEvent(
         candidates=[
             _region(page=1, bbox_norm=failing_bbox, region_type="caption"),
             _region(page=1, bbox_norm=(0.1, 0.56, 0.9, 0.58), region_type="footnote"),
         ]
     )
+    plan = PlanEvent(
+        question_family="single_value_lookup",
+        evidence_types=["caption", "footnote"],
+        budget_class="easy_local",
+        routing_policy="layout_first",
+        max_tool_calls=8,
+        max_crops=8,
+        max_vlm_calls=4,
+    )
     out = await expand_context(
         EvidenceEvent(packets=[figure]),
         regions=regions,
         pdf_path=tmp_path / "doc.pdf",
+        plan=plan,
     )
     # Failed crop is skipped; footnote still attaches.
     assert out.packets[0].linked_neighbor_types == ["footnote"]
@@ -629,15 +648,18 @@ async def test_query_aware_filters_to_planner_evidence_types(tmp_path, monkeypat
     assert "footnote" not in types  # planner didn't ask for footnotes
 
 
-async def test_query_aware_planner_no_hint_uses_fallback_max_2(tmp_path, monkeypatch):
-    """Without planner hint AND without rerank scores, max_neighbors halves
-    from 4 → 2 to bound noise (sprint 2026-05-05 rule)."""
+async def test_query_aware_planner_no_hint_uses_fallback_max_1(tmp_path, monkeypatch):
+    """Without planner hint AND without rerank scores, the spatial-only
+    fallback is bounded to _FALLBACK_MAX_NEIGHBORS_PER_PACKET (= 1 as of
+    Phase B1.5, tightened from 2 after the B1 A/B showed too many marginal-
+    relevance neighbors per packet)."""
     calls: list = []
     _install_fake_inspect(monkeypatch, calls=calls)
     ev = EvidenceEvent(
         packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
     )
-    # 4 spatially-adjacent annotations, ALL would attach without query awareness.
+    # 4 spatially-adjacent annotations; without any query signal, only the
+    # closest one survives the fallback budget.
     regions = RegionsEvent(
         candidates=[
             _region(page=1, bbox_norm=(0.30, 0.52, 0.70, 0.56), region_type="caption"),
@@ -650,10 +672,10 @@ async def test_query_aware_planner_no_hint_uses_fallback_max_2(tmp_path, monkeyp
         ev,
         regions=regions,
         pdf_path=Path("/fake.pdf"),
-        plan=None,  # no hint
+        plan=None,
     )
     n_attached = len(out.packets[0].linked_crop_refs)
-    assert n_attached == 2  # _FALLBACK_MAX_NEIGHBORS_PER_PACKET, not 4
+    assert n_attached == 1  # _FALLBACK_MAX_NEIGHBORS_PER_PACKET
 
 
 async def test_query_aware_rerank_relevance_filters_low_scoring(tmp_path, monkeypatch):
@@ -741,15 +763,16 @@ async def test_query_aware_planner_hint_drops_unmatched_types(tmp_path, monkeypa
     assert "section-header" not in types
 
 
-async def test_query_aware_rerank_signal_unlocks_full_budget(tmp_path, monkeypatch):
-    """When reranker scored ANY candidate, the conservative max=2 cap is
-    relaxed back to max=4 (the reranker is the relevance signal)."""
+async def test_query_aware_rerank_signal_unlocks_default_budget(tmp_path, monkeypatch):
+    """When reranker scored ANY candidate above threshold, the default cap
+    of `_DEFAULT_MAX_NEIGHBORS_PER_PACKET` (= 2 as of Phase B1.5) applies
+    instead of the tighter no-signal fallback."""
     calls: list = []
     _install_fake_inspect(monkeypatch, calls=calls)
     ev = EvidenceEvent(
         packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
     )
-    # 4 candidates, all relevance=0.6 (above threshold), all inside the
+    # 4 candidates, all relevance=0.7 (above threshold 0.5), all inside the
     # packet's 8% padded bbox (packet y=0.40-0.50, padded to 0.32-0.58).
     regions = RegionsEvent(
         candidates=[
@@ -757,25 +780,25 @@ async def test_query_aware_rerank_signal_unlocks_full_budget(tmp_path, monkeypat
                 page=1,
                 bbox_norm=(0.30, 0.52, 0.70, 0.56),
                 region_type="caption",
-                relevance=0.6,
+                relevance=0.7,
             ),
             _region_with_signals(
                 page=1,
                 bbox_norm=(0.30, 0.34, 0.70, 0.38),
                 region_type="footnote",
-                relevance=0.6,
+                relevance=0.7,
             ),
             _region_with_signals(
                 page=1,
                 bbox_norm=(0.30, 0.33, 0.70, 0.36),
                 region_type="section_header",
-                relevance=0.6,
+                relevance=0.7,
             ),
             _region_with_signals(
                 page=1,
                 bbox_norm=(0.30, 0.55, 0.70, 0.57),
                 region_type="title",
-                relevance=0.6,
+                relevance=0.7,
             ),
         ]
     )
@@ -785,7 +808,8 @@ async def test_query_aware_rerank_signal_unlocks_full_budget(tmp_path, monkeypat
         pdf_path=Path("/fake.pdf"),
         plan=None,
     )
-    assert len(out.packets[0].linked_crop_refs) == 4
+    # 2 = _DEFAULT_MAX_NEIGHBORS_PER_PACKET (Phase B1.5).
+    assert len(out.packets[0].linked_crop_refs) == 2
 
 
 async def test_query_aware_relevance_orders_neighbors_by_score(tmp_path, monkeypatch):
