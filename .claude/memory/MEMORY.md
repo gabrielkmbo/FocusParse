@@ -139,6 +139,7 @@ agentic_multi_page --example-id ... --visualize-trace` after sourcing `.env`
 and using `--pdfs-root /Users/gabrielbo/.cache/focusparse/pdfs`.
 
 Examples:
+
 - `dat-Arm_EE382N_4-0001`: predicted `50%`, gold `70%`, accuracy 0.0.
 - `dat-Arm_EE382N_4-0006`: predicted `1.0`, accuracy 1.0.
 - `dat-Arm_EE382N_4-0014`: predicted `2`, accuracy 1.0.
@@ -165,6 +166,51 @@ expand/answer/verify. `scripts/run_hf_eval.py` adds `--example-id`,
 `--visualize-trace`, and `--trace-viewer-output` so a single harness run can
 write `results/trace_viewer/<run>/<example>.html`. Gold labels remain out of
 the trace and are joined by the viewer from staging `benchmark.jsonl`.
+
+### 2026-05-06 — expand_context is dead code for the reasoner; +6pp inversion is upstream noise
+
+Diagnosed during the B1/B1.5 sprint phases (commits `e1737c2` `79c03dd`).
+Three load-bearing findings:
+
+1. **`pipeline/reasoner.py` never reads `linked_crop_refs` or `linked_neighbor_types`.**
+   Verified: `grep -n "linked\|neighbor\|expand" src/focusparse/pipeline/reasoner.py`
+   returns zero matches. `_collect_packet_images` only walks `multi_scale_crops`
+   (Phase 2's tight+context, default-off) or `local_crop_ref`. The neighbor
+   crops the expander attaches are recorded in the trace + the v2 evidence
+   snapshot + the SFT export, but never reach `backend_client.predict(images=)`.
+   They are also not mentioned in `_render_packet_line`'s text descriptor.
+
+2. **The +6pp +2-vs-+4 inversion is upstream LLM stochasticity, not expand_context.**
+   Pairwise on the same example_id, the +2 and +4 runs produce DIFFERENT
+   packets (different pages, different bboxes — e.g. dat-AN040_EN-0008
+   has packets on page 1 in +2 and page 6 in +4). `tool_set` only controls
+   expand_context's run/skip and auto_zoom's force-off; neither touches
+   planner/router/reranker. So the differing packet sets are explained by
+   gemini-2.5-flash + claude-haiku-4-5 non-zero-temperature variance
+   propagating through localize → rerank → inspect.
+
+3. **B1's +1.4pp was likely noise.** The B1 A/B (focus +4 with query-aware
+   expand_context) hit 45.3% Overall vs rebaseline-v2 broken +4 = 43.9%.
+   But since the reasoner never sees neighbor crops anyway, tightening
+   neighbor selection cannot mechanistically affect accuracy. The +1.4pp
+   is consistent with run-to-run upstream variance.
+
+**Implication for the sprint:** "more tools = good" requires actually
+plumbing the tools' output into the reasoner. B1+B1.5+B2+B3 ship in this
+working tree (they remain useful for the trace viewer, SFT export, and
+future query-aware selection — they're not wrong, just not load-bearing
+for accuracy until the reasoner-side plumbing lands).
+
+**Path A** (next session, planned at `plans/2026-05-06-path-a-plumb-neighbors-into-reasoner.md`):
+extend `_collect_packet_images` to enumerate `linked_crop_refs` after the
+primary crop; extend `_render_packet_line` to mention `linked_neighbor_types`;
+update reasoner system prompt to distinguish primary vs context. Then A/B at
+n=148. Decision rule: ≥+3pp non-overlap → ship; ≤noise → pivot to Path B
+(text-summary attachment instead of image attachment).
+
+**B1/B1.5 expander work stays committed** even though it doesn't move the
+headline cell. The query-aware selection is correct on its own merits and
+becomes load-bearing as soon as Path A lands.
 
 ### 2026-05-05 — Rebaseline-v2 lands; Our harness +2 leads, +4 inversion diagnosed
 
