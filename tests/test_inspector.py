@@ -801,8 +801,10 @@ async def test_auto_zoom_skips_when_disabled(tmp_path, monkeypatch):
 
 
 async def test_auto_zoom_fires_for_tiny_region(tmp_path, monkeypatch):
-    """auto_zoom=True + tiny region → run_python(zoom2x) called, packet
-    crop_ref points at the upsampled PNG."""
+    """auto_zoom=True + tiny region → run_python(zoom2x) called. As of
+    2026-05-05 (Phase B2), the zoomed crop is ADDED to multi_scale_crops
+    rather than replacing local_crop_ref so the reasoner sees both the
+    original tight crop and the upsampled crop side-by-side."""
     inspect_calls: list = []
     text_calls: list = []
     run_python_calls: list = []
@@ -848,9 +850,17 @@ async def test_auto_zoom_fires_for_tiny_region(tmp_path, monkeypatch):
     )
     assert len(run_python_calls) == 1
     assert "LANCZOS" in run_python_calls[0]["code"]
-    # Packet crop_ref now points at the zoomed PNG.
     packet = ev.packets[0]
-    assert packet.local_crop_ref == str(cache_dir / "zoomed_abc.png")
+    # local_crop_ref keeps the ORIGINAL tight crop (no longer replaced).
+    assert packet.local_crop_ref != str(cache_dir / "zoomed_abc.png")
+    # The zoomed crop is appended to multi_scale_crops with scale="zoomed".
+    zoom_entries = [c for c in packet.multi_scale_crops if c.scale == "zoomed"]
+    assert len(zoom_entries) == 1
+    assert zoom_entries[0].ref == str(cache_dir / "zoomed_abc.png")
+    # Multi-scale also seeds element 0 = tight (mirrors local_crop_ref).
+    tight_entries = [c for c in packet.multi_scale_crops if c.scale == "tight"]
+    assert len(tight_entries) == 1
+    assert tight_entries[0].ref == packet.local_crop_ref
     # Provenance reflects the zoom step.
     assert "run_python:zoom2x" in (packet.provenance.args_hash or "")
 
@@ -887,6 +897,104 @@ async def test_auto_zoom_skips_for_large_region(tmp_path, monkeypatch):
     await inspect_regions(
         _q(),
         _plan(),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        auto_zoom=True,
+    )
+    assert run_python_calls == []
+
+
+async def test_auto_zoom_fires_on_fine_detail_question_family(tmp_path, monkeypatch):
+    """2026-05-05 (Phase B2): auto_zoom now also fires when the question
+    asks for fine-detail reading, even on regions LARGER than the tiny
+    threshold. axis_value_interpolation / confusable_label / etc. all
+    benefit from a 2× upsample regardless of crop size."""
+    inspect_calls: list = []
+    text_calls: list = []
+    run_python_calls: list = []
+
+    async def _fake_run_python(inp, *, image_cache_dir=None, new_image_cache_dir=None):
+        run_python_calls.append({"code": inp.code})
+        from focusparse.tools.run_python import RunPythonOutput
+
+        return RunPythonOutput(stdout="ok", new_image_refs=["zoomed_axis"])
+
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    monkeypatch.setattr("focusparse.pipeline.inspector.run_python", _fake_run_python)
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    cache_dir = tmp_path / "crops"
+    cache_dir.mkdir()
+
+    # Region is well above the tiny threshold (0.3×0.3 = 0.09 area), but
+    # the question is axis_value_interpolation — fine-detail reading.
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="big_chart",
+                page=1,
+                bbox_norm=(0.10, 0.10, 0.40, 0.40),
+                region_type="picture",
+                score=0.9,
+            )
+        ]
+    )
+    plan_with_fine_detail = _plan().model_copy(
+        update={"question_family": "axis_value_interpolation"}
+    )
+    ev = await inspect_regions(
+        _q(),
+        plan_with_fine_detail,
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        crop_cache_dir=cache_dir,
+        auto_zoom=True,
+    )
+    # run_python was called even though the region is large.
+    assert len(run_python_calls) == 1
+    packet = ev.packets[0]
+    zoom_entries = [c for c in packet.multi_scale_crops if c.scale == "zoomed"]
+    assert len(zoom_entries) == 1
+    # Provenance tag includes the question_family that unlocked the zoom.
+    assert "run_python:zoom2x@axis_value_interpolation" in (packet.provenance.args_hash or "")
+
+
+async def test_auto_zoom_skips_when_neither_tiny_nor_fine_detail(tmp_path, monkeypatch):
+    """auto_zoom=True but bbox is large AND question_family isn't fine-detail
+    → run_python not called (the original tiny-only behavior)."""
+    inspect_calls: list = []
+    text_calls: list = []
+    run_python_calls: list = []
+
+    async def _fake_run_python(inp, **kw):
+        run_python_calls.append(inp.code)
+        from focusparse.tools.run_python import RunPythonOutput
+
+        return RunPythonOutput(stdout="ok", new_image_refs=["zoomed"])
+
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    monkeypatch.setattr("focusparse.pipeline.inspector.run_python", _fake_run_python)
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="big",
+                page=1,
+                bbox_norm=(0.1, 0.1, 0.4, 0.4),  # 0.09 area, large
+                region_type="text",
+                score=0.9,
+            )
+        ]
+    )
+    plan_generic = _plan().model_copy(update={"question_family": "single_value_lookup"})
+    await inspect_regions(
+        _q(),
+        plan_generic,
         regions,
         images_by_page={1: tmp_path / "p1.png"},
         pdf_path=pdf,

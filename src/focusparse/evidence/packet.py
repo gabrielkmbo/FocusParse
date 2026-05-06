@@ -31,11 +31,16 @@ class CropRef(BaseModel):
     crop (mirrors `local_crop_ref` for back-compat); subsequent elements
     are wider contexts that carry the same target bbox at progressively
     larger pads (default: tight + 30% pad).
+
+    Sprint 2026-05-05 (Phase B2) adds `scale="zoomed"` for the
+    `run_python`-driven LANCZOS supersample of tiny / fine-detail crops.
+    The reasoner sees the original AND the zoomed crop so it can read
+    fine details without losing the unzoomed context.
     """
 
     ref: str  # absolute path to the cached PNG
     bbox_norm: tuple[float, float, float, float]
-    scale: Literal["tight", "context"] = "tight"
+    scale: Literal["tight", "context", "zoomed"] = "tight"
 
 
 class EvidencePacket(BaseModel):

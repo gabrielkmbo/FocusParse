@@ -193,6 +193,7 @@ async def react_inspect(
             auto_zoom=auto_zoom,
             multi_scale=multi_scale,
             chart_extraction_active=chart_active,
+            question_family=plan.question_family,
         )
         packets.append(packet)
 

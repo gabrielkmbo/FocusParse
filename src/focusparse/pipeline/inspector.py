@@ -127,6 +127,19 @@ _MIN_TEXT_LAYER_CHARS = 4  # anything shorter is "basically empty"
 _CHART_QUESTION_FAMILIES = frozenset({"axis_value_interpolation", "candlestick_ohlc_extraction"})
 _CHART_FIGURE_CLASSES = frozenset({"bar_chart", "line_chart", "candlestick"})
 
+# Sprint 2026-05-05 (Phase B2): question families where auto-zoom (run_python
+# LANCZOS supersample) is worth firing even on regions LARGER than
+# `_AUTOZOOM_AREA_THRESHOLD`. These all need fine-detail visual reading where
+# 2× supersample buys real signal regardless of crop size.
+_FINE_DETAIL_QUESTION_FAMILIES = frozenset(
+    {
+        "axis_value_interpolation",
+        "confusable_label",
+        "min_typ_max_disambiguation",
+        "package_mechanical_reading",
+    }
+)
+
 
 async def inspect_regions(
     question: QuestionEvent,
@@ -192,6 +205,7 @@ async def inspect_regions(
             auto_zoom=auto_zoom,
             multi_scale=multi_scale,
             chart_extraction_active=chart_extraction_active,
+            question_family=plan.question_family,
         )
         packets.append(packet)
     return EvidenceEvent(packets=packets)
@@ -213,6 +227,7 @@ async def _inspect_one_region(
     auto_zoom: bool = False,
     multi_scale: bool = False,
     chart_extraction_active: bool = False,
+    question_family: str | None = None,
 ) -> EvidencePacket:
     """Run the tool chain for one region and bundle the outputs into a packet."""
     page_image = images_by_page.get(region.page)
@@ -270,17 +285,37 @@ async def _inspect_one_region(
         except (FileNotFoundError, ValueError) as exc:
             logger.debug("inspect_region(context) failed for %s: %s", packet_id, exc)
 
-    # --- 1b. Auto-zoom for tiny regions via run_python sandbox. ---
+    # --- 1b. Auto-zoom via run_python sandbox.
+    #
+    # 2026-05-05 (Phase B2) reshapes this from "replace local_crop_ref with
+    # the upsampled crop on tiny regions" to "ADD a CropRef(scale='zoomed')
+    # to multi_scale_crops" — the reasoner sees BOTH original and zoomed.
+    # Activation is now query-aware: tiny bbox OR fine-detail question.
     if auto_zoom and crop_ref and crop_ref != page_thumbnail_ref:
-        if _bbox_area(region.bbox_norm) < _AUTOZOOM_AREA_THRESHOLD:
+        is_tiny = _bbox_area(region.bbox_norm) < _AUTOZOOM_AREA_THRESHOLD
+        is_fine_detail_q = (question_family or "") in _FINE_DETAIL_QUESTION_FAMILIES
+        if is_tiny or is_fine_detail_q:
             zoomed_ref = await _zoom_crop(
                 crop_ref=crop_ref,
                 cache_dir=crop_cache_dir,
                 packet_id=packet_id,
             )
             if zoomed_ref is not None:
-                crop_ref = zoomed_ref
-                crop_signals.append("run_python:zoom2x")
+                # Record the zoomed crop in multi_scale_crops alongside the
+                # tight (and optional context) crops. Keep `crop_ref` (and
+                # therefore `local_crop_ref`) unchanged so legacy reasoner
+                # callers that read only the tight crop still work.
+                if not multi_scale_crops:
+                    # Seed with tight crop so element 0 is always present.
+                    multi_scale_crops = [
+                        CropRef(ref=crop_ref, bbox_norm=region.bbox_norm, scale="tight"),
+                    ]
+                multi_scale_crops.append(
+                    CropRef(ref=zoomed_ref, bbox_norm=region.bbox_norm, scale="zoomed")
+                )
+                crop_signals.append(
+                    "run_python:zoom2x" + ("" if is_tiny else f"@{question_family}")
+                )
 
     # --- 2. Text extraction — prefer native PDF, fall back to OCR. ---
     text_layer_snippet: str | None = None
