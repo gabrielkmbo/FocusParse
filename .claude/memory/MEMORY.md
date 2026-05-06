@@ -131,6 +131,25 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-06 — one-example trace dashboard smoke + Vercel demo
+
+Real harness smoke was run for three `gabrielbo/parser-bench` datasheet
+examples with `scripts/run_hf_eval.py --agent focus --protocol
+agentic_multi_page --example-id ... --visualize-trace` after sourcing `.env`
+and using `--pdfs-root /Users/gabrielbo/.cache/focusparse/pdfs`.
+
+Examples:
+- `dat-Arm_EE382N_4-0001`: predicted `50%`, gold `70%`, accuracy 0.0.
+- `dat-Arm_EE382N_4-0006`: predicted `1.0`, accuracy 1.0.
+- `dat-Arm_EE382N_4-0014`: predicted `2`, accuracy 1.0.
+
+The three static trace HTML files were packaged into a simple selector page at
+`results/trace_viewer/vercel-arm-demo/index.html` and deployed to Vercel as
+`focusparse-demo`: https://focusparse-demo.vercel.app. The global Vercel CLI in
+this workspace was too old for the upload endpoint (`44.2.11`; endpoint needs
+`47.2.2+`), so the successful deploy used
+`npx --yes vercel@latest deploy --prod --yes` from the static bundle directory.
+
 ### 2026-05-06 — trace schema v3 debug dashboard
 
 Trace schema bumped to `SCHEMA_VERSION = "3"` for the one-example harness

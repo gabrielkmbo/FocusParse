@@ -1,12 +1,16 @@
 """SFT-ready JSONL export for trajectory traces.
 
-Schema version 2 (2026-05-04). Changes here are breaking — bump
+Schema version 3 (2026-05-06). Changes here are breaking — bump
 `SCHEMA_VERSION` and add a dated section to `.claude/memory/MEMORY.md`
 describing the migration.
 
 v1 → v2: added `evidence_snapshot` (list of `EvidencePacketSummary`,
 optional). v1 records remain readable; v2 readers should treat the
 field as nullable.
+
+v2 → v3: added `artifacts` and `debug_events` for one-example HTML
+dashboards. Payloads store paths/refs and JSON metadata only, never raw
+image bytes.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from pathlib import Path
 
 from focusparse.traces.recorder import RunTrace
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 
 def coverage_recall(predicted_pages: set[int], gold_pages: set[int]) -> float:
@@ -40,17 +44,15 @@ def passes_sft_filter(
         return False
     if reward.get("coverage", 0.0) < min_coverage:
         return False
-    if reward.get("iou", 0.0) < min_iou:
-        return False
-    return True
+    return reward.get("iou", 0.0) >= min_iou
 
 
 def trace_to_sft_record(trace: RunTrace, *, teacher_tier: str = "frontier") -> dict:
-    """Serialize a RunTrace to the v2 SFT JSONL record shape.
+    """Serialize a RunTrace to the v3 SFT JSONL record shape.
 
-    v2 (2026-05-04) adds `evidence_snapshot` — the final packets the
-    reasoner saw at finalize time. None for legacy traces / comparator
-    runs that don't snapshot.
+    v3 keeps `evidence_snapshot` and adds `artifacts` / `debug_events` for
+    inspectable one-example dashboards. All image-like values are references,
+    not inlined bytes.
     """
     snapshot = trace.evidence_snapshot
     return {
@@ -79,6 +81,8 @@ def trace_to_sft_record(trace: RunTrace, *, teacher_tier: str = "frontier") -> d
         "evidence_snapshot": (
             [p.model_dump(mode="json") for p in snapshot] if snapshot is not None else None
         ),
+        "artifacts": [a.model_dump(mode="json") for a in trace.artifacts],
+        "debug_events": [e.model_dump(mode="json") for e in trace.debug_events],
         "final": {
             "answer": trace.final_answer,
             "citations": trace.final_citations,

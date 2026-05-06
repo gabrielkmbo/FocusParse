@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -311,10 +312,71 @@ def test_argparse_tier_override_repeatable(script_mod, monkeypatch):
     assert args.agent == "simple"  # default
 
 
+def test_argparse_trace_viewer_flags(script_mod, monkeypatch, tmp_path):
+    out = tmp_path / "trace.html"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_hf_eval.py",
+            "--protocol",
+            "agentic_multi_page",
+            "--agent",
+            "focus",
+            "--example-id",
+            "dat-Foo-0001",
+            "--visualize-trace",
+            "--trace-viewer-output",
+            str(out),
+        ],
+    )
+    args = script_mod._parse_args()
+    assert args.example_id == "dat-Foo-0001"
+    assert args.visualize_trace is True
+    assert args.trace_viewer_output == out
+
+
 def test_argparse_rejects_unknown_protocol(script_mod, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_hf_eval.py", "--protocol", "bogus"])
     with pytest.raises(SystemExit):
         script_mod._parse_args()
+
+
+def test_filter_examples_by_id(script_mod):
+    examples = [SimpleNamespace(id="a"), SimpleNamespace(id="b")]
+    assert script_mod._filter_examples_by_id(examples, "b") == [examples[1]]
+    assert script_mod._filter_examples_by_id(examples, "missing") == []
+
+
+def test_default_trace_viewer_output(script_mod):
+    path = script_mod._default_trace_viewer_output(Path("results/hf/run1"), "ex-1")
+    assert path == Path("results/trace_viewer/run1/ex-1.html")
+
+
+def test_render_trace_viewer_writes_html(script_mod, tmp_path):
+    run_dir = tmp_path / "run"
+    pred_dir = run_dir / "predictions"
+    pred_dir.mkdir(parents=True)
+    (pred_dir / "ex-1.json").write_text(
+        """{
+          "example_id": "ex-1",
+          "answer_pred": "x",
+          "answer_gold": "x",
+          "answer_correct": 1.0,
+          "citations": [],
+          "trace": {"steps": [], "evidence_snapshot": null, "artifacts": [], "debug_events": []}
+        }"""
+    )
+    out = tmp_path / "trace.html"
+    script_mod._render_trace_viewer(
+        run_dir=run_dir,
+        example_id="ex-1",
+        output_path=out,
+        staging_root=tmp_path,
+    )
+    text = out.read_text()
+    assert "Trace · ex-1" in text
+    assert "const VIEW" in text
 
 
 # ---------------------------------------------------------------------------

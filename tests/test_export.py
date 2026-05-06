@@ -1,4 +1,4 @@
-"""Tests for trajectory JSONL export + schema v2."""
+"""Tests for trajectory JSONL export + schema v3."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from focusparse.traces.export import (
 from focusparse.traces.recorder import (
     EvidencePacketSummary,
     RunTrace,
+    TraceArtifact,
+    TraceDebugEvent,
     TrajectoryRecorder,
     TrajectoryStep,
 )
@@ -44,6 +46,22 @@ def _make_trace(*, with_snapshot: bool = False) -> RunTrace:
                 ),
             ]
         )
+    rec.add_artifact(
+        TraceArtifact(
+            artifact_id="crop:pkt_000",
+            kind="crop",
+            path="cache/crops/abc.png",
+            packet_id="pkt_000",
+        )
+    )
+    rec.add_debug_event(
+        TraceDebugEvent(
+            event_id="inspect:0",
+            stage="inspect",
+            event_type="evidence_packets",
+            payload={"packet_ids": ["pkt_000"]},
+        )
+    )
     return rec.finalize(
         answer="42",
         citations=[{"page": 1, "bbox": [0.0, 0.0, 0.5, 0.5]}],
@@ -51,15 +69,17 @@ def _make_trace(*, with_snapshot: bool = False) -> RunTrace:
     )
 
 
-def test_schema_version_is_2() -> None:
-    assert SCHEMA_VERSION == "2"
+def test_schema_version_is_3() -> None:
+    assert SCHEMA_VERSION == "3"
 
 
 def test_record_includes_schema_version_and_evidence_snapshot_field() -> None:
     rec = trace_to_sft_record(_make_trace(with_snapshot=False))
-    assert rec["schema_version"] == "2"
+    assert rec["schema_version"] == "3"
     assert "evidence_snapshot" in rec
     assert rec["evidence_snapshot"] is None
+    assert rec["artifacts"][0]["path"] == "cache/crops/abc.png"
+    assert rec["debug_events"][0]["event_type"] == "evidence_packets"
 
 
 def test_record_with_snapshot_round_trip() -> None:
@@ -82,8 +102,10 @@ def test_export_sft_jsonl_writes_filtered_records(tmp_path) -> None:
     assert n == 1
     line = out.read_text().strip()
     parsed = json.loads(line)
-    assert parsed["schema_version"] == "2"
+    assert parsed["schema_version"] == "3"
     assert parsed["evidence_snapshot"][0]["packet_id"] == "pkt_000"
+    # SFT records carry references only; image bytes are HTML-renderer-only.
+    assert "data:image" not in line
 
 
 def test_export_sft_jsonl_filters_low_iou(tmp_path) -> None:

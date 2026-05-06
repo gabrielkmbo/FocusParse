@@ -856,8 +856,11 @@ def _score_and_record(
     # `obs_summary` and `confidence` are kept on disk so the per-trace
     # viewer (Phase 6 sub-plan, 2026-05-04) can render what the LLM saw
     # at each step. `evidence_snapshot` is the v2 field — the final
-    # packets the reasoner used; absent on v1 traces.
+    # packets the reasoner used. v3 adds artifacts + debug_events for the
+    # one-example dashboard; all are absent/defaulted on legacy traces.
     evidence_snapshot = getattr(result.trace, "evidence_snapshot", None)
+    artifacts = getattr(result.trace, "artifacts", [])
+    debug_events = getattr(result.trace, "debug_events", [])
     trace_dict = {
         "steps": [
             {
@@ -882,6 +885,8 @@ def _score_and_record(
             if evidence_snapshot is not None
             else None
         ),
+        "artifacts": [a.model_dump(mode="json") for a in artifacts],
+        "debug_events": [e.model_dump(mode="json") for e in debug_events],
     }
 
     record = {

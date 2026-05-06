@@ -81,10 +81,11 @@ cache:
 
 # Trace export defaults.
 traces:
-  # v2 (2026-05-04): RunTrace gains evidence_snapshot. The runtime constant
+  # v3 (2026-05-06): RunTrace gains artifact refs + debug events for the
+  # one-example dashboard. The runtime constant
   # in src/focusparse/traces/export.py is the load-bearing version; this
   # YAML field is informational only.
-  schema_version: "2"
+  schema_version: "3"
   sft_filter:
     min_coverage: 0.8 # AgenticOCR dual threshold — coverage recall
     min_iou: 0.3 # AgenticOCR dual threshold — spatial IoU

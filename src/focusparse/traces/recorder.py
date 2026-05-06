@@ -66,6 +66,43 @@ class EvidencePacketSummary(BaseModel):
     provenance_tool: str | None = None
 
 
+class TraceArtifact(BaseModel):
+    """Reference to a trace-adjacent artifact without embedding bytes.
+
+    Schema v3 keeps image/crop/chart/text payloads out of the JSON trace.
+    Viewers resolve `path` or `ref` at render time and inline bytes only in
+    the generated HTML artifact.
+    """
+
+    artifact_id: str
+    kind: str  # "page_image" | "crop" | "thumbnail" | "chart_csv" | "text" | ...
+    path: str | None = None
+    ref: str | None = None
+    page: int | None = None
+    bbox_norm: tuple[float, float, float, float] | None = None
+    packet_id: str | None = None
+    stage: str | None = None
+    step_index: int | None = None
+    label: str | None = None
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class TraceDebugEvent(BaseModel):
+    """Structured event for a human trace viewer.
+
+    These events are intentionally loose-typed: each pipeline stage can emit
+    concise, JSON-safe payloads without turning the SFT schema into a mirror
+    of every internal event model.
+    """
+
+    event_id: str
+    stage: str
+    event_type: str
+    step_index: int | None = None
+    retry_attempt: int = 0
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class RunTrace(BaseModel):
     example_id: str
     question: str
@@ -77,6 +114,10 @@ class RunTrace(BaseModel):
     # Schema v2 (2026-05-04): the final evidence the reasoner saw, snapshotted
     # at finalize time. Optional; legacy v1 traces serialize as None.
     evidence_snapshot: list[EvidencePacketSummary] | None = None
+    # Schema v3 (2026-05-06): lightweight debug trail for one-example HTML
+    # dashboards. Defaults preserve v1/v2 trace readability.
+    artifacts: list[TraceArtifact] = Field(default_factory=list)
+    debug_events: list[TraceDebugEvent] = Field(default_factory=list)
     started_at: float = Field(default_factory=time.time)
     ended_at: float | None = None
 
@@ -92,6 +133,26 @@ class TrajectoryRecorder:
 
     def record(self, step: TrajectoryStep) -> None:
         self._trace.steps.append(step)
+
+    def add_artifact(self, artifact: TraceArtifact | None = None, **kwargs: Any) -> TraceArtifact:
+        """Attach an artifact reference and return the normalized model."""
+        item = artifact if artifact is not None else TraceArtifact(**kwargs)
+        self._trace.artifacts.append(item)
+        return item
+
+    def add_debug_event(
+        self,
+        event: TraceDebugEvent | None = None,
+        **kwargs: Any,
+    ) -> TraceDebugEvent:
+        """Attach a structured debug event and return the normalized model."""
+        item = event if event is not None else TraceDebugEvent(**kwargs)
+        self._trace.debug_events.append(item)
+        return item
+
+    def next_debug_event_id(self, stage: str, event_type: str) -> str:
+        """Stable per-trace id for the next debug event."""
+        return f"{stage}:{event_type}:{len(self._trace.debug_events):03d}"
 
     def set_evidence_snapshot(self, packets: list[EvidencePacketSummary]) -> None:
         """Attach the final evidence packets the reasoner saw to the trace.

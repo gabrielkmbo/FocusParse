@@ -1,3 +1,15 @@
-from focusparse.traces.recorder import RunTrace, TrajectoryRecorder, TrajectoryStep
+from focusparse.traces.recorder import (
+    RunTrace,
+    TraceArtifact,
+    TraceDebugEvent,
+    TrajectoryRecorder,
+    TrajectoryStep,
+)
 
-__all__ = ["RunTrace", "TrajectoryRecorder", "TrajectoryStep"]
+__all__ = [
+    "RunTrace",
+    "TraceArtifact",
+    "TraceDebugEvent",
+    "TrajectoryRecorder",
+    "TrajectoryStep",
+]

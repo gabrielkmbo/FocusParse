@@ -13,6 +13,7 @@ from focusparse.traces.viewer import (
     example_id_to_doc_stem,
     find_page_image,
     image_to_data_url,
+    load_gold_for_example,
     render_html,
     resolve_crop_ref,
 )
@@ -60,6 +61,25 @@ def test_find_page_image_resolves_via_canonical_layout(tmp_path: Path) -> None:
     target.write_bytes(_TINY_PNG)
     found = find_page_image("dat-AN040_EN-0008", page=6, staging_root=tmp_path)
     assert found == target
+
+
+def test_load_gold_for_example_reads_benchmark_jsonl(tmp_path: Path) -> None:
+    (tmp_path / "benchmark.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "dat-Foo-0001",
+                "answer": "42",
+                "answer_type": "numeric",
+                "supporting_pages": [1],
+                "supporting_bboxes": [{"page": 1, "x0": 0.1, "y0": 0.2, "x1": 0.3, "y1": 0.4}],
+            }
+        )
+        + "\n"
+    )
+    gold = load_gold_for_example("dat-Foo-0001", staging_root=tmp_path)
+    assert gold is not None
+    assert gold["answer"] == "42"
+    assert gold["supporting_pages"] == [1]
 
 
 def test_resolve_crop_ref_literal_path(tiny_png: Path) -> None:
@@ -173,6 +193,59 @@ def test_build_view_model_attaches_page_image_when_present(tmp_path: Path) -> No
     pages = view["pages"]
     assert len(pages) == 1
     assert pages[0]["image_data_url"] is not None
+    assert pages[0]["overlays"]
+
+
+def test_build_view_model_uses_v3_debug_and_artifacts(tmp_path: Path, tiny_png: Path) -> None:
+    record = _record_with_snapshot(crop_ref=str(tiny_png))
+    record["trace"]["artifacts"] = [
+        {
+            "artifact_id": "crop:pkt_000",
+            "kind": "crop",
+            "path": str(tiny_png),
+            "page": 1,
+            "bbox_norm": [0.0, 0.0, 0.5, 0.5],
+            "packet_id": "pkt_000",
+            "stage": "inspect",
+        }
+    ]
+    record["trace"]["debug_events"] = [
+        {
+            "event_id": "localize:candidate_regions:000",
+            "stage": "localize",
+            "event_type": "candidate_regions",
+            "payload": {
+                "regions": [
+                    {
+                        "region_id": "r0",
+                        "page": 1,
+                        "bbox_norm": [0.1, 0.1, 0.2, 0.2],
+                        "region_type": "text",
+                    }
+                ]
+            },
+        }
+    ]
+    view = build_view_model(record, search_dirs=[], staging_root=tmp_path)
+    assert view["artifacts"][0]["data_url"].startswith("data:image/png;base64,")
+    assert view["debug_events"][0]["event_type"] == "candidate_regions"
+    kinds = {box["kind"] for box in view["pages"][0]["overlays"]}
+    assert "candidate" in kinds
+    assert "citation" in kinds
+
+
+def test_build_view_model_renders_multiscale_and_chart_csv(
+    tmp_path: Path, tiny_png: Path
+) -> None:
+    record = _record_with_snapshot(crop_ref=str(tiny_png))
+    record["trace"]["evidence_snapshot"][0]["multi_scale_crops"] = [
+        {"ref": str(tiny_png), "bbox_norm": [0.0, 0.0, 0.5, 0.5], "scale": "tight"}
+    ]
+    record["trace"]["evidence_snapshot"][0]["chart_csv"] = "x,y\n1,2"
+    view = build_view_model(record, search_dirs=[], staging_root=tmp_path)
+    snap = view["evidence_snapshot"][0]
+    assert snap["multi_scale_crops"][0]["data_url"].startswith("data:image/png;base64,")
+    assert snap["chart_csv"] == "x,y\n1,2"
 
 
 def test_render_html_includes_question_and_payload(tmp_path: Path, tiny_png: Path) -> None:

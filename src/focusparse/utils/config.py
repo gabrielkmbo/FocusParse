@@ -70,7 +70,7 @@ class SFTFilter(BaseModel):
 
 
 class TracesSpec(BaseModel):
-    schema_version: str = "1"
+    schema_version: str = "3"
     sft_filter: SFTFilter = Field(default_factory=SFTFilter)
 
 

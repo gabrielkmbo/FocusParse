@@ -123,7 +123,7 @@ def main() -> int:
         repo_id=args.hf_repo,
         split=args.hf_split,
         revision=args.hf_revision,
-        limit=args.limit,
+        limit=None if args.example_id else args.limit,
     )
     fingerprint = dataset_fingerprint(ds)
 
@@ -150,6 +150,12 @@ def main() -> int:
         for line in benchmark_jsonl.read_text().splitlines()
         if line.strip()
     ]
+    if args.example_id:
+        examples = _filter_examples_by_id(examples, args.example_id)
+        if not examples:
+            print(f"error: --example-id {args.example_id!r} was not found", file=sys.stderr)
+            return 2
+    eval_limit = None if args.example_id else args.limit
 
     if args.agent == "focus":
         result = asyncio.run(
@@ -161,7 +167,7 @@ def main() -> int:
                 protocol=args.protocol,
                 output_dir=run_dir,
                 images_root=args.staging_dir,
-                limit=args.limit,
+                limit=eval_limit,
                 resume=args.resume,
                 config=config,
                 tier_router=tier_router,
@@ -186,7 +192,7 @@ def main() -> int:
                 protocol=args.protocol,
                 output_dir=run_dir,
                 images_root=args.staging_dir,
-                limit=args.limit,
+                limit=eval_limit,
                 resume=args.resume,
                 pdfs_root=args.pdfs_root,
                 tool_set=args.tool_set,
@@ -202,7 +208,7 @@ def main() -> int:
                 protocol=args.protocol,
                 output_dir=run_dir,
                 images_root=args.staging_dir,
-                limit=args.limit,
+                limit=eval_limit,
                 resume=args.resume,
                 pdfs_root=args.pdfs_root,
             )
@@ -231,6 +237,21 @@ def main() -> int:
         f"\n{config_key}: accuracy={overall.accuracy:.1%} n={overall.count} "
         f"cost=${cost:.2f} (${per_correct:.3f}/correct)"
     )
+    if args.visualize_trace:
+        viewer_example_id = args.example_id or _first_example_id(result.get("per_example") or [])
+        if viewer_example_id is None:
+            print("warning: --visualize-trace requested but no examples were scored", file=sys.stderr)
+        else:
+            viewer_output = args.trace_viewer_output or _default_trace_viewer_output(
+                run_dir, viewer_example_id
+            )
+            _render_trace_viewer(
+                run_dir=run_dir,
+                example_id=viewer_example_id,
+                output_path=viewer_output,
+                staging_root=args.staging_dir,
+            )
+            print(f"trace viewer: {viewer_output}")
     return 0
 
 
@@ -281,6 +302,24 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=Path, default=Path("results/hf"))
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--example-id",
+        type=str,
+        default=None,
+        help="Filter the materialized split to exactly one example id. Useful with --visualize-trace.",
+    )
+    parser.add_argument(
+        "--visualize-trace",
+        action="store_true",
+        default=False,
+        help="After the run, render the scored example's trace to a static HTML file.",
+    )
+    parser.add_argument(
+        "--trace-viewer-output",
+        type=Path,
+        default=None,
+        help="Optional output path for --visualize-trace. Defaults to results/trace_viewer/<run>/<example>.html.",
+    )
     parser.add_argument(
         "--max-concurrent",
         type=int,
@@ -355,6 +394,49 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
+
+
+def _filter_examples_by_id(examples: list, example_id: str) -> list:
+    """Return the exact example-id match, preserving harness iterable shape."""
+    return [ex for ex in examples if getattr(ex, "id", None) == example_id]
+
+
+def _first_example_id(per_example: list[dict]) -> str | None:
+    for row in per_example:
+        eid = row.get("example_id")
+        if eid:
+            return str(eid)
+    return None
+
+
+def _default_trace_viewer_output(run_dir: Path, example_id: str) -> Path:
+    return Path("results") / "trace_viewer" / run_dir.name / f"{example_id}.html"
+
+
+def _render_trace_viewer(
+    *,
+    run_dir: Path,
+    example_id: str,
+    output_path: Path,
+    staging_root: Path,
+) -> Path:
+    """Render a cached prediction JSON through the static trace viewer."""
+    from focusparse.traces.viewer import build_view_model, render_html
+
+    pred_path = run_dir / "predictions" / f"{example_id}.json"
+    if not pred_path.is_file():
+        raise FileNotFoundError(f"prediction not found: {pred_path}")
+    record = json.loads(pred_path.read_text())
+    search_dirs = [
+        run_dir / "crops",
+        run_dir / "tiles",
+        Path("cache/crops"),
+    ]
+    view = build_view_model(record, search_dirs=search_dirs, staging_root=staging_root)
+    html_str = render_html(view, title=f"Trace · {example_id} · {run_dir.name}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(html_str)
+    return output_path
 
 
 def _resolve_tiers(config) -> dict[str, dict]:

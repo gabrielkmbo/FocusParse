@@ -61,6 +61,37 @@ def find_page_image(
     return candidates[0]
 
 
+def load_gold_for_example(
+    example_id: str,
+    *,
+    staging_root: Path = DEFAULT_STAGING_ROOT,
+) -> dict[str, Any] | None:
+    """Load gold answer/pages/bboxes for one example from staging JSONL.
+
+    Gold labels stay out of `RunTrace`; the viewer joins them at render time.
+    """
+    jsonl = staging_root / "benchmark.jsonl"
+    if not jsonl.is_file():
+        return None
+    for line in jsonl.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("id") != example_id:
+            continue
+        return {
+            "answer": row.get("answer"),
+            "answer_type": row.get("answer_type"),
+            "supporting_pages": row.get("supporting_pages") or [],
+            "supporting_bboxes": row.get("supporting_bboxes") or [],
+            "alternate_bboxes": row.get("alternate_bboxes") or [],
+        }
+    return None
+
+
 def resolve_crop_ref(ref: str | None, *, search_dirs: Iterable[Path]) -> Path | None:
     """Resolve an `EvidencePacketSummary.local_crop_ref` to a PNG path.
 
@@ -115,23 +146,26 @@ def build_view_model(
     trace = record.get("trace") or {}
     steps = trace.get("steps") or []
     snapshot = trace.get("evidence_snapshot")
+    artifacts = trace.get("artifacts") or []
+    debug_events = trace.get("debug_events") or []
+    gold = load_gold_for_example(record.get("example_id", ""), staging_root=staging_root)
 
     citations = record.get("citations") or []
-    citation_pages = sorted({int(c["page"]) for c in citations if "page" in c})
+    overlay_by_page = _collect_overlays(
+        citations=citations,
+        snapshot=snapshot if isinstance(snapshot, list) else [],
+        debug_events=debug_events if isinstance(debug_events, list) else [],
+        gold=gold,
+    )
 
     pages_view: list[dict[str, Any]] = []
-    for page in citation_pages:
+    for page in sorted(overlay_by_page):
         img_path = find_page_image(record.get("example_id", ""), page, staging_root=staging_root)
-        page_citations = [
-            {"bbox": list(c.get("bbox", [0, 0, 1, 1]))}
-            for c in citations
-            if int(c.get("page", -1)) == page
-        ]
         pages_view.append(
             {
                 "page": page,
                 "image_data_url": image_to_data_url(img_path) if img_path else None,
-                "citations": page_citations,
+                "overlays": overlay_by_page[page],
             }
         )
 
@@ -142,8 +176,24 @@ def build_view_model(
             linked = []
             for ref in pkt.get("linked_crop_refs") or []:
                 linked_path = resolve_crop_ref(ref, search_dirs=search_dirs)
-                if linked_path is not None:
-                    linked.append(image_to_data_url(linked_path))
+                linked.append(
+                    {
+                        "ref": ref,
+                        "data_url": image_to_data_url(linked_path) if linked_path else None,
+                    }
+                )
+            multi_scale = []
+            for crop in pkt.get("multi_scale_crops") or []:
+                ref = crop.get("ref")
+                scaled_path = resolve_crop_ref(ref, search_dirs=search_dirs)
+                multi_scale.append(
+                    {
+                        "ref": ref,
+                        "scale": crop.get("scale"),
+                        "bbox_norm": list(crop.get("bbox_norm") or []),
+                        "data_url": image_to_data_url(scaled_path) if scaled_path else None,
+                    }
+                )
             snapshot_view.append(
                 {
                     "packet_id": pkt.get("packet_id"),
@@ -154,10 +204,26 @@ def build_view_model(
                     "provenance_tool": pkt.get("provenance_tool"),
                     "text_layer_snippet": pkt.get("text_layer_snippet"),
                     "ocr_snippet": pkt.get("ocr_snippet"),
+                    "chart_csv": pkt.get("chart_csv"),
+                    "chart_extraction_confidence": pkt.get("chart_extraction_confidence"),
                     "crop_data_url": (image_to_data_url(crop_path) if crop_path else None),
                     "linked_data_urls": linked,
+                    "multi_scale_crops": multi_scale,
                 }
             )
+
+    artifacts_view = []
+    artifact_items = artifacts if isinstance(artifacts, list) else []
+    for artifact in artifact_items:
+        data_url = None
+        if artifact.get("kind") in ("crop", "thumbnail", "page_image"):
+            ref = artifact.get("path") or artifact.get("ref")
+            resolved = resolve_crop_ref(ref, search_dirs=search_dirs) if ref else None
+            if resolved is None and ref:
+                direct = Path(ref)
+                resolved = direct if direct.is_file() else None
+            data_url = image_to_data_url(resolved) if resolved else None
+        artifacts_view.append({**artifact, "data_url": data_url})
 
     return {
         "example_id": record.get("example_id"),
@@ -166,7 +232,7 @@ def build_view_model(
         "question": (trace.get("question") if isinstance(trace, dict) else None)
         or record.get("question"),
         "answer_pred": record.get("answer_pred"),
-        "answer_gold": record.get("answer_gold"),
+        "answer_gold": record.get("answer_gold") or ((gold or {}).get("answer")),
         "answer_correct": record.get("answer_correct"),
         "is_lazy": record.get("is_lazy"),
         "page_recall": record.get("page_recall"),
@@ -178,10 +244,105 @@ def build_view_model(
         "usd": record.get("usd"),
         "latency_ms": record.get("latency_ms"),
         "citations": citations,
+        "gold": gold,
         "steps": steps,
+        "artifacts": artifacts_view,
+        "debug_events": debug_events,
         "evidence_snapshot": snapshot_view,
         "pages": pages_view,
     }
+
+
+def _collect_overlays(
+    *,
+    citations: list[dict[str, Any]],
+    snapshot: list[dict[str, Any]],
+    debug_events: list[dict[str, Any]],
+    gold: dict[str, Any] | None,
+) -> dict[int, list[dict[str, Any]]]:
+    overlays: dict[int, list[dict[str, Any]]] = {}
+
+    for box in (gold or {}).get("supporting_bboxes") or []:
+        page = _int_or_none(box.get("page"))
+        bbox = _bbox_from_mapping(box)
+        if page is not None and bbox is not None:
+            _append_overlay(overlays, page, bbox, "gold", "gold")
+
+    for c in citations:
+        page = _int_or_none(c.get("page"))
+        bbox = _bbox_list(c.get("bbox"))
+        if page is not None and bbox is not None:
+            _append_overlay(overlays, page, bbox, "citation", "pred")
+
+    for pkt in snapshot:
+        page = _int_or_none(pkt.get("page"))
+        bbox = _bbox_list(pkt.get("bbox_norm"))
+        if page is not None and bbox is not None:
+            _append_overlay(overlays, page, bbox, "evidence", pkt.get("packet_id") or "packet")
+
+    for event in debug_events:
+        payload = event.get("payload") or {}
+        regions = payload.get("regions") or payload.get("packets") or []
+        if not isinstance(regions, list):
+            continue
+        source = event.get("event_type") or "debug"
+        for item in regions:
+            if not isinstance(item, dict):
+                continue
+            page = _int_or_none(item.get("page"))
+            bbox = _bbox_list(item.get("bbox_norm"))
+            if page is None or bbox is None:
+                continue
+            if source == "candidate_regions":
+                label = item.get("region_type") or item.get("region_id") or "candidate"
+                kind = "candidate"
+            elif source == "evidence_packets":
+                label = item.get("packet_id") or "selected"
+                kind = "selected"
+            else:
+                label = source
+                kind = "debug"
+            _append_overlay(overlays, page, bbox, kind, str(label))
+
+    return overlays
+
+
+def _append_overlay(
+    overlays: dict[int, list[dict[str, Any]]],
+    page: int,
+    bbox: list[float],
+    kind: str,
+    label: str,
+) -> None:
+    overlays.setdefault(page, []).append({"kind": kind, "label": label, "bbox": bbox})
+
+
+def _bbox_from_mapping(value: dict[str, Any]) -> list[float] | None:
+    try:
+        return [
+            float(value["x0"]),
+            float(value["y0"]),
+            float(value["x1"]),
+            float(value["y1"]),
+        ]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _bbox_list(value: Any) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        return [float(v) for v in value]
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -370,8 +531,66 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
         pkt.crop_data_url
           ? el('img', { src: pkt.crop_data_url, class: 'max-w-full rounded mb-2' })
           : el('div', { class: 'p-3 bg-slate-100 rounded text-slate-500 text-sm mb-2' }, '(no crop)'),
+        (pkt.multi_scale_crops || []).length
+          ? el('div', { class: 'grid grid-cols-2 gap-2 mb-2' },
+              pkt.multi_scale_crops.map(c => el('div', { class: 'text-xs' },
+                el('div', { class: 'text-slate-500 mb-1' }, c.scale || 'scale'),
+                c.data_url ? el('img', { src: c.data_url, class: 'max-w-full rounded border' })
+                  : el('div', { class: 'p-2 bg-slate-100 rounded text-slate-500' }, c.ref || '(missing)')
+              )))
+          : null,
+        (pkt.linked_data_urls || []).length
+          ? el('div', { class: 'grid grid-cols-2 gap-2 mb-2' },
+              pkt.linked_data_urls.map((c, idx) => el('div', { class: 'text-xs' },
+                el('div', { class: 'text-slate-500 mb-1' }, `linked ${idx + 1}`),
+                c.data_url ? el('img', { src: c.data_url, class: 'max-w-full rounded border' })
+                  : el('div', { class: 'p-2 bg-slate-100 rounded text-slate-500' }, c.ref || '(missing)')
+              )))
+          : null,
         text ? el('div', { class: 'text-sm bg-amber-50 p-2 rounded font-mono whitespace-pre-wrap' }, text) : null,
+        pkt.chart_csv ? el('pre', { class: 'text-xs bg-emerald-50 p-2 rounded overflow-auto max-h-40 mt-2' }, pkt.chart_csv) : null,
         pkt.provenance_tool ? el('div', { class: 'text-xs text-slate-400 mt-2' }, 'tool: ' + pkt.provenance_tool) : null
+      );
+    }
+
+    function debugEventsPanel() {
+      const events = VIEW.debug_events || [];
+      if (!events.length) return el('div', { class: 'p-4 text-slate-500' }, 'No debug events.');
+      return el('div', { class: 'bg-white rounded shadow p-4 mb-6' },
+        el('h2', { class: 'text-xl font-bold mb-3' }, `Debug events (${events.length})`),
+        el('div', { class: 'space-y-2' }, events.map(ev =>
+          el('details', { class: 'border rounded' },
+            el('summary', { class: 'cursor-pointer p-2 bg-slate-100' },
+              el('span', { class: 'font-semibold' }, ev.stage || '?'),
+              el('span', { class: 'mx-2 text-slate-500' }, '·'),
+              el('span', {}, ev.event_type || '?'),
+              ev.retry_attempt ? el('span', { class: 'ml-2 text-xs text-slate-500' }, `retry ${ev.retry_attempt}`) : null
+            ),
+            el('pre', { class: 'text-xs bg-slate-50 p-2 overflow-auto max-h-72' },
+              JSON.stringify(ev.payload || {}, null, 2)
+            )
+          )
+        ))
+      );
+    }
+
+    function artifactsPanel() {
+      const artifacts = VIEW.artifacts || [];
+      if (!artifacts.length) return null;
+      const visual = artifacts.filter(a => a.data_url).slice(0, 24);
+      return el('div', { class: 'bg-white rounded shadow p-4 mb-6' },
+        el('h2', { class: 'text-xl font-bold mb-3' }, `Artifacts (${artifacts.length})`),
+        visual.length
+          ? el('div', { class: 'grid grid-cols-4 gap-2 mb-3' }, visual.map(a =>
+              el('div', { class: 'border rounded p-2 text-xs' },
+                el('div', { class: 'font-medium truncate mb-1' }, a.label || a.artifact_id || a.kind),
+                el('img', { src: a.data_url, class: 'max-w-full rounded' })
+              )
+            ))
+          : el('div', { class: 'text-sm text-slate-500 mb-3' }, 'No resolved visual artifacts.'),
+        el('pre', { class: 'text-xs bg-slate-50 p-2 rounded overflow-auto max-h-72' },
+          JSON.stringify(artifacts.map(a => ({...a, data_url: a.data_url ? '[inlined]' : null})), null, 2)
+        )
       );
     }
 
@@ -381,7 +600,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
         return el('div', { class: 'p-4 text-slate-500' }, 'No cited pages.');
       }
       return el('div', { class: 'bg-white rounded shadow p-4 mb-6' },
-        el('h2', { class: 'text-xl font-bold mb-3' }, 'Cited pages'),
+        el('h2', { class: 'text-xl font-bold mb-3' }, 'Pages'),
         el('div', { class: 'grid grid-cols-1 gap-4' },
           pages.map(pageOverlay)
         )
@@ -402,25 +621,43 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
         const w = img.clientWidth, h = img.clientHeight;
         overlay.style.width = w + 'px';
         overlay.style.height = h + 'px';
-        for (const c of (p.citations || [])) {
+        for (const c of (p.overlays || [])) {
           const [x0, y0, x1, y1] = c.bbox || [0, 0, 1, 1];
+          const color = overlayColor(c.kind);
+          const pixelSpace = Math.max(x0, y0, x1, y1) > 1.5;
+          const left = pixelSpace ? x0 : x0 * w;
+          const top = pixelSpace ? y0 : y0 * h;
+          const width = pixelSpace ? (x1 - x0) : (x1 - x0) * w;
+          const height = pixelSpace ? (y1 - y0) : (y1 - y0) * h;
           const box = el('div', {
             class: 'bbox-overlay',
             style: {
-              left: (x0 * w) + 'px',
-              top: (y0 * h) + 'px',
-              width: ((x1 - x0) * w) + 'px',
-              height: ((y1 - y0) * h) + 'px',
-              borderColor: '#dc2626',
+              left: left + 'px',
+              top: top + 'px',
+              width: width + 'px',
+              height: height + 'px',
+              borderColor: color,
             }
           });
+          box.appendChild(el('span', {
+            class: 'text-xs text-white px-1',
+            style: { backgroundColor: color, position: 'absolute', left: '0', top: '0' }
+          }, c.label || c.kind || 'box'));
           overlay.appendChild(box);
         }
       });
       return el('div', {},
-        el('div', { class: 'text-sm font-medium mb-1' }, `Page ${p.page} · ${(p.citations||[]).length} citation(s)`),
+        el('div', { class: 'text-sm font-medium mb-1' }, `Page ${p.page} · ${(p.overlays||[]).length} box(es)`),
         wrapper
       );
+    }
+
+    function overlayColor(kind) {
+      if (kind === 'gold') return '#16a34a';
+      if (kind === 'citation') return '#dc2626';
+      if (kind === 'evidence' || kind === 'selected') return '#2563eb';
+      if (kind === 'candidate') return '#f59e0b';
+      return '#64748b';
     }
 
     document.getElementById('root').replaceWith(
@@ -428,6 +665,8 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
         header(),
         pagesPanel(),
         evidenceSnapshot(),
+        debugEventsPanel(),
+        artifactsPanel(),
         timeline()
       )
     );

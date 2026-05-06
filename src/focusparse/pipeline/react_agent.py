@@ -220,7 +220,7 @@ class ReActAgent:
             )
             answer = answer or _last_text_fallback(conversation) or "Unanswerable"
 
-        # Trace schema v2 (2026-05-04): snapshot the citations the model
+        # Trace schema v2+ (2026-05-04): snapshot the citations the model
         # committed to as a best-effort evidence_snapshot so the per-trace
         # viewer can render them. ReAct doesn't build EvidencePackets, so
         # the summary uses citation page+bbox plus blank crops/text.

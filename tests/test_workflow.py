@@ -270,6 +270,18 @@ async def test_focus_workflow_runs_end_to_end(tmp_path, parser_bench_submodule_p
     assert result.telemetry["tokens_in"] == 150
     assert result.telemetry["tokens_out"] == 30
 
+    # Schema v3 debug trail: page candidates, regions, evidence, answer,
+    # and verdict are visible to the one-example dashboard.
+    event_types = {(e.stage, e.event_type) for e in result.trace.debug_events}
+    assert ("route_pages", "candidate_pages") in event_types
+    assert ("localize", "candidate_regions") in event_types
+    assert ("inspect", "evidence_packets") in event_types
+    assert ("answer", "answer") in event_types
+    assert ("verify", "verdict") in event_types
+    artifact_kinds = {a.kind for a in result.trace.artifacts}
+    assert "page_image" in artifact_kinds
+    assert "crop" in artifact_kinds
+
 
 async def test_focus_workflow_drops_invalid_citation_refs(tmp_path, parser_bench_submodule_present):
     if not parser_bench_submodule_present:

@@ -1,10 +1,12 @@
-"""Tests for the trajectory recorder + RunTrace schema v2."""
+"""Tests for the trajectory recorder + RunTrace schema v3."""
 
 from __future__ import annotations
 
 from focusparse.traces.recorder import (
     EvidencePacketSummary,
     RunTrace,
+    TraceArtifact,
+    TraceDebugEvent,
     TrajectoryRecorder,
     TrajectoryStep,
 )
@@ -17,6 +19,8 @@ def test_recorder_starts_empty() -> None:
     assert trace.steps == []
     assert trace.final_answer is None
     assert trace.evidence_snapshot is None
+    assert trace.artifacts == []
+    assert trace.debug_events == []
 
 
 def test_recorder_records_steps_in_order() -> None:
@@ -90,6 +94,47 @@ def test_evidence_packet_summary_defaults() -> None:
     assert s.linked_crop_refs == []
     assert s.text_layer_snippet is None
     assert s.confidence == 1.0
+
+
+def test_trace_artifact_and_debug_event_round_trip() -> None:
+    rec = TrajectoryRecorder(example_id="ex1", question="Q?")
+    rec.add_artifact(
+        TraceArtifact(
+            artifact_id="crop:pkt_000",
+            kind="crop",
+            path="/cache/crops/abc.png",
+            page=2,
+            bbox_norm=(0.1, 0.2, 0.3, 0.4),
+            packet_id="pkt_000",
+            stage="inspect",
+            label="tight crop",
+        )
+    )
+    rec.add_debug_event(
+        TraceDebugEvent(
+            event_id="inspect:0",
+            stage="inspect",
+            event_type="evidence_packets",
+            step_index=4,
+            payload={"packet_ids": ["pkt_000"]},
+        )
+    )
+    trace = rec.finalize(answer="x")
+
+    dumped = trace.model_dump(mode="json")
+    assert dumped["artifacts"][0]["artifact_id"] == "crop:pkt_000"
+    assert dumped["artifacts"][0]["bbox_norm"] == [0.1, 0.2, 0.3, 0.4]
+    assert dumped["debug_events"][0]["event_type"] == "evidence_packets"
+
+    rehydrated = RunTrace.model_validate(dumped)
+    assert rehydrated.artifacts[0].kind == "crop"
+    assert rehydrated.debug_events[0].payload["packet_ids"] == ["pkt_000"]
+
+
+def test_v2_style_trace_defaults_v3_fields() -> None:
+    trace = RunTrace.model_validate({"example_id": "ex1", "question": "Q?"})
+    assert trace.artifacts == []
+    assert trace.debug_events == []
 
 
 def test_step_obs_summary_and_confidence_persist() -> None:
