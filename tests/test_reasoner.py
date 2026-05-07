@@ -27,6 +27,8 @@ def _packet(
     local_crop_ref: str = "/cache/crops/abc.png",
     page_thumbnail_ref: str = "/cache/pages/p3.png",
     multi_scale: list[CropRef] | None = None,
+    linked_crop_refs: list[str] | None = None,
+    linked_neighbor_types: list[str] | None = None,
 ) -> EvidencePacket:
     return EvidencePacket(
         packet_id=packet_id,
@@ -35,6 +37,8 @@ def _packet(
         page_thumbnail_ref=page_thumbnail_ref,
         local_crop_ref=local_crop_ref,
         multi_scale_crops=multi_scale or [],
+        linked_crop_refs=linked_crop_refs or [],
+        linked_neighbor_types=linked_neighbor_types or [],
         provenance=PacketProvenance(tool="t", args_hash=""),
     )
 
@@ -126,6 +130,99 @@ def test_collect_packet_images_mixed_legacy_and_multi_scale() -> None:
     )
     images = _collect_packet_images(ev)
     assert images == [Path("/cache/A.png"), Path("/cache/B.png"), Path("/cache/legacy.png")]
+
+
+# ---------------------------------------------------------------------------
+# Path A (2026-05-06): linked_crop_refs reach the reasoner as images.
+# Pre-Path-A this was dead code; the 2026-05-06 memory entry has the diagnosis.
+# ---------------------------------------------------------------------------
+
+
+def test_collect_packet_images_includes_linked_crop_refs() -> None:
+    """A packet with 2 linked neighbor crops surfaces them after the primary."""
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                local_crop_ref="/cache/primary.png",
+                linked_crop_refs=["/cache/caption.png", "/cache/footnote.png"],
+                linked_neighbor_types=["caption", "footnote"],
+            )
+        ]
+    )
+    images = _collect_packet_images(ev)
+    # Order is primary → linked, so the reasoner reads "this is the focus,
+    # then the context."
+    assert images == [
+        Path("/cache/primary.png"),
+        Path("/cache/caption.png"),
+        Path("/cache/footnote.png"),
+    ]
+
+
+def test_collect_packet_images_dedupes_neighbors_across_packets() -> None:
+    """A neighbor ref shared between two packets appears once in the image list."""
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                packet_id="pkt_000",
+                local_crop_ref="/cache/a.png",
+                linked_crop_refs=["/cache/shared_caption.png"],
+                linked_neighbor_types=["caption"],
+            ),
+            _packet(
+                packet_id="pkt_001",
+                local_crop_ref="/cache/b.png",
+                linked_crop_refs=["/cache/shared_caption.png", "/cache/footnote.png"],
+                linked_neighbor_types=["caption", "footnote"],
+            ),
+        ]
+    )
+    images = _collect_packet_images(ev)
+    assert images == [
+        Path("/cache/a.png"),
+        Path("/cache/shared_caption.png"),
+        Path("/cache/b.png"),
+        Path("/cache/footnote.png"),
+    ]
+
+
+def test_collect_packet_images_skips_empty_neighbor_refs() -> None:
+    """Empty-string entries in linked_crop_refs are filtered out."""
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                local_crop_ref="/cache/primary.png",
+                linked_crop_refs=["", "/cache/real.png", ""],
+                linked_neighbor_types=["caption", "footnote", "title"],
+            )
+        ]
+    )
+    images = _collect_packet_images(ev)
+    assert images == [Path("/cache/primary.png"), Path("/cache/real.png")]
+
+
+def test_collect_packet_images_neighbors_follow_multi_scale() -> None:
+    """When BOTH multi_scale_crops AND linked_crop_refs are populated, the
+    image order is: tight → context → linked. (Multi-scale primaries first,
+    then expand_context's neighbors.)"""
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                multi_scale=[
+                    CropRef(ref="/cache/tight.png", bbox_norm=(0.1, 0.2, 0.5, 0.6), scale="tight"),
+                    CropRef(ref="/cache/ctx.png", bbox_norm=(0.0, 0.0, 0.8, 0.9), scale="context"),
+                ],
+                linked_crop_refs=["/cache/caption.png"],
+                linked_neighbor_types=["caption"],
+            )
+        ]
+    )
+    images = _collect_packet_images(ev)
+    assert images == [
+        Path("/cache/tight.png"),
+        Path("/cache/ctx.png"),
+        Path("/cache/caption.png"),
+    ]
 
 
 # ---------------------------------------------------------------------------

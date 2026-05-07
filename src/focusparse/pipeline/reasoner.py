@@ -154,6 +154,12 @@ def _collect_packet_images(evidence: EvidenceEvent) -> list[Path]:
     `multi_scale_crops` populated (tight + context), enumerate every
     scale's ref. Falls back to the legacy local_crop_ref / page_thumbnail
     chain for packets without multi-scale.
+
+    Path A (2026-05-06): after the primary crop(s), enumerate the packet's
+    `linked_crop_refs` (neighbors attached by `expand_context` — captions,
+    footnotes, section headers, etc.). Pre-Path-A, these were populated
+    on the packet but never reached the reasoner. The 2026-05-06 memory
+    entry documents the dead-code finding that motivated this change.
     """
     seen: set[str] = set()
     images: list[Path] = []
@@ -165,12 +171,18 @@ def _collect_packet_images(evidence: EvidenceEvent) -> list[Path]:
                     continue
                 seen.add(ref)
                 images.append(Path(ref))
-            continue
-        ref = p.local_crop_ref or p.page_thumbnail_ref
-        if not ref or ref in seen:
-            continue
-        seen.add(ref)
-        images.append(Path(ref))
+        else:
+            ref = p.local_crop_ref or p.page_thumbnail_ref
+            if ref and ref not in seen:
+                seen.add(ref)
+                images.append(Path(ref))
+        # Linked neighbor crops follow the primary crop(s) so the prompt
+        # ordering matches "primary first, then context."
+        for neighbor_ref in p.linked_crop_refs or []:
+            if not neighbor_ref or neighbor_ref in seen:
+                continue
+            seen.add(neighbor_ref)
+            images.append(Path(neighbor_ref))
     return images
 
 
