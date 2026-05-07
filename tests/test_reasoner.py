@@ -297,3 +297,36 @@ def test_render_packet_line_chart_without_confidence_renders_advisory() -> None:
     assert "Chart extraction" in line
     assert "advisory" in line
     assert "confidence=" not in line
+
+
+# ---------------------------------------------------------------------------
+# Path A: linked_neighbor_types appear in the descriptor
+# ---------------------------------------------------------------------------
+
+
+def test_render_packet_line_lists_neighbor_types() -> None:
+    """The reasoner sees which images that follow are context, by role."""
+    p = _packet(
+        linked_crop_refs=["/cache/cap.png", "/cache/foot.png"],
+        linked_neighbor_types=["caption", "footnote"],
+    )
+    line = _render_packet_line(p)
+    assert "Attached neighbors (2)" in line
+    assert "caption, footnote" in line
+
+
+def test_render_packet_line_omits_neighbors_when_empty() -> None:
+    p = _packet()  # no linked_neighbor_types
+    line = _render_packet_line(p)
+    assert "Attached neighbors" not in line
+
+
+def test_render_packet_line_neighbor_count_matches_types() -> None:
+    """Three neighbors → "Attached neighbors (3)"."""
+    p = _packet(
+        linked_crop_refs=["/a", "/b", "/c"],
+        linked_neighbor_types=["caption", "footnote", "section_header"],
+    )
+    line = _render_packet_line(p)
+    assert "Attached neighbors (3)" in line
+    assert "section_header" in line

@@ -126,11 +126,18 @@ def _render_packet_line(packet) -> str:
     Sprint Phase 3: when chart_csv is populated, the reasoner sees a
     code-fenced CSV block beneath the descriptor so axis-value
     interpolation questions land on hard data instead of guesses.
+    Path A (2026-05-06): when expand_context attached neighbors, list
+    their roles ("caption, footnote, ...") so the reasoner knows which
+    images that follow are primary focus vs context.
     """
     base = f"- {packet.packet_id}: page {packet.page}, bbox {packet.bbox_norm}"
     n_scales = len(packet.multi_scale_crops)
     if n_scales >= 2:
         base += f" — {n_scales} image scales (tight + context)"
+    if packet.linked_neighbor_types:
+        types = ", ".join(packet.linked_neighbor_types)
+        n_neighbors = len(packet.linked_neighbor_types)
+        base += f"\n  Attached neighbors ({n_neighbors}): {types}"
     if packet.chart_csv:
         conf = packet.chart_extraction_confidence
         conf_str = f" (confidence={conf:.2f})" if conf is not None else ""
