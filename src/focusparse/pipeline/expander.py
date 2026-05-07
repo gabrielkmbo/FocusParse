@@ -109,6 +109,7 @@ _FALLBACK_MAX_NEIGHBORS_PER_PACKET = 1
 _DEFAULT_ADJACENCY_PAD = 0.08
 _MAX_LINKED_CONTEXT_TEXT_CHARS = 240
 _FIGURE_REF_RE = re.compile(r"\b(?:fig(?:ure)?\.?)\s*(?P<num>\d+[A-Za-z]?)\b", re.IGNORECASE)
+_CONTEXT_LINE_RE = re.compile(r"^Context\s+\[[^\]]+\]:\s*(?P<text>.*)$", re.IGNORECASE)
 
 
 async def expand_context(
@@ -230,9 +231,11 @@ async def expand_context(
             new_packets.append(packet)
             continue
 
-        linked_refs: list[str] = []
-        linked_types: list[str] = []
+        linked_refs: list[str] = list(packet.linked_crop_refs)
+        linked_types: list[str] = list(packet.linked_neighbor_types)
         linked_texts: list[tuple[str, str]] = []
+        seen_linked_refs = {ref for ref in linked_refs if ref}
+        n_new_links = 0
         packet_figure_refs = _figure_refs_from_text(packet.text_layer_snippet, packet.ocr_snippet)
         for neighbor, role in neighbors_with_role:
             crop_ref = await _crop_neighbor(
@@ -243,11 +246,8 @@ async def expand_context(
             )
             if crop_ref is None:
                 continue
-            linked_refs.append(crop_ref)
-            # Use the graph's semantic role (caption / title / footnote /
-            # legend / axis) when present; falls back to the raw region_type
-            # for spatial-heuristic matches.
-            linked_types.append(role)
+            if crop_ref in seen_linked_refs:
+                continue
             linked_text = await _extract_neighbor_text(
                 neighbor,
                 role=role,
@@ -262,19 +262,24 @@ async def expand_context(
                     role=role,
                     linked_text=linked_text,
                 ):
-                    linked_refs.pop()
-                    linked_types.pop()
                     continue
                 linked_texts.append((role, linked_text))
+            linked_refs.append(crop_ref)
+            # Use the graph's semantic role (caption / title / footnote /
+            # legend / axis) when present; falls back to the raw region_type
+            # for spatial-heuristic matches.
+            linked_types.append(role)
+            seen_linked_refs.add(crop_ref)
+            n_new_links += 1
 
-        if not linked_refs:
+        if n_new_links == 0:
             new_packets.append(packet)
             continue
 
         updates = {
             "linked_crop_refs": linked_refs,
             "linked_neighbor_types": linked_types,
-            "provenance": _updated_provenance(packet.provenance, len(linked_refs)),
+            "provenance": _updated_provenance(packet.provenance, n_new_links),
         }
         updates.update(_context_text_updates(packet, linked_texts))
         new_packets.append(packet.model_copy(update=updates))
@@ -589,7 +594,17 @@ def _context_text_updates(
     if not linked_texts:
         return {}
 
-    context_lines = [f"Context [{role}]: {text}" for role, text in linked_texts if text.strip()]
+    seen_text_keys = _existing_context_text_keys(packet)
+    context_lines: list[str] = []
+    for role, text in linked_texts:
+        cleaned = text.strip()
+        if not cleaned:
+            continue
+        key = _context_text_key(cleaned)
+        if key in seen_text_keys:
+            continue
+        seen_text_keys.add(key)
+        context_lines.append(f"Context [{role}]: {cleaned}")
     if not context_lines:
         return {}
     context = "\n".join(context_lines)
@@ -598,6 +613,21 @@ def _context_text_updates(
     if packet.ocr_snippet:
         return {"ocr_snippet": f"{packet.ocr_snippet.rstrip()}\n{context}"}
     return {"text_layer_snippet": context}
+
+
+def _existing_context_text_keys(packet: EvidencePacket) -> set[str]:
+    """Return normalized context snippets already attached to a packet."""
+    keys: set[str] = set()
+    for snippet in (packet.text_layer_snippet, packet.ocr_snippet):
+        for line in (snippet or "").splitlines():
+            match = _CONTEXT_LINE_RE.match(line.strip())
+            if match:
+                keys.add(_context_text_key(match.group("text")))
+    return keys
+
+
+def _context_text_key(text: str) -> str:
+    return " ".join(text.split()).casefold()
 
 
 def _clean_context_text(text: str | None) -> str | None:

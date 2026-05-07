@@ -238,6 +238,102 @@ async def test_attached_neighbor_text_reaches_packet_snippet(tmp_path, monkeypat
     }
 
 
+async def test_retry_expand_does_not_duplicate_existing_neighbor_context(tmp_path, monkeypatch):
+    """Verifier retries can call expand_context on an already-expanded packet.
+    Reattaching the same caption should be a no-op, not another context line."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+
+    class _TextOut:
+        text = "Figure 31. Large-Signal Step Response"
+        source = "native"
+
+    async def _fake_get_text_layer(inp, *, cache_dir=None):
+        return _TextOut()
+
+    monkeypatch.setattr("focusparse.pipeline.expander.get_text_layer", _fake_get_text_layer)
+
+    figure = _packet(
+        packet_id="p0",
+        page=1,
+        bbox_norm=(0.1, 0.1, 0.9, 0.4),
+        region_type="picture",
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.1, 0.1, 0.9, 0.4), region_type="picture"),
+            _region(page=1, bbox_norm=(0.15, 0.42, 0.85, 0.48), region_type="caption"),
+        ]
+    )
+
+    first = await expand_context(
+        EvidenceEvent(packets=[figure]),
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+    )
+    second = await expand_context(
+        first,
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+    )
+
+    packet = second.packets[0]
+    assert packet == first.packets[0]
+    assert packet.text_layer_snippet.count("Context [caption]:") == 1
+    assert packet.provenance.args_hash.count("expand_context:n1") == 1
+
+
+async def test_expand_context_deduplicates_repeated_context_text(tmp_path, monkeypatch):
+    """Broad neighbor scans can find duplicate captions. Keep the crops, but
+    only show the reasoner/verifier one copy of the repeated text line."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+
+    class _TextOut:
+        text = "Figure 31. Large-Signal Step Response"
+        source = "native"
+
+    async def _fake_get_text_layer(inp, *, cache_dir=None):
+        return _TextOut()
+
+    monkeypatch.setattr("focusparse.pipeline.expander.get_text_layer", _fake_get_text_layer)
+
+    figure = _packet(
+        packet_id="p0",
+        page=1,
+        bbox_norm=(0.1, 0.1, 0.9, 0.4),
+        region_type="picture",
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.1, 0.1, 0.9, 0.4), region_type="picture"),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.15, 0.42, 0.85, 0.48),
+                region_type="caption",
+                relevance=0.9,
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.15, 0.45, 0.85, 0.49),
+                region_type="caption",
+                relevance=0.8,
+            ),
+        ]
+    )
+
+    out = await expand_context(
+        EvidenceEvent(packets=[figure]),
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+        max_neighbors_per_packet=2,
+    )
+
+    packet = out.packets[0]
+    assert len(packet.linked_crop_refs) == 2
+    assert packet.text_layer_snippet.count("Figure 31. Large-Signal Step Response") == 1
+
+
 async def test_mismatched_figure_caption_is_not_attached(tmp_path, monkeypatch):
     """If the packet OCR says Figure 31, a neighboring Figure 33 caption is
     misleading context and should be dropped after text extraction."""
