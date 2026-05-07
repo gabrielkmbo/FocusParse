@@ -1,10 +1,10 @@
 """Tests for `focusparse.pipeline.expander.expand_context` (sub-phase 2h).
 
 Covers the neighbor-attachment logic:
-  * passthrough when `regions` or `pdf_path` is None
+  * passthrough when no region list or no crop source is available
   * finds caption/footnote/section_header/title neighbors that overlap the
     padded packet bbox
-  * ignores unrelated region types (text/picture) even if spatially adjacent
+  * ignores unrelated region types (text/picture) unless reranker tags context
   * ignores the packet's own region (same bbox) in the candidate pool
   * caps at max_neighbors_per_packet
   * ranks neighbors by vertical distance (closer wins), tiebreaks on score
@@ -89,6 +89,14 @@ def _install_fake_inspect(monkeypatch, *, calls: list, should_fail: set | None =
     monkeypatch.setattr("focusparse.pipeline.expander.inspect_region", _fake)
 
 
+def _write_page_png(path: Path, *, size=(200, 100)) -> None:
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", size, "white")
+    ImageDraw.Draw(img).text((10, 10), "caption text", fill="black")
+    img.save(path)
+
+
 # ---------------------------------------------------------------------------
 # Passthrough paths
 # ---------------------------------------------------------------------------
@@ -102,7 +110,7 @@ async def test_passthrough_when_no_regions():
 
 
 async def test_passthrough_when_no_pdf_path():
-    """Without a PDF, we can't crop neighbors — return evidence unchanged."""
+    """Without a PDF or page image fallback, return evidence unchanged."""
     ev = EvidenceEvent(packets=[_packet(packet_id="p0", page=1, bbox_norm=(0, 0, 0.5, 0.5))])
     regions = RegionsEvent(
         candidates=[
@@ -111,6 +119,35 @@ async def test_passthrough_when_no_pdf_path():
     )
     out = await expand_context(ev, regions=regions, pdf_path=None)
     assert out.packets == ev.packets
+
+
+async def test_no_pdf_uses_page_image_for_neighbor_crop_and_text(tmp_path, monkeypatch):
+    """When PDFs are absent, linked neighbor crops can come from staged page PNGs."""
+    monkeypatch.setattr(
+        "focusparse.pipeline.expander._ocr_existing_crop",
+        lambda crop_path: ("caption from page image", 0.8),
+    )
+    page_image = tmp_path / "p1.png"
+    _write_page_png(page_image)
+    ev = EvidenceEvent(packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.1, 0.1, 0.9, 0.4))])
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.1, 0.1, 0.9, 0.4), region_type="picture"),
+            _region(page=1, bbox_norm=(0.15, 0.42, 0.85, 0.48), region_type="caption"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=None,
+        images_by_page={1: page_image},
+        crop_cache_dir=tmp_path / "crops",
+    )
+    packet = out.packets[0]
+    assert len(packet.linked_crop_refs) == 1
+    assert Path(packet.linked_crop_refs[0]).exists()
+    assert packet.linked_neighbor_types == ["caption"]
+    assert packet.text_layer_snippet == "Context [caption]: caption from page image"
 
 
 # ---------------------------------------------------------------------------
@@ -142,10 +179,111 @@ async def test_attaches_caption_below_figure(tmp_path, monkeypatch):
     packet = out.packets[0]
     assert len(packet.linked_crop_refs) == 1
     assert packet.linked_neighbor_types == ["caption"]
-    # inspect_region was called exactly once with mode=image + no expansion.
-    assert len(calls) == 1
-    assert calls[0]["mode"] == "image"
-    assert calls[0]["expansion"] == "none"
+    # inspect_region always crops the linked neighbor image; text/OCR context
+    # extraction may add more calls.
+    image_calls = [c for c in calls if c["mode"] == "image"]
+    assert len(image_calls) == 1
+    assert image_calls[0]["expansion"] == "none"
+
+
+async def test_attached_neighbor_text_reaches_packet_snippet(tmp_path, monkeypatch):
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    text_cache = tmp_path / "text_layer"
+    seen: dict = {}
+
+    class _TextOut:
+        text = "Figure 3. Output ripple at 500 mA"
+        source = "native"
+
+    async def _fake_get_text_layer(inp, *, cache_dir=None):
+        seen["page"] = inp.page
+        seen["bbox_norm"] = inp.bbox_norm
+        seen["cache_dir"] = cache_dir
+        return _TextOut()
+
+    monkeypatch.setattr("focusparse.pipeline.expander.get_text_layer", _fake_get_text_layer)
+
+    figure = _packet(
+        packet_id="p0",
+        page=1,
+        bbox_norm=(0.1, 0.1, 0.9, 0.4),
+        region_type="picture",
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.1, 0.1, 0.9, 0.4), region_type="picture"),
+            caption := _region(
+                page=1,
+                bbox_norm=(0.15, 0.42, 0.85, 0.48),
+                region_type="caption",
+            ),
+        ]
+    )
+
+    out = await expand_context(
+        EvidenceEvent(packets=[figure]),
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+        text_layer_cache_dir=text_cache,
+    )
+
+    packet = out.packets[0]
+    assert packet.linked_neighbor_types == ["caption"]
+    assert packet.text_layer_snippet == "Context [caption]: Figure 3. Output ripple at 500 mA"
+    assert seen == {
+        "page": 1,
+        "bbox_norm": list(caption.bbox_norm),
+        "cache_dir": text_cache,
+    }
+
+
+async def test_mismatched_figure_caption_is_not_attached(tmp_path, monkeypatch):
+    """If the packet OCR says Figure 31, a neighboring Figure 33 caption is
+    misleading context and should be dropped after text extraction."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+
+    class _TextOut:
+        source = "native"
+
+        def __init__(self, text: str):
+            self.text = text
+
+    async def _fake_get_text_layer(inp, *, cache_dir=None):
+        if inp.bbox_norm[1] < 0.5:
+            return _TextOut("Figure 31. Large-Signal Step Response")
+        return _TextOut("Figure 33. Large-Signal Step Response")
+
+    monkeypatch.setattr("focusparse.pipeline.expander.get_text_layer", _fake_get_text_layer)
+
+    figure = _packet(
+        packet_id="p0",
+        page=1,
+        bbox_norm=(0.1, 0.1, 0.9, 0.4),
+        region_type="picture",
+    ).model_copy(update={"ocr_snippet": "OCR: Figure 31. VOUT (400mV/div)"})
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.1, 0.1, 0.9, 0.4), region_type="picture"),
+            _region(page=1, bbox_norm=(0.15, 0.42, 0.85, 0.48), region_type="caption"),
+            _region(page=1, bbox_norm=(0.15, 0.52, 0.85, 0.58), region_type="caption"),
+        ]
+    )
+
+    out = await expand_context(
+        EvidenceEvent(packets=[figure]),
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+        max_neighbors_per_packet=2,
+    )
+
+    packet = out.packets[0]
+    assert packet.linked_neighbor_types == ["caption"]
+    assert len(packet.linked_crop_refs) == 1
+    assert "0.42" in packet.linked_crop_refs[0]
+    assert "Figure 31. Large-Signal Step Response" in packet.ocr_snippet
+    assert "Figure 33" not in packet.ocr_snippet
 
 
 async def test_ignores_non_neighbor_region_types(tmp_path, monkeypatch):
@@ -735,6 +873,34 @@ async def test_query_aware_rerank_needed_for_role_attaches(tmp_path, monkeypatch
         pdf_path=Path("/fake.pdf"),
     )
     assert "caption" in out.packets[0].linked_neighbor_types
+
+
+async def test_query_aware_needed_for_role_can_attach_plain_text(tmp_path, monkeypatch):
+    """A reranker-tagged legend/axis context block may arrive from layout as
+    plain `text`; explicit `needed_for` context roles should still attach it."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.10, 0.20, 0.50, 0.60))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.10, 0.62, 0.50, 0.66),
+                region_type="text",
+                needed_for="legend_binding",
+            ),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+    )
+    packet = out.packets[0]
+    assert len(packet.linked_crop_refs) == 1
+    assert packet.linked_neighbor_types == ["legend_binding"]
 
 
 async def test_query_aware_planner_hint_drops_unmatched_types(tmp_path, monkeypatch):

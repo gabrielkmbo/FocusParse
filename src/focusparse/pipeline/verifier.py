@@ -162,10 +162,17 @@ def _summarize_packet(packet: EvidencePacket) -> str:
     if len(snippet) > 180:
         snippet = snippet[:177] + "..."
     region = packet.region_type or "region"
+    scale_part = ""
+    if packet.multi_scale_crops:
+        scale_part = " scales=" + _fmt_scales(packet.multi_scale_crops)
     return (
         f"- [{packet.packet_id}] page={packet.page} type={region} "
-        f"bbox={_fmt_bbox(packet.bbox_norm)} text={snippet!r}"
+        f"bbox={_fmt_bbox(packet.bbox_norm)}{scale_part} text={snippet!r}"
     )
+
+
+def _fmt_scales(crops: list) -> str:
+    return "[" + ", ".join(f"{c.scale}:{_fmt_bbox(c.bbox_norm)}" for c in crops) + "]"
 
 
 def _fmt_bbox(bbox: tuple[float, float, float, float]) -> str:

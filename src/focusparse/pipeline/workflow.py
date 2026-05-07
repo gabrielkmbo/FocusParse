@@ -100,6 +100,9 @@ class FocusWorkflow:
         use_react_inspector: bool = False,
         multi_scale_packets: bool = False,
         chart_to_table_enabled: bool = False,
+        allow_layout_endpoint_fallback: bool = True,
+        layout_max_retries: int | None = None,
+        layout_timeout_s: float | None = None,
     ) -> None:
         self.backend_client = backend_client
         self.config = config
@@ -147,6 +150,12 @@ class FocusWorkflow:
         # for axis_value_interpolation / candlestick_ohlc_extraction
         # questions — most n=148 examples don't pay this cost.
         self.chart_to_table_enabled = chart_to_table_enabled
+        # Production/demo workflows can keep the historical full-page
+        # fallback. Research evals flip this off so a transient layout
+        # endpoint outage cannot contaminate headline accuracy.
+        self.allow_layout_endpoint_fallback = allow_layout_endpoint_fallback
+        self.layout_max_retries = layout_max_retries
+        self.layout_timeout_s = layout_timeout_s
 
     def _client_for(self, role: str) -> ModelClient | None:
         """Resolve a role-scoped client via `tier_router`, else return None.
@@ -169,6 +178,27 @@ class FocusWorkflow:
         if layout is None:
             return None
         return getattr(layout, "url", None)
+
+    def _layout_endpoint_retries(self) -> int | None:
+        """Resolve layout retry count from constructor override or config."""
+        if self.layout_max_retries is not None:
+            return self.layout_max_retries
+        layout = self._layout_endpoint_config()
+        return getattr(layout, "retries", None) if layout is not None else None
+
+    def _layout_endpoint_timeout_s(self) -> float | None:
+        """Resolve layout timeout from constructor override or config."""
+        if self.layout_timeout_s is not None:
+            return self.layout_timeout_s
+        layout = self._layout_endpoint_config()
+        timeout = getattr(layout, "timeout_s", None) if layout is not None else None
+        return float(timeout) if timeout is not None else None
+
+    def _layout_endpoint_config(self) -> Any | None:
+        endpoints = getattr(self.config, "endpoints", None) if self.config else None
+        if not endpoints:
+            return None
+        return endpoints.get("layout") if isinstance(endpoints, dict) else None
 
     def _layout_cache_dir(self) -> Path | None:
         """Resolve the on-disk cache dir for layout responses.
@@ -335,6 +365,7 @@ class FocusWorkflow:
             evidence,
             regions=regions,
             pdf_path=pdf_path,
+            images_by_page=images_by_page,
             adjacency_pad=adjacency_pad,
             recorder=recorder,
             step_counter=step_counter,
@@ -437,6 +468,7 @@ class FocusWorkflow:
                     evidence,
                     regions=regions,
                     pdf_path=pdf_path,
+                    images_by_page=images_by_page,
                     adjacency_pad=adjacency_pad,
                     recorder=recorder,
                     step_counter=step_counter,
@@ -449,6 +481,7 @@ class FocusWorkflow:
                     evidence,
                     regions=regions,
                     pdf_path=pdf_path,
+                    images_by_page=images_by_page,
                     adjacency_pad=adjacency_pad,
                     recorder=recorder,
                     step_counter=step_counter,
@@ -534,6 +567,9 @@ class FocusWorkflow:
             layout_endpoint_url=self._layout_endpoint_url(),
             cache_dir=self._layout_cache_dir(),
             confidence_threshold=confidence_threshold,
+            allow_endpoint_fallback=self.allow_layout_endpoint_fallback,
+            layout_max_retries=self._layout_endpoint_retries(),
+            layout_timeout_s=self._layout_endpoint_timeout_s(),
         )
         n_fallback_pages = sum(
             1 for r in regions.candidates if "skeleton_full_page" in r.supporting_signals
@@ -681,6 +717,7 @@ class FocusWorkflow:
                         "n_real_packets": n_real_packets,
                         "plan_size": result.plan_size,
                         "fallback_used": result.fallback_used,
+                        "chart_to_table_enabled": self.chart_to_table_enabled,
                         "retry_attempt": retry_attempt,
                     },
                     obs_summary=(response.text[:200] if response and response.text else None),
@@ -701,6 +738,7 @@ class FocusWorkflow:
                     "n_real_packets": n_real_packets,
                     "plan_size": result.plan_size,
                     "fallback_used": result.fallback_used,
+                    "chart_to_table_enabled": self.chart_to_table_enabled,
                     "packets": [_packet_to_debug(p) for p in evidence.packets],
                 },
             )
@@ -721,7 +759,7 @@ class FocusWorkflow:
         n_real_packets = sum(
             1 for p in evidence.packets if p.provenance.tool != "skeleton_inspector_fallback"
         )
-        inspect_tier = "deterministic" if pdf_path is not None else "skeleton"
+        inspect_tier = "deterministic" if n_real_packets > 0 else "skeleton"
         recorder.record(
             TrajectoryStep(
                 step_index=step_counter.next(),
@@ -732,6 +770,7 @@ class FocusWorkflow:
                 args={
                     "n_packets": len(evidence.packets),
                     "n_real_packets": n_real_packets,
+                    "chart_to_table_enabled": self.chart_to_table_enabled,
                     "retry_attempt": retry_attempt,
                 },
             )
@@ -745,6 +784,7 @@ class FocusWorkflow:
             payload={
                 "n_packets": len(evidence.packets),
                 "n_real_packets": n_real_packets,
+                "chart_to_table_enabled": self.chart_to_table_enabled,
                 "packets": [_packet_to_debug(p) for p in evidence.packets],
             },
         )
@@ -756,6 +796,7 @@ class FocusWorkflow:
         *,
         regions: RegionsEvent,
         pdf_path: Path | None,
+        images_by_page: dict[int, Path],
         adjacency_pad: float,
         recorder: TrajectoryRecorder,
         step_counter: _StepCounter,
@@ -795,7 +836,9 @@ class FocusWorkflow:
             evidence,
             regions=regions,
             pdf_path=pdf_path,
+            images_by_page=images_by_page,
             crop_cache_dir=self._role_cache_dir("crops"),
+            text_layer_cache_dir=self._text_layer_cache_dir(),
             adjacency_pad=adjacency_pad,
             use_evidence_graph=self.use_evidence_graph,
             plan=plan,
@@ -1125,6 +1168,7 @@ def _packet_to_debug(packet: EvidencePacket) -> dict[str, Any]:
         "confidence": packet.confidence,
         "provenance_tool": packet.provenance.tool if packet.provenance else None,
         "provenance_mode": packet.provenance.mode if packet.provenance else None,
+        "provenance_args_hash": packet.provenance.args_hash if packet.provenance else None,
     }
 
 
@@ -1249,6 +1293,7 @@ def _packet_to_summary(p: EvidencePacket) -> EvidencePacketSummary:
         region_type=p.region_type,
         local_crop_ref=p.local_crop_ref,
         linked_crop_refs=list(p.linked_crop_refs),
+        linked_neighbor_types=list(p.linked_neighbor_types),
         multi_scale_crops=[c.model_dump(mode="json") for c in p.multi_scale_crops],
         text_layer_snippet=p.text_layer_snippet,
         ocr_snippet=p.ocr_snippet,

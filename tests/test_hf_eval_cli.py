@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from focusparse.eval.metrics import AggregateMetrics
 from focusparse.eval.schemas import EvalRunResults
@@ -336,6 +337,34 @@ def test_argparse_trace_viewer_flags(script_mod, monkeypatch, tmp_path):
     assert args.trace_viewer_output == out
 
 
+def test_argparse_layout_preflight_flags(script_mod, monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_hf_eval.py",
+            "--protocol",
+            "agentic_multi_page",
+            "--agent",
+            "focus",
+            "--skip-layout-preflight",
+            "--allow-layout-fallbacks",
+            "--layout-preflight-retries",
+            "2",
+            "--layout-detect-retries",
+            "5",
+            "--layout-detect-timeout-s",
+            "45.5",
+        ],
+    )
+    args = script_mod._parse_args()
+    assert args.skip_layout_preflight is True
+    assert args.allow_layout_fallbacks is True
+    assert args.layout_preflight_retries == 2
+    assert args.layout_detect_retries == 5
+    assert args.layout_detect_timeout_s == 45.5
+
+
 def test_argparse_rejects_unknown_protocol(script_mod, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_hf_eval.py", "--protocol", "bogus"])
     with pytest.raises(SystemExit):
@@ -351,6 +380,74 @@ def test_filter_examples_by_id(script_mod):
 def test_default_trace_viewer_output(script_mod):
     path = script_mod._default_trace_viewer_output(Path("results/hf/run1"), "ex-1")
     assert path == Path("results/trace_viewer/run1/ex-1.html")
+
+
+def test_first_existing_page_image_prefers_staged_relative_path(script_mod, tmp_path):
+    image = tmp_path / "pages" / "p1.png"
+    image.parent.mkdir()
+    image.write_bytes(b"fake")
+    examples = [
+        SimpleNamespace(page_images=["missing.png"]),
+        SimpleNamespace(page_images=["pages/p1.png"]),
+    ]
+    assert script_mod._first_existing_page_image(examples, tmp_path) == image
+
+
+def test_first_existing_page_image_accepts_absolute_path(script_mod, tmp_path):
+    image = tmp_path / "abs.png"
+    image.write_bytes(b"fake")
+    examples = [SimpleNamespace(page_images=[str(image)])]
+    assert script_mod._first_existing_page_image(examples, tmp_path / "unused") == image
+
+
+def test_first_existing_page_image_raises_when_missing(script_mod, tmp_path):
+    examples = [SimpleNamespace(page_images=["missing.png"])]
+    with pytest.raises(RuntimeError, match="no staged page image"):
+        script_mod._first_existing_page_image(examples, tmp_path)
+
+
+async def test_layout_preflight_calls_detect_with_uncached_staged_image(script_mod, tmp_path):
+    image = tmp_path / "page.png"
+    Image.new("RGB", (7, 5), color="white").save(image)
+    calls: list[dict] = []
+
+    async def _fake_detect(png_bytes, **kwargs):
+        calls.append({"png_bytes": png_bytes, **kwargs})
+        return SimpleNamespace(boxes=[object(), object()])
+
+    await script_mod._preflight_layout_endpoint(
+        [SimpleNamespace(page_images=["page.png"])],
+        images_root=tmp_path,
+        max_retries=2,
+        timeout_s=3.0,
+        detect_layout_func=_fake_detect,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["png_bytes"] == image.read_bytes()
+    assert calls[0]["image_width"] == 7
+    assert calls[0]["image_height"] == 5
+    assert calls[0]["cache_dir"] is None
+    assert calls[0]["max_retries"] == 2
+    assert calls[0]["timeout_s"] == 3.0
+
+
+async def test_layout_preflight_wraps_endpoint_failure(script_mod, tmp_path):
+    from focusparse.tools.layout_detect import LayoutEndpointUnavailable
+
+    image = tmp_path / "page.png"
+    Image.new("RGB", (7, 5), color="white").save(image)
+
+    async def _fake_detect(*args, **kwargs):
+        raise LayoutEndpointUnavailable("503 on attempt 1")
+
+    with pytest.raises(RuntimeError, match="503 on attempt 1"):
+        await script_mod._preflight_layout_endpoint(
+            [SimpleNamespace(page_images=[str(image)])],
+            images_root=tmp_path,
+            max_retries=1,
+            detect_layout_func=_fake_detect,
+        )
 
 
 def test_render_trace_viewer_writes_html(script_mod, tmp_path):

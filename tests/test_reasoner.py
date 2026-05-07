@@ -16,7 +16,11 @@ from focusparse.evidence.packet import (
     PacketProvenance,
 )
 from focusparse.pipeline.events import EvidenceEvent
-from focusparse.pipeline.reasoner import _collect_packet_images, _render_packet_line
+from focusparse.pipeline.reasoner import (
+    _MAX_PACKET_TEXT_CHARS,
+    _collect_packet_images,
+    _render_packet_line,
+)
 
 
 def _packet(
@@ -29,6 +33,8 @@ def _packet(
     multi_scale: list[CropRef] | None = None,
     linked_crop_refs: list[str] | None = None,
     linked_neighbor_types: list[str] | None = None,
+    text_layer_snippet: str | None = None,
+    ocr_snippet: str | None = None,
 ) -> EvidencePacket:
     return EvidencePacket(
         packet_id=packet_id,
@@ -39,6 +45,8 @@ def _packet(
         multi_scale_crops=multi_scale or [],
         linked_crop_refs=linked_crop_refs or [],
         linked_neighbor_types=linked_neighbor_types or [],
+        text_layer_snippet=text_layer_snippet,
+        ocr_snippet=ocr_snippet,
         provenance=PacketProvenance(tool="t", args_hash=""),
     )
 
@@ -247,8 +255,26 @@ def test_render_packet_line_multi_scale_packet() -> None:
         ]
     )
     line = _render_packet_line(p)
-    assert "2 image scales" in line
-    assert "tight + context" in line
+    assert "2 image scales in order" in line
+    assert "tight [0.000, 0.000, 1.000, 1.000]" in line
+    assert "context [0.000, 0.000, 1.000, 1.000]" in line
+
+
+def test_render_packet_line_names_chart_context_scale() -> None:
+    """chart_context is a distinct wider crop, not a generic neighbor."""
+    p = _packet(
+        multi_scale=[
+            CropRef(ref="/a.png", bbox_norm=(0.1, 0.2, 0.4, 0.5), scale="tight"),
+            CropRef(
+                ref="/b.png",
+                bbox_norm=(0.0, 0.1, 0.6, 0.7),
+                scale="chart_context",
+            ),
+        ]
+    )
+    line = _render_packet_line(p)
+    assert "chart_context [0.000, 0.100, 0.600, 0.700]" in line
+    assert "wider crop for axes, legends, and curve geometry" in line
 
 
 def test_render_packet_line_single_scale_does_not_annotate() -> None:
@@ -260,6 +286,33 @@ def test_render_packet_line_single_scale_does_not_annotate() -> None:
     )
     line = _render_packet_line(p)
     assert "image scales" not in line
+
+
+def test_render_packet_line_includes_native_text_snippet() -> None:
+    p = _packet(text_layer_snippet="VCC max 3.6 V\nConditions: TA = 25 C")
+    line = _render_packet_line(p)
+    assert "Extracted text" in line
+    assert "VCC max 3.6 V Conditions: TA = 25 C" in line
+
+
+def test_render_packet_line_falls_back_to_ocr_snippet() -> None:
+    p = _packet(ocr_snippet="axis label: Gross margin")
+    line = _render_packet_line(p)
+    assert "axis label: Gross margin" in line
+
+
+def test_render_packet_line_prefers_native_text_over_ocr() -> None:
+    p = _packet(text_layer_snippet="native text", ocr_snippet="ocr text")
+    line = _render_packet_line(p)
+    assert "native text" in line
+    assert "ocr text" not in line
+
+
+def test_render_packet_line_truncates_long_text_snippet() -> None:
+    p = _packet(text_layer_snippet="x" * (_MAX_PACKET_TEXT_CHARS + 20))
+    line = _render_packet_line(p)
+    assert ("x" * _MAX_PACKET_TEXT_CHARS) not in line
+    assert "..." in line
 
 
 # ---------------------------------------------------------------------------

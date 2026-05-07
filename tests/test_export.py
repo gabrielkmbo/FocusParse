@@ -1,4 +1,4 @@
-"""Tests for trajectory JSONL export + schema v3."""
+"""Tests for trajectory JSONL export + schema v4."""
 
 from __future__ import annotations
 
@@ -43,6 +43,8 @@ def _make_trace(*, with_snapshot: bool = False) -> RunTrace:
                     bbox_norm=(0.0, 0.0, 0.5, 0.5),
                     region_type="picture",
                     local_crop_ref="cache/crops/abc.png",
+                    linked_crop_refs=["cache/crops/caption.png"],
+                    linked_neighbor_types=["caption"],
                 ),
             ]
         )
@@ -69,13 +71,13 @@ def _make_trace(*, with_snapshot: bool = False) -> RunTrace:
     )
 
 
-def test_schema_version_is_3() -> None:
-    assert SCHEMA_VERSION == "3"
+def test_schema_version_is_4() -> None:
+    assert SCHEMA_VERSION == "4"
 
 
 def test_record_includes_schema_version_and_evidence_snapshot_field() -> None:
     rec = trace_to_sft_record(_make_trace(with_snapshot=False))
-    assert rec["schema_version"] == "3"
+    assert rec["schema_version"] == "4"
     assert "evidence_snapshot" in rec
     assert rec["evidence_snapshot"] is None
     assert rec["artifacts"][0]["path"] == "cache/crops/abc.png"
@@ -88,6 +90,7 @@ def test_record_with_snapshot_round_trip() -> None:
     assert len(rec["evidence_snapshot"]) == 1
     assert rec["evidence_snapshot"][0]["packet_id"] == "pkt_000"
     assert rec["evidence_snapshot"][0]["local_crop_ref"] == "cache/crops/abc.png"
+    assert rec["evidence_snapshot"][0]["linked_neighbor_types"] == ["caption"]
 
 
 def test_export_sft_jsonl_writes_filtered_records(tmp_path) -> None:
@@ -102,7 +105,7 @@ def test_export_sft_jsonl_writes_filtered_records(tmp_path) -> None:
     assert n == 1
     line = out.read_text().strip()
     parsed = json.loads(line)
-    assert parsed["schema_version"] == "3"
+    assert parsed["schema_version"] == "4"
     assert parsed["evidence_snapshot"][0]["packet_id"] == "pkt_000"
     # SFT records carry references only; image bytes are HTML-renderer-only.
     assert "data:image" not in line

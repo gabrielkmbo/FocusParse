@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from focusparse.evidence.packet import EvidencePacket, PacketProvenance
+from focusparse.evidence.packet import CropRef, EvidencePacket, PacketProvenance
 from focusparse.models.base import ModelResponse
 from focusparse.pipeline.events import (
     AnswerEvent,
@@ -205,6 +205,26 @@ async def test_verify_prompt_includes_packet_summary_and_citations():
     # reasoner's answer + cited packet_ids are visible.
     assert "3.6 V" in prompt
     assert "pA" in prompt
+
+
+async def test_verify_prompt_summarizes_multi_scale_chart_context():
+    client = _FakeVerifierClient(
+        '{"supported": true, "reason": "ok", "next_action": "accept", "confidence": 0.9}'
+    )
+    packet = _packet("pA")
+    packet.multi_scale_crops = [
+        CropRef(ref="/tight.png", bbox_norm=(0.1, 0.2, 0.4, 0.3), scale="tight"),
+        CropRef(ref="/chart.png", bbox_norm=(0.0, 0.1, 0.6, 0.5), scale="chart_context"),
+    ]
+    await verify_answer(
+        _question(domain="datasheet"),
+        _evidence(packet),
+        _answer(citations=["pA"]),
+        backend_client=client,
+    )
+    prompt = client.calls[0]["prompt"]
+    assert "scales=[tight:[0.100, 0.200, 0.400, 0.300]" in prompt
+    assert "chart_context:[0.000, 0.100, 0.600, 0.500]" in prompt
 
 
 # ---------------------------------------------------------------------------

@@ -2,10 +2,12 @@
 
 Phase 2 sub-phase 2e replaces the skeleton full-page placeholder with a call
 to the HF layout endpoint per candidate page. Detected boxes are translated
-into `RegionCandidate`s with normalized bboxes; any endpoint failure
-(`LayoutEndpointUnavailable` or `StubResponseError`) degrades to the old
-full-page skeleton region for *that page only*, so the workflow always has
-something to feed the inspector.
+into `RegionCandidate`s with normalized bboxes. By default, any endpoint
+failure (`LayoutEndpointUnavailable` or `StubResponseError`) degrades to the
+old full-page skeleton region for *that page only*, so the workflow always has
+something to feed the inspector. Research evals can pass
+`allow_endpoint_fallback=False` to fail fast instead of mixing endpoint outage
+behavior into headline numbers.
 
 The localizer serializes its calls (one `await` per page) to respect the
 endpoint's ≤ 2 req/s shared-usage budget. It does NOT enforce a global rate
@@ -61,6 +63,9 @@ async def propose_regions(
     hf_token: str | None = None,
     cache_dir: Path | None = None,
     confidence_threshold: float = _DEFAULT_CONFIDENCE_THRESHOLD,
+    allow_endpoint_fallback: bool = True,
+    layout_max_retries: int | None = None,
+    layout_timeout_s: float | None = None,
 ) -> RegionsEvent:
     """Propose candidate regions per page, with deterministic fallback.
 
@@ -73,6 +78,10 @@ async def propose_regions(
         hf_token: override the `$HF_TOKEN` env var.
         cache_dir: where `detect_layout` persists responses. If None, no cache.
         confidence_threshold: drop detector boxes below this score.
+        allow_endpoint_fallback: when False, endpoint outage/stub errors are
+            re-raised instead of converted to full-page skeleton regions.
+        layout_max_retries / layout_timeout_s: optional transport overrides
+            forwarded to `detect_layout`.
 
     Returns:
         A `RegionsEvent` with at least one candidate per page that was
@@ -100,8 +109,12 @@ async def propose_regions(
                 hf_token=hf_token,
                 cache_dir=cache_dir,
                 confidence_threshold=confidence_threshold,
+                layout_max_retries=layout_max_retries,
+                layout_timeout_s=layout_timeout_s,
             )
         except LayoutEndpointUnavailable as exc:
+            if not allow_endpoint_fallback:
+                raise
             logger.warning(
                 "layout endpoint unavailable on page=%d (%s); emitting skeleton region",
                 pc.page,
@@ -110,6 +123,8 @@ async def propose_regions(
             candidates.append(_skeleton_region(pc, signal="layout_endpoint_down"))
             continue
         except StubResponseError as exc:
+            if not allow_endpoint_fallback:
+                raise
             logger.warning(
                 "layout endpoint returned stub on page=%d (%s); emitting skeleton region",
                 pc.page,
@@ -142,10 +157,17 @@ async def _detect_for_page(
     hf_token: str | None,
     cache_dir: Path | None,
     confidence_threshold: float,
+    layout_max_retries: int | None,
+    layout_timeout_s: float | None,
 ) -> list[RegionCandidate]:
     """Call `detect_layout` on one page and translate the boxes to candidates."""
     png_bytes = Path(image_path).read_bytes()
     width, height = _png_dimensions(png_bytes)
+    transport_kwargs: dict[str, float | int] = {}
+    if layout_max_retries is not None:
+        transport_kwargs["max_retries"] = layout_max_retries
+    if layout_timeout_s is not None:
+        transport_kwargs["timeout_s"] = layout_timeout_s
 
     out = await detect_layout(
         png_bytes,
@@ -156,6 +178,7 @@ async def _detect_for_page(
         hf_token=hf_token,
         cache_dir=cache_dir,
         confidence_threshold=confidence_threshold,
+        **transport_kwargs,
     )
 
     regions: list[RegionCandidate] = []

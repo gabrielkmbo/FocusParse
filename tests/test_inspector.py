@@ -3,7 +3,7 @@
 Covers the smart-deterministic tool dispatcher:
   * budget: plan.max_crops caps how many regions get inspected
   * ranking: higher-score regions go first
-  * visual regions (picture/chart) get crop only, no OCR
+  * visual regions (picture/chart) get crop plus advisory OCR
   * text regions with a PDF use get_text_layer
   * OCR fallback when native text is empty (image-only PDFs)
   * OCR fallback when no PDF is supplied at all
@@ -25,7 +25,7 @@ from focusparse.pipeline.events import (
     RegionCandidate,
     RegionsEvent,
 )
-from focusparse.pipeline.inspector import inspect_regions
+from focusparse.pipeline.inspector import _chart_scale_hint, inspect_regions
 
 
 def _q() -> QuestionEvent:
@@ -127,6 +127,14 @@ def _install_fake_tools(
     monkeypatch.setattr("focusparse.pipeline.inspector.get_text_layer", _fake_text_layer)
 
 
+def _write_page_png(path, *, size=(200, 100)):
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", size, "white")
+    ImageDraw.Draw(img).text((10, 10), "hello", fill="black")
+    img.save(path)
+
+
 # ---------------------------------------------------------------------------
 # Budget + ranking
 # ---------------------------------------------------------------------------
@@ -187,7 +195,7 @@ async def test_inspect_regions_ranks_by_score_desc(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_visual_region_skips_ocr(tmp_path, monkeypatch):
+async def test_visual_region_gets_advisory_ocr(tmp_path, monkeypatch):
     inspect_calls: list = []
     text_calls: list = []
     _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
@@ -212,13 +220,17 @@ async def test_visual_region_skips_ocr(tmp_path, monkeypatch):
         images_by_page={1: tmp_path / "p1.png"},
         pdf_path=pdf,
     )
-    # Only the image-mode crop call; no get_text_layer, no element-mode OCR.
-    assert [c["mode"] for c in inspect_calls] == ["image"]
+    # Visual packets still skip native text extraction, but now get an
+    # advisory element-mode OCR pass for embedded labels/callouts.
+    assert [c["mode"] for c in inspect_calls] == ["image", "element"]
     assert text_calls == []
     packet = ev.packets[0]
-    assert packet.ocr_snippet is None
+    assert packet.ocr_snippet == "OCR TEXT"
     assert packet.text_layer_snippet is None
     assert packet.commit_level == "image"
+    assert packet.confidence == pytest.approx(0.9)
+    assert packet.provenance.mode == "visual"
+    assert "inspect_region:element" in packet.provenance.args_hash
 
 
 async def test_text_region_uses_native_text_layer(tmp_path, monkeypatch):
@@ -372,12 +384,17 @@ async def test_unknown_region_type_still_gets_ocr(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_no_pdf_path_produces_fallback_packets(tmp_path, monkeypatch):
-    """Without a PDF, no tool calls are made; we still emit packets with the
-    page image as a fallback ref so downstream stages don't see an empty set."""
+async def test_no_pdf_path_crops_page_image_when_available(tmp_path, monkeypatch):
+    """Without a PDF, inspect can still crop the staged page PNG and OCR it."""
     inspect_calls: list = []
     text_calls: list = []
     _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    monkeypatch.setattr(
+        "focusparse.pipeline.inspector._ocr_existing_crop",
+        lambda crop_path: ("OCR FROM PAGE IMAGE", 0.77),
+    )
+    page_image = tmp_path / "p1.png"
+    _write_page_png(page_image)
 
     regions = RegionsEvent(
         candidates=[
@@ -390,16 +407,47 @@ async def test_no_pdf_path_produces_fallback_packets(tmp_path, monkeypatch):
         _q(),
         _plan(),
         regions,
-        images_by_page={1: tmp_path / "p1.png"},
+        images_by_page={1: page_image},
+        pdf_path=None,
+    )
+    assert inspect_calls == []
+    assert text_calls == []
+    packet = ev.packets[0]
+    assert packet.provenance.tool == "deterministic_inspector"
+    assert packet.local_crop_ref != str(page_image)
+    assert packet.page_thumbnail_ref == str(page_image)
+    assert packet.ocr_snippet == "OCR FROM PAGE IMAGE"
+    assert packet.confidence == pytest.approx(0.77)
+    assert "page_image_crop:image" in packet.provenance.args_hash
+    assert "page_image_crop:ocr" in packet.provenance.args_hash
+
+
+async def test_no_pdf_missing_page_image_produces_fallback_packets(tmp_path, monkeypatch):
+    """If both PDF and staged image are missing, preserve the old skeleton packet."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="r", page=1, bbox_norm=(0, 0, 0.5, 0.5), region_type="text", score=0.9
+            )
+        ]
+    )
+    missing_image = tmp_path / "p1.png"
+    ev = await inspect_regions(
+        _q(),
+        _plan(),
+        regions,
+        images_by_page={1: missing_image},
         pdf_path=None,
     )
     assert inspect_calls == []
     assert text_calls == []
     packet = ev.packets[0]
     assert packet.provenance.tool == "skeleton_inspector_fallback"
-    # page_thumbnail + local_crop both point at the page image, matching the
-    # pre-2g skeleton behavior.
-    assert packet.local_crop_ref == str(tmp_path / "p1.png")
+    assert packet.local_crop_ref == str(missing_image)
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +590,139 @@ async def test_figure_evidence_type_boosts_picture_over_text(tmp_path, monkeypat
     )
     # Picture (0.7 * 1.5 = 1.05) > text (0.92) > header (0.88).
     assert [p.region_type for p in ev.packets] == ["picture", "text", "section_header"]
+
+
+async def test_chart_question_prefers_chart_subclass_over_generic_pictures(tmp_path, monkeypatch):
+    """For chart-reading plans, a lower-confidence line_chart is better
+    evidence than high-confidence logos or generic picture containers."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="logo",
+                page=1,
+                bbox_norm=(0.0, 0.0, 0.2, 0.1),
+                region_type="picture",
+                score=0.95,
+                supporting_signals=["figure_class=logo"],
+            ),
+            _region(
+                region_id="full_panel",
+                page=1,
+                bbox_norm=(0.0, 0.1, 1.0, 0.9),
+                region_type="picture",
+                score=0.90,
+                supporting_signals=["figure_class=other"],
+            ),
+            _region(
+                region_id="plot",
+                page=1,
+                bbox_norm=(0.2, 0.2, 0.7, 0.7),
+                region_type="picture",
+                score=0.62,
+                supporting_signals=["figure_class=line_chart"],
+            ),
+        ]
+    )
+
+    ev = await inspect_regions(
+        _q(),
+        _plan_with_evidence(["chart"], max_crops=3),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+    )
+    assert ev.packets[0].bbox_norm == (0.2, 0.2, 0.7, 0.7)
+
+
+async def test_chart_packet_order_uses_ocr_question_overlap(tmp_path, monkeypatch):
+    """After OCR, chart packets mentioning the asked series/unit should appear
+    before adjacent chart packets with higher detector score but wrong labels."""
+    text_calls: list = []
+
+    async def _fake_inspect(inp, *, cache_dir=None):
+        if inp.mode == "image":
+            return _FakeInspectOutput(
+                crop_ref=f"/crops/{inp.bbox_norm[0]}_image.png", ocr_text=None
+            )
+        if inp.bbox_norm[0] < 0.2:
+            return _FakeInspectOutput(
+                crop_ref=f"/crops/{inp.bbox_norm[0]}_element.png",
+                ocr_text="Figure 32. Large-Signal Step Response 50mV/div",
+                confidence=0.85,
+            )
+        return _FakeInspectOutput(
+            crop_ref=f"/crops/{inp.bbox_norm[0]}_element.png",
+            ocr_text="Figure 31. Large-Signal Step Response V_OUT (400mV/div)",
+            confidence=0.85,
+        )
+
+    async def _fake_text_layer(inp, *, cache_dir=None):
+        text_calls.append(inp)
+        return _FakeTextLayerOutput(text="")
+
+    monkeypatch.setattr("focusparse.pipeline.inspector.inspect_region", _fake_inspect)
+    monkeypatch.setattr("focusparse.pipeline.inspector.get_text_layer", _fake_text_layer)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="wrong_chart",
+                page=1,
+                bbox_norm=(0.1, 0.1, 0.4, 0.4),
+                region_type="picture",
+                score=0.90,
+                supporting_signals=["figure_class=line_chart"],
+            ),
+            _region(
+                region_id="matching_chart",
+                page=1,
+                bbox_norm=(0.2, 0.2, 0.5, 0.5),
+                region_type="picture",
+                score=0.80,
+                supporting_signals=["figure_class=line_chart"],
+            ),
+        ]
+    )
+    question = _q().model_copy(
+        update={"question": "Estimate the minimum V_OUT value in millivolts."}
+    )
+
+    ev = await inspect_regions(
+        question,
+        _plan_with_evidence(["chart"], max_crops=2),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+    )
+    assert ev.packets[0].bbox_norm == (0.2, 0.2, 0.5, 0.5)
+
+
+def test_chart_scale_hint_extracts_oscilloscope_scales() -> None:
+    hint = _chart_scale_hint(
+        "Figure 31. Large-Signal Step Response Vour (400mV/div) Viny (200mV/div) Time (2.5us/div)"
+    )
+    assert hint == ("Detected chart scales: VOUT=400mV/div; VIN=200mV/div; TIME=2.5us/div.")
+
+
+def test_chart_scale_hint_calls_out_question_target_scale() -> None:
+    hint = _chart_scale_hint(
+        "Figure 31. Viny (200mV/div) Vour (400mV/div) Time (2.5us/div)",
+        question_text="Estimate the minimum V_OUT value in millivolts.",
+    )
+    assert hint == (
+        "Detected chart scales: VIN=200mV/div; VOUT=400mV/div; "
+        "TIME=2.5us/div. Question target scale: VOUT=400mV/div. "
+        "For waveform values, count vertical divisions from the plot's "
+        "zero/reference gridline using the target curve's scale."
+    )
 
 
 async def test_table_evidence_type_boosts_table_regions(tmp_path, monkeypatch):
@@ -1129,18 +1310,10 @@ async def test_multi_scale_skipped_when_no_pdf(tmp_path, monkeypatch):
     assert ev.packets[0].multi_scale_crops == []
 
 
-# ---------------------------------------------------------------------------
-# 2026-05-04 sprint Phase 3: chart_to_table conditional (Phase 6 #7)
-# ---------------------------------------------------------------------------
-
-
-async def test_chart_to_table_fires_only_for_chart_question_families(tmp_path, monkeypatch):
-    """chart_to_table runs when (a) the flag is on, (b) plan.question_family ∈
-    {axis_value_interpolation, candlestick_ohlc_extraction}, and (c) the region
-    has figure_class:bar_chart|line_chart|candlestick.
-
-    All three conditions must hold; otherwise the helper is silent.
-    """
+async def test_chart_extraction_adds_chart_context_crop_without_multi_scale(tmp_path, monkeypatch):
+    """Chart extraction gets a modest context crop even when the larger
+    multi_scale experiment is off. This gives visual chart reads nearby axes
+    without enabling broad 30%-padded context on every packet."""
     inspect_calls: list = []
     text_calls: list = []
     _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
@@ -1151,10 +1324,168 @@ async def test_chart_to_table_fires_only_for_chart_question_families(tmp_path, m
         from focusparse.tools.chart_to_table import ChartToTableOutput
 
         chart_calls.append({"crop_ref": inp.crop_ref})
+        return ChartToTableOutput(table_csv="", confidence=0.0, n_points=0)
+
+    monkeypatch.setattr(
+        "focusparse.tools.chart_to_table.chart_to_table",
+        _fake_chart_to_table,
+    )
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    chart_region = _region(
+        region_id="chart0",
+        page=1,
+        bbox_norm=(0.20, 0.30, 0.50, 0.60),
+        score=0.9,
+        region_type="picture",
+        supporting_signals=["figure_class=line_chart"],
+    )
+    plan = _plan().model_copy(
+        update={
+            "question_family": "curve_axis_reading",
+            "evidence_types": ["chart"],
+        }
+    )
+
+    ev = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=[chart_region]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=True,
+        multi_scale=False,
+    )
+
+    pkt = ev.packets[0]
+    assert len(chart_calls) == 1
+    assert len(pkt.multi_scale_crops) == 2
+    assert pkt.multi_scale_crops[0].scale == "tight"
+    assert pkt.multi_scale_crops[0].bbox_norm == (0.20, 0.30, 0.50, 0.60)
+    assert pkt.multi_scale_crops[1].scale == "chart_context"
+    assert pkt.multi_scale_crops[1].bbox_norm == pytest.approx(
+        (0.08, 0.18, 0.62, 0.72),
+        abs=1e-6,
+    )
+    assert "inspect_region:chart_context" in pkt.provenance.args_hash
+    assert "chart_to_table:attempt" in pkt.provenance.args_hash
+    assert "chart_to_table:empty" in pkt.provenance.args_hash
+
+    image_calls = [call for call in inspect_calls if call["mode"] == "image"]
+    assert tuple(image_calls[0]["bbox_norm"]) == (0.20, 0.30, 0.50, 0.60)
+    assert tuple(image_calls[1]["bbox_norm"]) == pytest.approx(
+        (0.08, 0.18, 0.62, 0.72),
+        abs=1e-6,
+    )
+
+
+async def test_chart_context_crop_dropped_when_target_scale_is_already_visible(
+    tmp_path, monkeypatch
+):
+    """If OCR already exposes the requested per-division scale, keep the
+    packet tight so adjacent charts do not distract visual interpolation."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(
+        monkeypatch,
+        inspect_calls=inspect_calls,
+        text_calls=text_calls,
+        inspect_element_out=_FakeInspectOutput(
+            crop_ref="/crops/p1_element.png",
+            ocr_text="Figure 31. Vout (400mV/div) Time (2.5us/div)",
+            confidence=0.85,
+        ),
+    )
+
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None):
+        from focusparse.tools.chart_to_table import ChartToTableOutput
+
+        return ChartToTableOutput(table_csv="", confidence=0.0, n_points=0)
+
+    monkeypatch.setattr(
+        "focusparse.tools.chart_to_table.chart_to_table",
+        _fake_chart_to_table,
+    )
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    chart_region = _region(
+        region_id="chart0",
+        page=1,
+        bbox_norm=(0.20, 0.30, 0.50, 0.60),
+        score=0.9,
+        region_type="picture",
+        supporting_signals=["figure_class=line_chart"],
+    )
+    plan = _plan().model_copy(
+        update={
+            "question_family": "axis_value_interpolation",
+            "evidence_types": ["chart"],
+        }
+    )
+    question = _q().model_copy(
+        update={"question": "Estimate the minimum V_OUT value in millivolts."}
+    )
+
+    ev = await inspect_regions(
+        question,
+        plan,
+        RegionsEvent(candidates=[chart_region]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=True,
+        multi_scale=False,
+    )
+
+    pkt = ev.packets[0]
+    assert pkt.multi_scale_crops == []
+    assert "Question target scale: VOUT=400mV/div" in pkt.ocr_snippet
+    assert "inspect_region:chart_context" not in pkt.provenance.args_hash
+    assert [call["mode"] for call in inspect_calls].count("image") == 2
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-04 sprint Phase 3: chart_to_table conditional (Phase 6 #7)
+# ---------------------------------------------------------------------------
+
+
+async def test_chart_to_table_fires_only_for_chart_question_families(tmp_path, monkeypatch):
+    """chart_to_table runs when (a) the flag is on, (b) plan.question_family ∈
+    {axis_value_interpolation, candlestick_ohlc_extraction, curve_axis_reading}
+    or plan.evidence_types contains chart, and (c) the region has
+    figure_class=bar_chart|line_chart|candlestick (or legacy colon form).
+
+    All three conditions must hold; otherwise the helper is silent.
+    """
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(
+        monkeypatch,
+        inspect_calls=inspect_calls,
+        text_calls=text_calls,
+        inspect_element_out=_FakeInspectOutput(
+            crop_ref="/crops/p1_element.png",
+            ocr_text="Figure 31. Vour (400mV/div) Time (2.5us/div)",
+            confidence=0.85,
+        ),
+    )
+
+    chart_calls: list = []
+    chart_output = {
+        "table_csv": "x_value,y_value\n0,5\n1,10",
+        "confidence": 0.7,
+        "n_points": 2,
+    }
+
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None):
+        from focusparse.tools.chart_to_table import ChartToTableOutput
+
+        chart_calls.append({"crop_ref": inp.crop_ref})
         return ChartToTableOutput(
-            table_csv="x_value,y_value\n0,5\n1,10",
-            confidence=0.7,
-            n_points=2,
+            table_csv=chart_output["table_csv"],
+            confidence=chart_output["confidence"],
+            n_points=chart_output["n_points"],
         )
 
     monkeypatch.setattr(
@@ -1187,6 +1518,10 @@ async def test_chart_to_table_fires_only_for_chart_question_families(tmp_path, m
     assert len(chart_calls) == 1
     assert ev.packets[0].chart_csv == "x_value,y_value\n0,5\n1,10"
     assert ev.packets[0].chart_extraction_confidence == 0.7
+    assert "chart_to_table:attempt" in ev.packets[0].provenance.args_hash
+    assert "chart_to_table:n=2" in ev.packets[0].provenance.args_hash
+    assert ev.packets[0].ocr_snippet.startswith("Chart packet: figure_class=bar_chart")
+    assert "chart_to_table=csv(2 points)" in ev.packets[0].ocr_snippet
 
     # Case 2: same chart, but non-chart question family → no extraction.
     chart_calls.clear()
@@ -1202,7 +1537,22 @@ async def test_chart_to_table_fires_only_for_chart_question_families(tmp_path, m
     assert chart_calls == []
     assert ev2.packets[0].chart_csv is None
 
+    # Case 2b: a planner family miss can still fire when evidence_types asks for charts.
+    chart_calls.clear()
+    plan2b = plan2.model_copy(update={"evidence_types": ["chart"]})
+    ev2b = await inspect_regions(
+        _q(),
+        plan2b,
+        RegionsEvent(candidates=[chart_region]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=True,
+    )
+    assert len(chart_calls) == 1
+    assert ev2b.packets[0].chart_csv == "x_value,y_value\n0,5\n1,10"
+
     # Case 3: chart family but the flag is off → no extraction.
+    chart_calls.clear()
     ev3 = await inspect_regions(
         _q(),
         plan,
@@ -1214,7 +1564,44 @@ async def test_chart_to_table_fires_only_for_chart_question_families(tmp_path, m
     assert chart_calls == []
     assert ev3.packets[0].chart_csv is None
 
-    # Case 4: chart family + flag on, but the region is a text region → no extraction.
+    # Case 4: live localizer signal form uses figure_class=<name> and should fire.
+    chart_calls.clear()
+    chart_region_equals = chart_region.model_copy(
+        update={"supporting_signals": ["figure_class=line_chart"]}
+    )
+    ev4 = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=[chart_region_equals]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=True,
+    )
+    assert len(chart_calls) == 1
+    assert ev4.packets[0].chart_csv == "x_value,y_value\n0,5\n1,10"
+    assert "chart_to_table:attempt" in ev4.packets[0].provenance.args_hash
+
+    # Case 5: attempted chart extraction that yields no table is visible in provenance.
+    chart_calls.clear()
+    chart_output.update({"table_csv": "", "confidence": 0.0, "n_points": 0})
+    ev5 = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=[chart_region_equals]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=True,
+    )
+    assert len(chart_calls) == 1
+    assert ev5.packets[0].chart_csv is None
+    assert ev5.packets[0].chart_extraction_confidence == 0.0
+    assert "chart_to_table:attempt" in ev5.packets[0].provenance.args_hash
+    assert "chart_to_table:empty" in ev5.packets[0].provenance.args_hash
+    assert "chart_to_table=empty" in ev5.packets[0].ocr_snippet
+    assert "Detected chart scales: VOUT=400mV/div" in ev5.packets[0].ocr_snippet
+
+    # Case 6: chart family + flag on, but the region is a text region → no extraction.
+    chart_calls.clear()
     text_region = _region(
         region_id="t0",
         page=1,
@@ -1222,7 +1609,7 @@ async def test_chart_to_table_fires_only_for_chart_question_families(tmp_path, m
         score=0.95,
         region_type="text",
     )
-    ev4 = await inspect_regions(
+    ev6 = await inspect_regions(
         _q(),
         plan,
         RegionsEvent(candidates=[text_region]),
@@ -1231,7 +1618,7 @@ async def test_chart_to_table_fires_only_for_chart_question_families(tmp_path, m
         chart_to_table_enabled=True,
     )
     assert chart_calls == []
-    assert ev4.packets[0].chart_csv is None
+    assert ev6.packets[0].chart_csv is None
 
 
 # ---------------------------------------------------------------------------

@@ -174,11 +174,13 @@ def build_view_model(
         for pkt in snapshot:
             crop_path = resolve_crop_ref(pkt.get("local_crop_ref"), search_dirs=search_dirs)
             linked = []
-            for ref in pkt.get("linked_crop_refs") or []:
+            linked_types = pkt.get("linked_neighbor_types") or []
+            for idx, ref in enumerate(pkt.get("linked_crop_refs") or []):
                 linked_path = resolve_crop_ref(ref, search_dirs=search_dirs)
                 linked.append(
                     {
                         "ref": ref,
+                        "neighbor_type": (linked_types[idx] if idx < len(linked_types) else None),
                         "data_url": image_to_data_url(linked_path) if linked_path else None,
                     }
                 )
@@ -208,6 +210,7 @@ def build_view_model(
                     "chart_extraction_confidence": pkt.get("chart_extraction_confidence"),
                     "crop_data_url": (image_to_data_url(crop_path) if crop_path else None),
                     "linked_data_urls": linked,
+                    "linked_neighbor_types": linked_types,
                     "multi_scale_crops": multi_scale,
                 }
             )
@@ -542,7 +545,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
         (pkt.linked_data_urls || []).length
           ? el('div', { class: 'grid grid-cols-2 gap-2 mb-2' },
               pkt.linked_data_urls.map((c, idx) => el('div', { class: 'text-xs' },
-                el('div', { class: 'text-slate-500 mb-1' }, `linked ${idx + 1}`),
+                el('div', { class: 'text-slate-500 mb-1' }, c.neighbor_type || `linked ${idx + 1}`),
                 c.data_url ? el('img', { src: c.data_url, class: 'max-w-full rounded border' })
                   : el('div', { class: 'p-2 bg-slate-100 rounded text-slate-500' }, c.ref || '(missing)')
               )))

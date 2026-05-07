@@ -131,6 +131,205 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-07 — Path A replicate hold + evidence text pathway
+
+Path A was run twice at n=148 on HF revision
+`3774c67f8b814392b6d04c939e904f749a3f52eb` for `focus --tool-set full`.
+Run 1 hit **48.6% Overall**; run 2 hit **52.7% Overall**. The replicate mean
+is **50.7% Overall**, +6.8pp vs rebaseline-v2 focus +4 at 43.9%, but the
+conservative replicate-CI union still overlaps the baseline CI, so the formal
+decision is **hold**, not ship-by-CI. Artifacts:
+`results/hf/sprint-2026-05-06/path-a-run{1,2}/headline_table.*`,
+`delta-vs-rebaseline-v2.md`, and
+`results/hf/sprint-2026-05-06/path-a-replicate-summary.{md,json}`.
+
+Diagnostics now read spec-level `per_example.jsonl` before sanitized prediction
+filenames so the report count matches the official run rows. The same report
+also surfaces verifier unsupported rate, expand_context call rate, mean linked
+neighbors, and top tool sequences. Path A diagnostics show high residual
+unsupported rates (75.0% and 79.1%) even after neighbor images reached the
+reasoner, pointing at packet completeness rather than path plumbing alone.
+
+Evidence-path patch in this worktree:
+
+- `pipeline/inspector.py`: visual packets (`picture` / `image` / `chart` /
+  `figure`) keep `commit_level="image"` but now get advisory
+  `inspect_region(mode="element")` OCR so embedded labels/callouts are not
+  invisible to verifier summaries.
+- `pipeline/reasoner.py`: packet descriptors now include a compact
+  `text_layer_snippet` / `ocr_snippet` line, so inspect-produced text reaches
+  the first-pass answer, not only the verifier.
+- `pipeline/expander.py`: reranker `needed_for` context roles can attach
+  adjacent regions even when the layout detector labels them as plain `text`
+  rather than a canonical annotation type; linked neighbor type falls back to
+  the explicit context role (for example `legend_binding`).
+- `pipeline/expander.py`: attached neighbors now get best-effort native text
+  extraction, with OCR fallback, and the snippets are appended to the parent
+  packet's visible text field as `Context [role]: ...`. This keeps
+  captions/footnotes/legend labels visible to the compact reasoner/verifier
+  packet summaries, not only as linked crop images.
+- `pipeline/inspector.py`: when the source PDF is missing but the staged page
+  PNG exists, inspect now crops the page image directly and OCRs that crop. This
+  converts no-PDF rows from whole-page skeleton packets into focused
+  deterministic evidence packets.
+- `pipeline/expander.py`: no-PDF expansion can now crop linked neighbors from
+  `images_by_page` and OCR those crops before appending `Context [role]: ...`.
+  `FocusWorkflow` forwards the page-image map to expand, and inspect tiering is
+  based on `n_real_packets` rather than PDF presence alone.
+
+Focused verification: 133 changed-file tests passed; broader
+reasoner/workflow/focus_harness/eval suite passed 123 tests after hydrating the
+parser-bench submodule in the temp worktree. Ruff check and format were clean
+on all changed files. After the page-image fallback patch, the full changed-area
+suite passed **220 tests**; direct inspector/expander tests passed **58 tests**
+after formatting; ruff check and format-check were clean over all changed Python
+files.
+
+Two evidence-text patch eval attempts were quarantined because layout endpoint
+outages would have contaminated the row: `evidence-text-run1-aborted-layout-503`
+and `evidence-text-run1-aborted-layout-midrun-503`. The second attempt showed
+that a startup preflight is not sufficient; the endpoint can return HTTP 503
+mid-run after many clean examples.
+
+Follow-up guardrail: HF focus evals now run with strict layout detection by
+default. `run_hf_eval.py` preflights the live endpoint before model calls, then
+passes `strict_layout_detection=True` so `LayoutEndpointUnavailable` /
+`StubResponseError` abort the eval instead of becoming skeleton-region examples.
+Use `--allow-layout-fallbacks` only for non-comparable exploratory runs. The
+script also exposes `--layout-detect-retries` / `--layout-detect-timeout-s`,
+and `FocusWorkflow` now actually consumes `configs/default.yaml`
+`endpoints.layout.retries` / `timeout_s`.
+
+Strict evidence-text run 1 completed at n=148 with
+`--layout-detect-retries 5`:
+
+- Overall: **52.7%** [44.6, 60.1], +8.8pp vs rebaseline-v2 focus +4 43.9%;
+  formal gate **hold** because CIs overlap.
+- Datasheet: **57.4%** [47.5, 66.3], +7.9pp.
+- Finance: **42.6%** [29.8, 57.4], +10.6pp.
+- Cost: **$1.52 total**, **$0.0195/correct** overall.
+- Diagnostics: verifier unsupported **70.9%**, expand_context called 100%,
+  mean neighbors **10.01**, lazy/empty citations **2.0%**.
+
+Artifacts:
+`results/hf/sprint-2026-05-07/evidence-text-run1/headline_table.*`,
+`delta-vs-rebaseline-v2.{md,json}`, `diagnostics.{md,json}`.
+During the strict run one page hit four 503s then recovered on the fifth retry,
+which validates the retry override and strict-failure behavior.
+
+Instrumentation follow-up: `diagnose_predictions.py` now adds an Evidence
+Packet Quality table. It resolves answer packet-id citations from
+`trace.debug_events[stage=answer].payload.citations` (falling back to answer
+step JSON) and joins them to `trace.evidence_snapshot`. Current strict
+evidence-text run metrics: **1183 packets**, packet text/context/chart coverage
+**69.1% / 71.4% / 0.0%**, cited packet text/context/chart coverage
+**77.6% / 74.9% / 0.0%**, cited image-only rate **22.4%**, and unsupported
+cited-image-only rate **28.8%**. Rebaseline-v2 +2 vs +4 diagnostics now live at
+`results/hf/headline-v1-rebaseline-v2/focus-toolset-diagnostics.{md,json}`:
+old +4 attached mean **13.34** neighbors but still had **42.9%** cited
+image-only packets and lower accuracy than +2, supporting the "more context
+without disciplined summarization can add noise" hypothesis.
+
+Trace schema bumped **v3 → v4**: `EvidencePacketSummary` and SFT export now carry
+`linked_neighbor_types` alongside `linked_crop_refs`, and the trace viewer labels
+linked crops by role (caption/footnote/legend/etc.) instead of only `linked N`.
+This fixes the artifact-audit finding that final `evidence_snapshot` preserved
+linked crop paths but dropped their semantic roles.
+
+No-PDF page-image smoke after the fallback patch:
+`results/hf/sprint-2026-05-07/page-image-expand-smoke-fin-0057/` on
+`fin-ecb_fsr_2024_may-0057`. Inspect produced **8/8 real packets** from staged
+page PNG crops; expand attached **9** linked neighbors to **7/8** packets; packet
+text/context/chart coverage was **100.0% / 87.5% / 0.0%** and the single cited
+packet was no longer image-only. The answer still failed and verifier remained
+unsupported, but the failure moved from "empty packets" to a genuine
+visual-detail limitation.
+
+Full n=148 page-image-fallback run:
+`results/hf/sprint-2026-05-07/page-image-fallback-run1/` completed under strict
+layout settings. Headline row: **48.6% Overall** [40.5, 56.8], **52.5%**
+Datasheet [42.6, 62.4], **40.4%** Finance [25.5, 55.3], **$1.73 total** and
+**$0.0241/correct** overall. Delta vs rebaseline-v2 focus +4: **+4.7pp
+Overall**, **+3.0pp Datasheet**, **+8.5pp Finance**; formal gate is still
+**hold** because CIs overlap, and cost/correct regressed. Diagnostics moved the
+evidence quality strongly: packet text/context/chart coverage **89.3% / 87.0% /
+0.0%**, cited packet text/context/chart coverage **100.0% / 94.6% / 0.0%**,
+cited image-only **0.0%**, verifier unsupported **66.2%**, mean neighbors
+**12.04**. Interpretation: the patch fixes the image-only/empty packet pathway,
+but answer accuracy did not improve beyond variance; next bottleneck is chart /
+curve value extraction and visual-detail reasoning, not merely missing packet
+text.
+
+Chart-focused follow-up on `dat-opa454-0018`:
+`results/hf/sprint-2026-05-07/chart-query-order-smoke-opa454-0018/` was run
+with `--chart-to-table`. The live localizer emits `figure_class=<name>`, while
+the old inspector gate only accepted the legacy `figure_class:<name>` form; the
+gate now accepts both. The reranker prompt now surfaces `figure_class`, and the
+inspector applies chart-aware ranking so `line_chart` crops outrank logos and
+generic picture containers for chart-reading plans. After OCR, chart packets are
+secondarily ordered by overlap with the question text (for example `V_OUT` /
+`mV`) so adjacent subplots matching the requested series/unit are shown first.
+Trace/debug instrumentation now records `chart_to_table_enabled` on inspect
+steps and `provenance_args_hash` on packet debug payloads, with
+`chart_to_table:attempt|empty|error` tags. `diagnose_predictions.py` reports
+chart attempt / empty / error rates from these debug packets. The smoke moved
+the cited evidence from a generic chart panel to the correct Figure 31 crop, but
+`chart_to_table` still returned empty CSV and the numeric answer was wrong
+(`-640` vs gold `-400`). Interpretation: routing/selection is now observable
+and better disciplined; the remaining chart bottleneck is numerical visual
+reading / extraction quality.
+
+Full n=148 chart-aware ranking run:
+`results/hf/sprint-2026-05-07/chart-aware-ranking-run1/` completed without
+layout/model aborts, but the later headline-table render attempt hit a layout
+preflight 503 after predictions were already complete; the script still merged
+the existing run rows. Headline row: **45.9% Overall** [37.8, 54.1], **46.5%**
+Datasheet [36.6, 55.4], **44.7%** Finance [29.8, 57.4], **$1.66 total** and
+**$0.0244/correct** overall. Delta vs rebaseline-v2 focus +4: **+2.0pp
+Overall**, **-3.0pp Datasheet**, **+12.8pp Finance**; formal gate is **hold**,
+and cost/correct regressed. Diagnostics: verifier unsupported **70.3%**,
+expand_context called **100%**, mean neighbors **12.00**, packet
+text/context/chart coverage **90.2% / 86.1% / 0.0%**, cited packet
+text/context/chart coverage **100.0% / 92.1% / 0.0%**, cited image-only
+**0.0%**, chart_to_table attempt/empty/error all **0.0%** because this full run
+did not enable `--chart-to-table`.
+
+Interpretation: chart-aware packet ordering/reranker metadata may help finance
+selection, but it regresses datasheets enough to land below the stronger
+strict evidence-text run. The useful finding is mechanistic: cited image-only is
+eliminated in the default full run, so inspect/expand evidence visibility is no
+longer the dominant failure. The remaining bottleneck is supported answer
+extraction from visually correct but numerically hard chart/curve evidence.
+
+Chart packet follow-up patch after the n=148 run:
+
+- `pipeline/inspector.py` now treats `curve_axis_reading` as a chart-reading
+  family and uses the existing `wants_chart` signal for `chart_to_table`
+  activation. This fixes a real smoke where `--chart-to-table` was enabled but
+  the planner emitted `question_family=curve_axis_reading`, so no chart
+  extraction or chart note ran.
+- Chart packets now parse oscilloscope-style scale labels from OCR text, such
+  as `Vour (400mV/div)`, `Viny (200mV/div)`, and `Time (2.5us/div)`. The packet
+  text includes a compact `Detected chart scales: ...` note, and when the
+  question names `V_OUT`/`V_IN`/time it adds `Question target scale: ...`.
+- `pipeline/expander.py` now drops clearly mismatched figure captions after
+  text extraction. If the packet OCR says `Figure 31` and a candidate caption
+  says only `Figure 33`, the linked crop/type is removed so the reasoner does
+  not see contradictory caption context.
+- New tests pin chart scale extraction, target-scale detection, evidence-type
+  chart gating despite family misses, and mismatched-caption filtering.
+
+Real smoke:
+`results/hf/sprint-2026-05-07/chart-gate-scale-smoke-opa454-0018/` on
+`dat-opa454-0018` with `--chart-to-table`. The trace now records
+`chart_to_table:attempt|empty|chart_scale_hint`, packet text contains
+`Question target scale: VOUT=400mV/div`, and expand_context attaches only the
+matching Figure 31 caption to the cited packet. The answer moved closer
+(`-320` vs gold `-400`) but still scored wrong and verifier stayed unsupported,
+now citing insufficient visual curve context rather than wrong scale or wrong
+packet. This narrows the remaining bottleneck to visual curve reading / zoomed
+chart evidence, not chart routing or caption attachment.
+
 ### 2026-05-06 — one-example trace dashboard smoke + Vercel demo
 
 Real harness smoke was run for three `gabrielbo/parser-bench` datasheet

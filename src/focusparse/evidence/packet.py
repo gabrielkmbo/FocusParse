@@ -34,13 +34,14 @@ class CropRef(BaseModel):
 
     Sprint 2026-05-05 (Phase B2) adds `scale="zoomed"` for the
     `run_python`-driven LANCZOS supersample of tiny / fine-detail crops.
-    The reasoner sees the original AND the zoomed crop so it can read
-    fine details without losing the unzoomed context.
+    Sprint 2026-05-07 adds `scale="chart_context"` for a modest axis/curve
+    context crop on chart extraction packets. The reasoner sees the original
+    AND auxiliary crops so it can read fine details without losing context.
     """
 
     ref: str  # absolute path to the cached PNG
     bbox_norm: tuple[float, float, float, float]
-    scale: Literal["tight", "context", "zoomed"] = "tight"
+    scale: Literal["tight", "context", "chart_context", "zoomed"] = "tight"
 
 
 class EvidencePacket(BaseModel):

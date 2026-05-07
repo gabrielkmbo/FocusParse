@@ -51,6 +51,7 @@ class EvidencePacketSummary(BaseModel):
     region_type: str | None = None
     local_crop_ref: str | None = None
     linked_crop_refs: list[str] = Field(default_factory=list)
+    linked_neighbor_types: list[str] = Field(default_factory=list)
     # Sprint Phase 2 (2026-05-04, Phase 6 #6): tight + context crops at
     # multiple scales. Each entry is {ref, bbox_norm, scale}; serialized
     # as raw dicts so the trace JSONL stays loose-typed for downstream

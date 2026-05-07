@@ -1,6 +1,6 @@
 """SFT-ready JSONL export for trajectory traces.
 
-Schema version 3 (2026-05-06). Changes here are breaking — bump
+Schema version 4 (2026-05-07). Changes here are breaking — bump
 `SCHEMA_VERSION` and add a dated section to `.claude/memory/MEMORY.md`
 describing the migration.
 
@@ -11,6 +11,10 @@ field as nullable.
 v2 → v3: added `artifacts` and `debug_events` for one-example HTML
 dashboards. Payloads store paths/refs and JSON metadata only, never raw
 image bytes.
+
+v3 → v4: added `linked_neighbor_types` to `evidence_snapshot` packet
+summaries so offline diagnostics and trace viewers can tell whether linked
+neighbor crops are captions, footnotes, legends, etc.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from pathlib import Path
 
 from focusparse.traces.recorder import RunTrace
 
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 
 
 def coverage_recall(predicted_pages: set[int], gold_pages: set[int]) -> float:
@@ -48,11 +52,11 @@ def passes_sft_filter(
 
 
 def trace_to_sft_record(trace: RunTrace, *, teacher_tier: str = "frontier") -> dict:
-    """Serialize a RunTrace to the v3 SFT JSONL record shape.
+    """Serialize a RunTrace to the v4 SFT JSONL record shape.
 
-    v3 keeps `evidence_snapshot` and adds `artifacts` / `debug_events` for
-    inspectable one-example dashboards. All image-like values are references,
-    not inlined bytes.
+    v4 keeps `evidence_snapshot`, `artifacts`, and `debug_events`, and the
+    snapshot now carries linked-neighbor roles. All image-like values are
+    references, not inlined bytes.
     """
     snapshot = trace.evidence_snapshot
     return {

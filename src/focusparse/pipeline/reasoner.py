@@ -20,10 +20,14 @@ from focusparse.pipeline.events import AnswerEvent, EvidenceEvent, QuestionEvent
 _SYSTEM_PROMPT = (
     "You are answering a question about a document using the provided evidence packets. "
     "Each packet shows a page region with a packet_id (e.g. pkt_000). "
+    "When a packet's descriptor lists image scales, the packet images appear in that "
+    "listed order. `tight` is the target region; `context` and `chart_context` are "
+    "wider crops for nearby labels, axes, legends, and curve geometry. "
     "When a packet's descriptor lists 'Attached neighbors', the images that follow "
-    "the primary crop are CONTEXT (caption, footnote, section header, etc.). "
+    "the packet crop images are CONTEXT (caption, footnote, section header, etc.). "
     "Use the primary crop to ground the answer; consult the neighbor crops only "
     "when the answer requires reading text or labels around the primary region. "
+    "For chart readings, use the question-target scale when a packet text calls one out. "
     "Return strict JSON with keys `answer`, `citations`, and `confidence`. "
     "`answer` is the answer string (or the literal word 'Unanswerable'). "
     "`citations` is a list of packet_id strings that directly support the answer. "
@@ -31,6 +35,7 @@ _SYSTEM_PROMPT = (
 )
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_MAX_PACKET_TEXT_CHARS = 240
 
 
 def _format_hint(answer_type: str | None) -> str:
@@ -137,11 +142,22 @@ def _render_packet_line(packet) -> str:
     base = f"- {packet.packet_id}: page {packet.page}, bbox {packet.bbox_norm}"
     n_scales = len(packet.multi_scale_crops)
     if n_scales >= 2:
-        base += f" — {n_scales} image scales (tight + context)"
+        base += (
+            f" — {n_scales} image scales in order: "
+            f"{_format_scale_summary(packet.multi_scale_crops)}"
+        )
+        if any(c.scale == "chart_context" for c in packet.multi_scale_crops):
+            base += (
+                "\n  Chart context crop: use this wider crop for axes, legends, "
+                "and curve geometry when visually reading chart values."
+            )
     if packet.linked_neighbor_types:
         types = ", ".join(packet.linked_neighbor_types)
         n_neighbors = len(packet.linked_neighbor_types)
         base += f"\n  Attached neighbors ({n_neighbors}): {types}"
+    text_snippet = _packet_text_snippet(packet)
+    if text_snippet:
+        base += f"\n  Extracted text: {text_snippet!r}"
     if packet.chart_csv:
         conf = packet.chart_extraction_confidence
         conf_str = f" (confidence={conf:.2f})" if conf is not None else ""
@@ -152,6 +168,23 @@ def _render_packet_line(packet) -> str:
             + "\n  ```"
         )
     return base
+
+
+def _format_scale_summary(crops) -> str:
+    return ", ".join(f"{c.scale} {_format_bbox(c.bbox_norm)}" for c in crops)
+
+
+def _format_bbox(bbox: tuple[float, float, float, float]) -> str:
+    return "[" + ", ".join(f"{v:.3f}" for v in bbox) + "]"
+
+
+def _packet_text_snippet(packet) -> str:
+    """Compact packet text/OCR for the reasoner descriptor line."""
+    snippet = packet.text_layer_snippet or packet.ocr_snippet or ""
+    snippet = " ".join(str(snippet).split())
+    if len(snippet) > _MAX_PACKET_TEXT_CHARS:
+        snippet = snippet[: _MAX_PACKET_TEXT_CHARS - 3] + "..."
+    return snippet
 
 
 def _collect_packet_images(evidence: EvidenceEvent) -> list[Path]:

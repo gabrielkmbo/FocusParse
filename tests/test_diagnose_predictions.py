@@ -41,6 +41,11 @@ def _write_record(
     )
 
 
+def _write_per_example(spec_dir: Path, records: list[dict]) -> None:
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    (spec_dir / "per_example.jsonl").write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+
 def test_diagnose_empty_dir(tmp_path: Path) -> None:
     spec = tmp_path / "spec"
     spec.mkdir()
@@ -123,6 +128,273 @@ def test_tool_error_categorization(tmp_path: Path) -> None:
     assert diag.error_categories["tool_runtime_error"] == 1
 
 
+def test_diagnose_prefers_per_example_jsonl_over_prediction_filenames(tmp_path: Path) -> None:
+    spec = tmp_path / "focusparse_focus_x"
+    pred = spec / "predictions"
+    _write_record(pred, example_id="safe-id", correct=0.0)
+    _write_per_example(
+        spec,
+        [
+            {
+                "example_id": "raw id with spaces",
+                "answer_correct": 1.0,
+                "is_lazy": 0,
+                "citations": [{"page": 1}],
+                "tool_calls": 1,
+                "usd": 0.01,
+                "trace": {"steps": []},
+            },
+            {
+                "example_id": "another/raw:id",
+                "answer_correct": 0.0,
+                "is_lazy": 1,
+                "citations": [],
+                "tool_calls": 0,
+                "usd": 0.02,
+                "trace": {"steps": []},
+            },
+        ],
+    )
+
+    diag = dp.diagnose_spec(spec)
+
+    assert diag.n_examples == 2
+    assert diag.accuracy == 0.5
+
+
+def test_evidence_packet_quality_resolves_answer_packet_citations(tmp_path: Path) -> None:
+    spec = tmp_path / "focusparse_focus_x"
+    _write_per_example(
+        spec,
+        [
+            {
+                "example_id": "a",
+                "answer_correct": 0.0,
+                "is_lazy": 0,
+                "citations": [{"page": 1, "bbox": [0, 0, 1, 1]}],
+                "trace": {
+                    "evidence_snapshot": [
+                        {
+                            "packet_id": "pkt_text",
+                            "text_layer_snippet": "VCC max 3.6 V",
+                            "ocr_snippet": None,
+                            "chart_csv": None,
+                            "linked_crop_refs": [],
+                            "linked_neighbor_types": [],
+                        },
+                        {
+                            "packet_id": "pkt_image",
+                            "text_layer_snippet": None,
+                            "ocr_snippet": None,
+                            "chart_csv": None,
+                            "linked_crop_refs": ["/crop/caption.png"],
+                            "linked_neighbor_types": ["caption"],
+                        },
+                    ],
+                    "steps": [
+                        {
+                            "stage": "answer",
+                            "action": "llm_call",
+                            "obs_summary": '{"answer": "x", "citations": ["pkt_image"]}',
+                        },
+                        {
+                            "stage": "verify",
+                            "action": "llm_call",
+                            "args": {"supported": False},
+                        },
+                    ],
+                },
+            }
+        ],
+    )
+
+    diag = dp.diagnose_spec(spec)
+
+    assert diag.total_evidence_packets == 2
+    assert diag.packet_text_coverage_rate == 0.5
+    assert diag.packet_linked_context_rate == 0.5
+    assert diag.cited_packet_count == 1
+    assert diag.cited_packet_resolved_rate == 1.0
+    assert diag.cited_packet_text_coverage_rate == 0.0
+    assert diag.cited_packet_linked_context_rate == 1.0
+    assert diag.cited_packet_image_only_rate == 1.0
+    assert diag.verifier_unsupported_cited_image_only_rate == 1.0
+
+
+def test_evidence_packet_quality_counts_chart_attempts_from_debug_packets(
+    tmp_path: Path,
+) -> None:
+    spec = tmp_path / "focusparse_focus_x"
+    _write_per_example(
+        spec,
+        [
+            {
+                "example_id": "a",
+                "answer_correct": 0.0,
+                "trace": {
+                    "evidence_snapshot": [
+                        {
+                            "packet_id": "pkt_old",
+                            "ocr_snippet": None,
+                            "chart_csv": None,
+                        }
+                    ],
+                    "debug_events": [
+                        {
+                            "stage": "inspect",
+                            "payload": {
+                                "packets": [
+                                    {
+                                        "packet_id": "pkt_chart",
+                                        "ocr_snippet": "Chart packet",
+                                        "chart_csv": None,
+                                        "provenance_args_hash": (
+                                            "inspect_region:image|chart_to_table:attempt|"
+                                            "chart_to_table:empty"
+                                        ),
+                                    },
+                                    {
+                                        "packet_id": "pkt_text",
+                                        "text_layer_snippet": "plain text",
+                                        "provenance_args_hash": "inspect_region:image",
+                                    },
+                                ]
+                            },
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    diag = dp.diagnose_spec(spec)
+
+    assert diag.total_evidence_packets == 2
+    assert diag.packet_chart_attempt_rate == 0.5
+    assert diag.packet_chart_empty_rate == 0.5
+    assert diag.packet_chart_error_rate == 0.0
+
+
+def test_evidence_packet_quality_counts_unresolved_answer_citation(tmp_path: Path) -> None:
+    spec = tmp_path / "focusparse_focus_x"
+    _write_per_example(
+        spec,
+        [
+            {
+                "example_id": "a",
+                "answer_correct": 0.0,
+                "trace": {
+                    "evidence_snapshot": [{"packet_id": "pkt_000"}],
+                    "steps": [
+                        {
+                            "stage": "answer",
+                            "action": "llm_call",
+                            "obs_summary": '```json\n{"answer":"x","citations":["missing"]}\n```',
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    diag = dp.diagnose_spec(spec)
+
+    assert diag.cited_packet_count == 1
+    assert diag.cited_packet_resolved_rate == 0.0
+    assert diag.cited_packet_text_coverage_rate is None
+
+
+def test_answer_packet_citations_prefer_debug_events(tmp_path: Path) -> None:
+    spec = tmp_path / "focusparse_focus_x"
+    _write_per_example(
+        spec,
+        [
+            {
+                "example_id": "a",
+                "answer_correct": 1.0,
+                "trace": {
+                    "evidence_snapshot": [
+                        {"packet_id": "pkt_debug", "text_layer_snippet": "debug text"},
+                        {"packet_id": "pkt_obs", "text_layer_snippet": None},
+                    ],
+                    "debug_events": [
+                        {
+                            "stage": "answer",
+                            "payload": {"citations": ["pkt_debug"]},
+                        }
+                    ],
+                    "steps": [
+                        {
+                            "stage": "answer",
+                            "action": "llm_call",
+                            "obs_summary": '{"answer":"x","citations":["pkt_obs"]}',
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    diag = dp.diagnose_spec(spec)
+
+    assert diag.cited_packet_count == 1
+    assert diag.cited_packet_text_coverage_rate == 1.0
+
+
+def test_focus_stage_diagnostics_capture_verifier_and_expand_context(tmp_path: Path) -> None:
+    spec = tmp_path / "focusparse_focus_x"
+    pred = spec / "predictions"
+    _write_record(
+        pred,
+        example_id="a",
+        steps=[
+            {
+                "stage": "inspect",
+                "action": "tool_call",
+                "tool": "deterministic_inspector",
+                "args": {"n_packets": 2},
+            },
+            {
+                "stage": "expand_context",
+                "action": "deterministic",
+                "tool": None,
+                "args": {"n_neighbors_attached": 3},
+            },
+            {
+                "stage": "verify",
+                "action": "llm_call",
+                "tool": None,
+                "args": {"supported": False},
+            },
+        ],
+    )
+    _write_record(
+        pred,
+        example_id="b",
+        steps=[
+            {
+                "stage": "inspect",
+                "action": "tool_call",
+                "tool": "deterministic_inspector",
+                "args": {"n_packets": 1},
+            },
+            {
+                "stage": "verify",
+                "action": "llm_call",
+                "tool": None,
+                "args": {"supported": True},
+            },
+        ],
+    )
+
+    diag = dp.diagnose_spec(spec)
+
+    assert diag.verifier_unsupported_rate == 0.5
+    assert diag.expand_context_called_rate == 0.5
+    assert diag.mean_neighbors_attached == 1.5
+    assert diag.tool_sequence_top == [("deterministic_inspector", 2)]
+
+
 def test_action_input_shape_topn(tmp_path: Path) -> None:
     spec = tmp_path / "focusparse_react_x"
     pred = spec / "predictions"
@@ -158,6 +430,17 @@ def test_resolve_spec_dirs_walks_parent(tmp_path: Path) -> None:
     assert {p.name for p in resolved} == {"spec_a", "spec_b"}
 
 
+def test_resolve_spec_dirs_accepts_per_example_jsonl(tmp_path: Path) -> None:
+    parent = tmp_path / "headline"
+    spec = parent / "spec_from_run_jsonl"
+    spec.mkdir(parents=True)
+    (spec / "per_example.jsonl").write_text("{}\n")
+
+    resolved = dp._resolve_spec_dirs([parent])
+
+    assert resolved == [spec]
+
+
 def test_render_markdown_smoke(tmp_path: Path) -> None:
     spec = tmp_path / "focusparse_simple"
     pred = spec / "predictions"
@@ -165,3 +448,4 @@ def test_render_markdown_smoke(tmp_path: Path) -> None:
     md = dp.render_markdown([dp.diagnose_spec(spec)])
     assert "Predictions diagnostics" in md
     assert "focusparse_simple" in md
+    assert "expand_called" in md

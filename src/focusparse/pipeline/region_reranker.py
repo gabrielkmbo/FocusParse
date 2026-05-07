@@ -110,8 +110,9 @@ _SYSTEM_PROMPT = (
     "column_header, unit; empty list when the region is self-contained)\n\n"
     "No prose outside the JSON. Skip regions you can't classify — the "
     "fallback keeps original ranking. The reranker can only see region "
-    "metadata (label, bbox, detector confidence), not the page image, so "
-    "lean on `region_type` + the question family + bbox position."
+    "metadata (label, bbox, detector confidence, figure_class when the "
+    "layout endpoint provided one), not the page image, so lean on "
+    "`region_type`, `figure_class`, the question family, and bbox position."
 )
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
@@ -190,6 +191,7 @@ def _build_rerank_prompt(
 ) -> str:
     region_lines = [
         f"- region_id={r.region_id} type={r.region_type or 'unknown'} "
+        f"figure_class={_figure_class(r) or 'unknown'} "
         f"score={r.score:.3f} bbox={_fmt_bbox(r.bbox_norm)}"
         for r in regions.candidates
     ]
@@ -209,6 +211,21 @@ def _build_rerank_prompt(
 
 def _fmt_bbox(bbox: tuple[float, float, float, float]) -> str:
     return "[" + ", ".join(f"{v:.3f}" for v in bbox) + "]"
+
+
+def _figure_class(region: RegionCandidate) -> str | None:
+    """Return the localizer's figure subclass when present.
+
+    Live localizer output uses `figure_class=<name>`; older tests/traces used
+    `figure_class:<name>`. Preserve both because this prompt is a research
+    diagnostic surface as much as a model input.
+    """
+    for sig in region.supporting_signals or []:
+        if sig.startswith("figure_class=") or sig.startswith("figure_class:"):
+            sep = "=" if "=" in sig else ":"
+            value = sig.split(sep, 1)[1].strip().lower()
+            return value or None
+    return None
 
 
 def _parse_rerank_response(text: str | None) -> list[dict[str, Any]]:

@@ -19,14 +19,15 @@ below a figure, footnotes at the bottom of a chart, and section
 headers above a table, while filtering unrelated regions on the other
 side of the page.
 
-When `regions` or `pdf_path` is unavailable the stage returns evidence
-unchanged — downstream stages get exactly the pre-2h passthrough
-behavior, preserving every existing caller.
+When `regions` or both crop sources (`pdf_path` and `images_by_page`) are
+unavailable the stage returns evidence unchanged — downstream stages get exactly
+the pre-2h passthrough behavior, preserving every existing caller.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from focusparse.evidence.packet import EvidencePacket, PacketProvenance
@@ -36,6 +37,8 @@ from focusparse.pipeline.evidence_graph import (
     find_graph_neighbors,
     has_graph_entry,
 )
+from focusparse.pipeline.inspector import _crop_page_image, _ocr_existing_crop
+from focusparse.tools.get_text_layer import GetTextLayerInput, get_text_layer
 from focusparse.tools.inspect_region import InspectRegionInput, inspect_region
 
 logger = logging.getLogger(__name__)
@@ -104,6 +107,8 @@ _FALLBACK_MAX_NEIGHBORS_PER_PACKET = 1
 # when testing for neighbor overlap. 0.08 ≈ ~1 inch on a Letter page at 300
 # DPI — enough to catch a caption a few text lines away.
 _DEFAULT_ADJACENCY_PAD = 0.08
+_MAX_LINKED_CONTEXT_TEXT_CHARS = 240
+_FIGURE_REF_RE = re.compile(r"\b(?:fig(?:ure)?\.?)\s*(?P<num>\d+[A-Za-z]?)\b", re.IGNORECASE)
 
 
 async def expand_context(
@@ -111,7 +116,9 @@ async def expand_context(
     *,
     regions: RegionsEvent | None = None,
     pdf_path: Path | None = None,
+    images_by_page: dict[int, Path] | None = None,
     crop_cache_dir: Path | None = None,
+    text_layer_cache_dir: Path | None = None,
     max_neighbors_per_packet: int = _DEFAULT_MAX_NEIGHBORS_PER_PACKET,
     adjacency_pad: float = _DEFAULT_ADJACENCY_PAD,
     use_evidence_graph: bool = False,
@@ -125,11 +132,15 @@ async def expand_context(
         regions: full `RegionsEvent` from the localizer. When None, the
             stage is a passthrough — we need the full region list to find
             neighbors the inspector didn't promote to a packet.
-        pdf_path: source PDF. Required for cropping neighbor regions;
-            without it, the expander is a passthrough (we don't want to
-            invent crop refs that point nowhere).
+        pdf_path: source PDF. Preferred for cropping/OCR of neighbor regions.
+            When unavailable, the expander can still crop already-rendered page
+            PNGs from `images_by_page`.
+        images_by_page: optional 1-indexed page -> rendered page PNG fallback
+            used when `pdf_path` is unavailable.
         crop_cache_dir: where neighbor crop PNGs go. Content-addressed by
             `inspect_region` so repeated calls on the same region are free.
+        text_layer_cache_dir: optional cache dir for native text snippets
+            extracted from attached neighbor regions.
         max_neighbors_per_packet: cap (plan §2e says 4 to keep packets
             compact). Halved automatically when neither `plan` nor the
             reranker provided a relevance signal (see
@@ -150,7 +161,7 @@ async def expand_context(
         An `EvidenceEvent` with the same packets, each potentially carrying
         `linked_crop_refs` / `linked_neighbor_types` / updated provenance.
     """
-    if regions is None or pdf_path is None:
+    if regions is None or (pdf_path is None and not images_by_page):
         return evidence
 
     # Resolve which neighbor region_types the planner permits. Empty set
@@ -213,7 +224,7 @@ async def expand_context(
                 has_planner_hint=has_planner_hint,
                 relevance_threshold=relevance_threshold,
             )
-            neighbors_with_role = [(n, (n.region_type or "").lower() or "unknown") for n in spatial]
+            neighbors_with_role = [(n, _neighbor_role(n)) for n in spatial]
 
         if not neighbors_with_role:
             new_packets.append(packet)
@@ -221,10 +232,13 @@ async def expand_context(
 
         linked_refs: list[str] = []
         linked_types: list[str] = []
+        linked_texts: list[tuple[str, str]] = []
+        packet_figure_refs = _figure_refs_from_text(packet.text_layer_snippet, packet.ocr_snippet)
         for neighbor, role in neighbors_with_role:
             crop_ref = await _crop_neighbor(
                 neighbor,
                 pdf_path=pdf_path,
+                page_image=(images_by_page or {}).get(neighbor.page),
                 crop_cache_dir=crop_cache_dir,
             )
             if crop_ref is None:
@@ -234,20 +248,36 @@ async def expand_context(
             # legend / axis) when present; falls back to the raw region_type
             # for spatial-heuristic matches.
             linked_types.append(role)
+            linked_text = await _extract_neighbor_text(
+                neighbor,
+                role=role,
+                pdf_path=pdf_path,
+                crop_ref=crop_ref,
+                text_layer_cache_dir=text_layer_cache_dir,
+                crop_cache_dir=crop_cache_dir,
+            )
+            if linked_text:
+                if _neighbor_text_mismatches_packet_figure(
+                    packet_figure_refs,
+                    role=role,
+                    linked_text=linked_text,
+                ):
+                    linked_refs.pop()
+                    linked_types.pop()
+                    continue
+                linked_texts.append((role, linked_text))
 
         if not linked_refs:
             new_packets.append(packet)
             continue
 
-        new_packets.append(
-            packet.model_copy(
-                update={
-                    "linked_crop_refs": linked_refs,
-                    "linked_neighbor_types": linked_types,
-                    "provenance": _updated_provenance(packet.provenance, len(linked_refs)),
-                }
-            )
-        )
+        updates = {
+            "linked_crop_refs": linked_refs,
+            "linked_neighbor_types": linked_types,
+            "provenance": _updated_provenance(packet.provenance, len(linked_refs)),
+        }
+        updates.update(_context_text_updates(packet, linked_texts))
+        new_packets.append(packet.model_copy(update=updates))
     return EvidenceEvent(packets=new_packets)
 
 
@@ -266,10 +296,11 @@ def _pick_neighbors(
     has_planner_hint: bool = False,
     relevance_threshold: float = _DEFAULT_NEIGHBOR_RELEVANCE_THRESHOLD,
 ) -> list[RegionCandidate]:
-    """Return up to `max_n` annotation-type regions adjacent to `packet`.
+    """Return up to `max_n` context regions adjacent to `packet`.
 
     Selection (query-aware as of 2026-05-05):
-      * region_type must be in `_NEIGHBOR_TYPES`
+      * region_type must be in `_NEIGHBOR_TYPES`, OR the reranker must tag
+        the region with a context `needed_for` role
       * must not BE the packet region (same bbox / same region_id)
       * padded packet bbox must overlap the candidate bbox
       * AND at least one of the following:
@@ -299,7 +330,8 @@ def _pick_neighbors(
     matches: list[tuple[int, float, float, float, RegionCandidate]] = []
     for cand in candidates:
         ctype = (cand.region_type or "").lower()
-        if ctype not in _NEIGHBOR_TYPES:
+        has_context_role = cand.needed_for in _RERANK_CONTEXT_ROLES
+        if ctype not in _NEIGHBOR_TYPES and not has_context_role:
             continue
         if _bbox_equal(cand.bbox_norm, packet.bbox_norm):
             continue
@@ -338,6 +370,16 @@ def _pick_neighbors(
 
     matches.sort(key=lambda t: (t[0], t[1], t[2], t[3]))
     return [cand for _b, _p, _d, _s, cand in matches[:max_n]]
+
+
+def _neighbor_role(cand: RegionCandidate) -> str:
+    """Role descriptor shown to the reasoner for an attached neighbor."""
+    ctype = (cand.region_type or "").lower()
+    if ctype in _NEIGHBOR_TYPES:
+        return ctype
+    if cand.needed_for in _RERANK_CONTEXT_ROLES:
+        return str(cand.needed_for)
+    return ctype or "unknown"
 
 
 def _resolve_permitted_neighbor_types(plan: PlanEvent | None) -> frozenset[str]:
@@ -430,30 +472,170 @@ def _synth_primary_from_packet(packet: EvidencePacket) -> RegionCandidate:
 async def _crop_neighbor(
     neighbor: RegionCandidate,
     *,
-    pdf_path: Path,
+    pdf_path: Path | None,
+    page_image: Path | None,
     crop_cache_dir: Path | None,
 ) -> str | None:
     """Render a cropped PNG for a neighbor region; return None on failure."""
-    try:
-        out = await inspect_region(
-            InspectRegionInput(
-                doc_path=str(pdf_path),
-                page=neighbor.page,
-                bbox_norm=neighbor.bbox_norm,
-                mode="image",
-                expansion="none",  # neighbor bboxes are already tight
-            ),
-            cache_dir=crop_cache_dir,
-        )
-        return out.crop_ref
-    except (FileNotFoundError, ValueError) as exc:
-        logger.debug(
-            "neighbor crop failed for page=%d bbox=%s: %s",
-            neighbor.page,
-            neighbor.bbox_norm,
-            exc,
-        )
+    if pdf_path is not None:
+        try:
+            out = await inspect_region(
+                InspectRegionInput(
+                    doc_path=str(pdf_path),
+                    page=neighbor.page,
+                    bbox_norm=neighbor.bbox_norm,
+                    mode="image",
+                    expansion="none",  # neighbor bboxes are already tight
+                ),
+                cache_dir=crop_cache_dir,
+            )
+            return out.crop_ref
+        except (FileNotFoundError, ValueError) as exc:
+            logger.debug(
+                "neighbor crop failed for page=%d bbox=%s: %s",
+                neighbor.page,
+                neighbor.bbox_norm,
+                exc,
+            )
+
+    if page_image is not None:
+        try:
+            return _crop_page_image(
+                page_image,
+                neighbor.bbox_norm,
+                cache_dir=crop_cache_dir,
+                expansion=0.0,
+            )
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            logger.debug(
+                "neighbor page-image crop failed for page=%d bbox=%s: %s",
+                neighbor.page,
+                neighbor.bbox_norm,
+                exc,
+            )
+    return None
+
+
+async def _extract_neighbor_text(
+    neighbor: RegionCandidate,
+    *,
+    role: str,
+    pdf_path: Path | None,
+    crop_ref: str | None,
+    text_layer_cache_dir: Path | None,
+    crop_cache_dir: Path | None,
+) -> str | None:
+    """Best-effort text snippet for an attached neighbor.
+
+    The reasoner sees linked neighbor images, but the verifier and packet
+    descriptor are text-first. Pull native text where possible; fall back to
+    OCR so captions/footnotes/legend labels do not disappear from those
+    compact summaries.
+    """
+    if pdf_path is not None:
+        try:
+            text_out = await get_text_layer(
+                GetTextLayerInput(
+                    doc_path=str(pdf_path),
+                    page=neighbor.page,
+                    bbox_norm=neighbor.bbox_norm,
+                ),
+                cache_dir=text_layer_cache_dir,
+            )
+            text = _clean_context_text(text_out.text)
+            if text:
+                return text
+        except (FileNotFoundError, ValueError) as exc:
+            logger.debug(
+                "neighbor text layer failed for role=%s page=%d bbox=%s: %s",
+                role,
+                neighbor.page,
+                neighbor.bbox_norm,
+                exc,
+            )
+
+        try:
+            ocr_out = await inspect_region(
+                InspectRegionInput(
+                    doc_path=str(pdf_path),
+                    page=neighbor.page,
+                    bbox_norm=neighbor.bbox_norm,
+                    mode="element",
+                    expansion="none",
+                ),
+                cache_dir=crop_cache_dir,
+            )
+            return _clean_context_text(ocr_out.ocr_text)
+        except (FileNotFoundError, ValueError) as exc:
+            logger.debug(
+                "neighbor OCR failed for role=%s page=%d bbox=%s: %s",
+                role,
+                neighbor.page,
+                neighbor.bbox_norm,
+                exc,
+            )
+            return None
+
+    if crop_ref:
+        text, _confidence = _ocr_existing_crop(Path(crop_ref))
+        return _clean_context_text(text)
+    return None
+
+
+def _context_text_updates(
+    packet: EvidencePacket, linked_texts: list[tuple[str, str]]
+) -> dict[str, str]:
+    """Append linked-neighbor snippets to whichever packet text field is visible."""
+    if not linked_texts:
+        return {}
+
+    context_lines = [f"Context [{role}]: {text}" for role, text in linked_texts if text.strip()]
+    if not context_lines:
+        return {}
+    context = "\n".join(context_lines)
+    if packet.text_layer_snippet:
+        return {"text_layer_snippet": f"{packet.text_layer_snippet.rstrip()}\n{context}"}
+    if packet.ocr_snippet:
+        return {"ocr_snippet": f"{packet.ocr_snippet.rstrip()}\n{context}"}
+    return {"text_layer_snippet": context}
+
+
+def _clean_context_text(text: str | None) -> str | None:
+    cleaned = " ".join((text or "").split())
+    if not cleaned:
         return None
+    if len(cleaned) <= _MAX_LINKED_CONTEXT_TEXT_CHARS:
+        return cleaned
+    return cleaned[: _MAX_LINKED_CONTEXT_TEXT_CHARS - 3].rstrip() + "..."
+
+
+def _figure_refs_from_text(*texts: str | None) -> set[str]:
+    """Return figure numbers mentioned in packet or neighbor text."""
+    refs: set[str] = set()
+    for text in texts:
+        for match in _FIGURE_REF_RE.finditer(text or ""):
+            refs.add(match.group("num").lower())
+    return refs
+
+
+def _neighbor_text_mismatches_packet_figure(
+    packet_figure_refs: set[str],
+    *,
+    role: str,
+    linked_text: str,
+) -> bool:
+    """Drop obviously wrong figure captions from chart/image packets.
+
+    Dense chart pages often have several adjacent captions. If a primary
+    packet OCR says "Figure 31" and a candidate caption says only "Figure 33",
+    attaching that caption gives the reasoner conflicting context. We only
+    filter caption-like neighbors and only when both sides contain figure refs.
+    """
+    role_key = (role or "").lower()
+    if "caption" not in role_key or not packet_figure_refs:
+        return False
+    neighbor_refs = _figure_refs_from_text(linked_text)
+    return bool(neighbor_refs) and packet_figure_refs.isdisjoint(neighbor_refs)
 
 
 # ---------------------------------------------------------------------------

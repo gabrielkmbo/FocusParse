@@ -157,6 +157,23 @@ def main() -> int:
             return 2
     eval_limit = None if args.example_id else args.limit
 
+    if args.agent == "focus" and not args.skip_layout_preflight:
+        try:
+            asyncio.run(
+                _preflight_layout_endpoint(
+                    examples,
+                    images_root=args.staging_dir,
+                    max_retries=args.layout_preflight_retries,
+                )
+            )
+        except RuntimeError as exc:
+            print(
+                "error: layout endpoint preflight failed; aborting focus eval before "
+                f"model calls. Pass --skip-layout-preflight to override. ({exc})",
+                file=sys.stderr,
+            )
+            return 2
+
     if args.agent == "focus":
         result = asyncio.run(
             run_focus_eval(
@@ -179,6 +196,9 @@ def main() -> int:
                 use_react_inspector=args.react_inspector,
                 multi_scale_packets=args.multi_scale_packets,
                 chart_to_table_enabled=args.chart_to_table,
+                strict_layout_detection=not args.allow_layout_fallbacks,
+                layout_max_retries=args.layout_detect_retries,
+                layout_timeout_s=args.layout_detect_timeout_s,
             )
         )
     elif args.agent in ("react", "agent_baseline"):
@@ -240,7 +260,9 @@ def main() -> int:
     if args.visualize_trace:
         viewer_example_id = args.example_id or _first_example_id(result.get("per_example") or [])
         if viewer_example_id is None:
-            print("warning: --visualize-trace requested but no examples were scored", file=sys.stderr)
+            print(
+                "warning: --visualize-trace requested but no examples were scored", file=sys.stderr
+            )
         else:
             viewer_output = args.trace_viewer_output or _default_trace_viewer_output(
                 run_dir, viewer_example_id
@@ -393,6 +415,55 @@ def _parse_args() -> argparse.Namespace:
             "expand_context and forces auto_zoom off when minimal."
         ),
     )
+    parser.add_argument(
+        "--skip-layout-preflight",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the focus-agent layout endpoint health check. By default, "
+            "focus evals probe the shared HF layout endpoint once before any "
+            "model calls so a 503/stub outage cannot produce a misleading "
+            "skeleton-region A/B."
+        ),
+    )
+    parser.add_argument(
+        "--allow-layout-fallbacks",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow the focus agent to continue with full-page skeleton regions "
+            "when the layout endpoint fails mid-run. Default is strict for HF "
+            "research evals so endpoint outages abort instead of contaminating "
+            "headline numbers."
+        ),
+    )
+    parser.add_argument(
+        "--layout-preflight-retries",
+        type=int,
+        default=1,
+        help=(
+            "Retry count for the pre-run layout endpoint probe. Keep this low; "
+            "the real eval still uses the layout client's normal retry policy."
+        ),
+    )
+    parser.add_argument(
+        "--layout-detect-retries",
+        type=int,
+        default=None,
+        help=(
+            "Override per-page layout detection retries during focus eval. "
+            "Default uses configs/default.yaml endpoints.layout.retries."
+        ),
+    )
+    parser.add_argument(
+        "--layout-detect-timeout-s",
+        type=float,
+        default=None,
+        help=(
+            "Override per-page layout detection timeout during focus eval. "
+            "Default uses configs/default.yaml endpoints.layout.timeout_s."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -411,6 +482,70 @@ def _first_example_id(per_example: list[dict]) -> str | None:
 
 def _default_trace_viewer_output(run_dir: Path, example_id: str) -> Path:
     return Path("results") / "trace_viewer" / run_dir.name / f"{example_id}.html"
+
+
+async def _preflight_layout_endpoint(
+    examples: list,
+    *,
+    images_root: Path,
+    max_retries: int,
+    timeout_s: float = 30.0,
+    detect_layout_func=None,
+) -> None:
+    """Probe the shared layout endpoint before a focus eval starts.
+
+    Focus accuracy is not comparable when `localizer` falls back to skeleton
+    full-page regions. This intentionally bypasses the layout cache so it tests
+    current endpoint health rather than past successful detections.
+    """
+    from PIL import Image
+
+    from focusparse.tools.layout_detect import (
+        LayoutEndpointUnavailable,
+        StubResponseError,
+        detect_layout,
+    )
+
+    image_path = _first_existing_page_image(examples, images_root)
+    detector = detect_layout_func or detect_layout
+    with Image.open(image_path) as im:
+        width, height = im.size
+    try:
+        out = await detector(
+            image_path.read_bytes(),
+            page=1,
+            image_width=width,
+            image_height=height,
+            cache_dir=None,
+            max_retries=max_retries,
+            timeout_s=timeout_s,
+        )
+    except (LayoutEndpointUnavailable, StubResponseError) as exc:
+        raise RuntimeError(str(exc)) from exc
+    logger.info(
+        "layout endpoint preflight ok: image=%s size=%dx%d boxes=%d",
+        image_path,
+        width,
+        height,
+        len(getattr(out, "boxes", []) or []),
+    )
+
+
+def _first_existing_page_image(examples: list, images_root: Path) -> Path:
+    """Return the first staged page image path available in `examples`."""
+    for ex in examples:
+        for rel_or_abs in getattr(ex, "page_images", None) or []:
+            path = _resolve_image_path(images_root, rel_or_abs)
+            if path.is_file():
+                return path
+    raise RuntimeError(f"no staged page image found under {images_root}")
+
+
+def _resolve_image_path(images_root: Path, rel_or_abs: str) -> Path:
+    path = Path(rel_or_abs)
+    if path.is_absolute():
+        return path
+    return images_root / path
 
 
 def _render_trace_viewer(
