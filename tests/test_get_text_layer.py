@@ -82,6 +82,24 @@ async def test_extracts_native_text_and_spans(tmp_path):
     assert out.page_height == pytest.approx(800.0)
 
 
+async def test_preserves_line_breaks_for_table_like_text(tmp_path):
+    pdf = _write_pdf(
+        tmp_path / "table.pdf",
+        pages=[
+            [
+                ("Header", (50, 50)),
+                ("2024", (150, 50)),
+                ("2025", (220, 50)),
+                ("Revenue", (50, 80)),
+                ("10", (150, 80)),
+                ("12", (220, 80)),
+            ],
+        ],
+    )
+    out = await get_text_layer(GetTextLayerInput(doc_path=str(pdf), page=1))
+    assert out.text.splitlines() == ["Header 2024 2025", "Revenue 10 12"]
+
+
 async def test_pages_are_one_indexed(tmp_path):
     pdf = _write_pdf(
         tmp_path / "multi.pdf",

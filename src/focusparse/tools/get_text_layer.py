@@ -76,7 +76,7 @@ class TextSpan(BaseModel):
 class GetTextLayerOutput(BaseModel):
     text: str = Field(
         ...,
-        description="Joined plain text, spans separated by single spaces.",
+        description="Joined plain text, preserving detected line breaks where possible.",
     )
     source: str = Field(
         ...,
@@ -94,6 +94,10 @@ class GetTextLayerOutput(BaseModel):
         default=0.0, description="Page width in PDF points (1pt = 1/72 inch)."
     )
     page_height: float = Field(default=0.0, description="Page height in PDF points.")
+
+
+_CACHE_VERSION = b"line-aware-v2"
+_LINE_Y_TOLERANCE_PT = 3.0
 
 
 async def get_text_layer(
@@ -201,13 +205,39 @@ def _centroid_in_bbox(
 
 
 def _join_spans(spans: list[TextSpan]) -> str:
-    """Join spans back into plain text, preserving reading order.
+    """Join spans back into plain text, preserving reading order and lines.
 
-    Span order as returned by PyMuPDF is block-by-block, top-to-bottom, so
-    we just concatenate with spaces — higher-fidelity line reconstruction
-    is the router's problem (it only needs BM25 bag-of-words anyway).
+    Span order as returned by PyMuPDF is block-by-block, top-to-bottom. We
+    keep that order, but insert a newline when consecutive spans move to a
+    new baseline. Table packets especially need row boundaries; a single flat
+    string makes column arithmetic much easier to misread.
     """
-    return " ".join(s.text for s in spans)
+    if not spans:
+        return ""
+
+    lines: list[list[TextSpan]] = []
+    current_line: list[TextSpan] = []
+    current_y: float | None = None
+
+    for span in spans:
+        y_center = (span.bbox[1] + span.bbox[3]) / 2.0
+        if current_y is None or abs(y_center - current_y) <= _LINE_Y_TOLERANCE_PT:
+            current_line.append(span)
+            current_y = y_center if current_y is None else (current_y + y_center) / 2.0
+            continue
+        lines.append(current_line)
+        current_line = [span]
+        current_y = y_center
+
+    if current_line:
+        lines.append(current_line)
+
+    return "\n".join(_join_line(line) for line in lines if line)
+
+
+def _join_line(spans: list[TextSpan]) -> str:
+    ordered = sorted(spans, key=lambda s: s.bbox[0])
+    return " ".join(s.text.strip() for s in ordered if s.text.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +254,8 @@ def _cache_key(
     # Content-address on the PDF bytes so re-running after a PDF edit
     # invalidates the cache automatically.
     h.update(pdf_path.read_bytes())
+    h.update(b"\0")
+    h.update(_CACHE_VERSION)
     h.update(b"\0")
     h.update(str(page).encode("ascii"))
     h.update(b"\0")

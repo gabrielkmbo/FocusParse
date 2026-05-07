@@ -131,6 +131,40 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-07 — expand retry de-dup + line-aware table text
+
+Two low-risk evidence-path follow-ups landed on branch
+`codex/inspect-expand-page-image-fallback` after the strict evidence-text run:
+
+- `pipeline/expander.py` now preserves existing linked neighbor refs/types on
+  verifier-driven `expand_context` retries, skips already-linked crop refs, and
+  suppresses duplicate `Context [role]: ...` text lines. This directly targets
+  retry/broad-neighbor noise where the same caption or header could be repeated
+  in packet text and provenance.
+- `tools/get_text_layer.py` now preserves detected line breaks instead of
+  flattening every native PDF span with spaces, and bumps the text-layer cache
+  key with `line-aware-v2`. Large table snippets now keep row boundaries, which
+  makes cross-page financial table arithmetic less ambiguous to the reasoner.
+
+Focused verification:
+
+- `tests/test_expander.py`: **30 passed**.
+- Packet-path slice (`test_expander`, `test_reasoner`, `test_workflow`,
+  `test_focus_harness`): **117 passed**, 5 warnings.
+- `tests/test_get_text_layer.py`: **10 passed**, 5 warnings.
+- Packet/text-path slice (`test_get_text_layer`, `test_inspector`,
+  `test_expander`, `test_reasoner`, `test_workflow`, `test_focus_harness`):
+  **164 passed**, 5 warnings.
+- Ruff check and format-check were clean on touched files.
+
+Real smoke:
+`results/hf/sprint-2026-05-07/line-aware-smoke-fin-10k-0036/` reran
+`fin-10-K-0036` after the line-aware text patch. The prior strict
+evidence-text run predicted **84%** vs gold **68%** despite perfect
+localization; the smoke predicted **68%** with both supporting table packets
+cited. The shared layout endpoint returned a preflight 503, so the smoke used
+`--skip-layout-preflight` and cached layout for this already-run example.
+
 ### 2026-05-07 — Path A replicate hold + evidence text pathway
 
 Path A was run twice at n=148 on HF revision
