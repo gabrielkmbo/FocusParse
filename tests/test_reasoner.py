@@ -330,3 +330,18 @@ def test_render_packet_line_neighbor_count_matches_types() -> None:
     line = _render_packet_line(p)
     assert "Attached neighbors (3)" in line
     assert "section_header" in line
+
+
+# ---------------------------------------------------------------------------
+# Path A: system prompt explains the primary-vs-context layout
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_explains_neighbor_layout() -> None:
+    """The reasoner's system prompt tells the LLM that 'Attached neighbors'
+    means the images that follow are CONTEXT — not the primary focus."""
+    from focusparse.pipeline.reasoner import _SYSTEM_PROMPT
+
+    assert "Attached neighbors" in _SYSTEM_PROMPT
+    assert "primary crop" in _SYSTEM_PROMPT
+    assert "context" in _SYSTEM_PROMPT.lower()

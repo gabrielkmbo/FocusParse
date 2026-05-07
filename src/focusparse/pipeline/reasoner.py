@@ -20,6 +20,10 @@ from focusparse.pipeline.events import AnswerEvent, EvidenceEvent, QuestionEvent
 _SYSTEM_PROMPT = (
     "You are answering a question about a document using the provided evidence packets. "
     "Each packet shows a page region with a packet_id (e.g. pkt_000). "
+    "When a packet's descriptor lists 'Attached neighbors', the images that follow "
+    "the primary crop are CONTEXT (caption, footnote, section header, etc.). "
+    "Use the primary crop to ground the answer; consult the neighbor crops only "
+    "when the answer requires reading text or labels around the primary region. "
     "Return strict JSON with keys `answer`, `citations`, and `confidence`. "
     "`answer` is the answer string (or the literal word 'Unanswerable'). "
     "`citations` is a list of packet_id strings that directly support the answer. "
