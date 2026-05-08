@@ -52,6 +52,7 @@ def test_evidence_snapshot_round_trip() -> None:
             region_type="picture",
             local_crop_ref="cache/crops/abc123.png",
             linked_crop_refs=["cache/crops/def456.png"],
+            linked_neighbor_types=["caption"],
             text_layer_snippet="hello",
             ocr_snippet=None,
             confidence=0.87,
@@ -65,6 +66,7 @@ def test_evidence_snapshot_round_trip() -> None:
     assert dumped["evidence_snapshot"] is not None
     assert dumped["evidence_snapshot"][0]["packet_id"] == "pkt_000"
     assert dumped["evidence_snapshot"][0]["bbox_norm"] == [0.1, 0.2, 0.5, 0.6]
+    assert dumped["evidence_snapshot"][0]["linked_neighbor_types"] == ["caption"]
 
     rehydrated = RunTrace.model_validate(dumped)
     assert rehydrated.evidence_snapshot is not None
@@ -92,6 +94,7 @@ def test_evidence_packet_summary_defaults() -> None:
     assert s.region_type is None
     assert s.local_crop_ref is None
     assert s.linked_crop_refs == []
+    assert s.linked_neighbor_types == []
     assert s.text_layer_snippet is None
     assert s.confidence == 1.0
 

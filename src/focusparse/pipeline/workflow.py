@@ -47,16 +47,23 @@ if TYPE_CHECKING:
     from focusparse._parser_bench import BenchmarkExample
 
 
-# Default retry budget. The verifier loop is **opt-in by default** as of
-# the 2026-04-27 n=30 A/B (see MEMORY.md). With `max_retries=2` the loop
-# fired on 67% of examples but only 9% of retries flipped the verdict,
-# while diluting region_recall (-0.08), region_precision (-0.16), and
-# bbox_iou_mean (-0.08) — the `retry_localization` action lowers the
-# confidence threshold which surfaces noisier boxes. Items 4 (region
-# reranker) and 5 (evidence-graph expansion) attack the same problem
-# more surgically; flip the default back to a positive integer after
-# one of them shows a measurable improvement on a real validation slice.
+# Default full retry budget. Localization retries stay opt-in after the
+# 2026-04-27 n=30 A/B: `max_retries=2` fired on 67% of examples but only
+# 9% of retries flipped the verdict, while diluting region_recall (-0.08),
+# region_precision (-0.16), and bbox_iou_mean (-0.08). The culprit was the
+# `retry_localization` action lowering the confidence threshold and surfacing
+# noisier boxes.
 _DEFAULT_MAX_RETRIES = 0
+# Evidence-only retries are safer: they do not re-run localization, and the
+# 2026-05-08 n=148 crop-fallback diagnostic showed 45 wrong examples where the
+# verifier asked for `expand_context` after the initial pass. Let the controller
+# try one bounded evidence repair by default while keeping localization retries
+# behind `max_retries`.
+_DEFAULT_MAX_EVIDENCE_RETRIES = 1
+# Keep the evidence-only budget for actions that actually mutate evidence.
+# `escalate_reasoner` spends another frontier call without improving
+# inspect/expand packets, so it stays behind the explicit full-loop budget.
+_EVIDENCE_RETRY_ACTIONS = frozenset({"expand_context"})
 
 # Knobs the retry loop tweaks per action. Values match (and float as)
 # the localizer's / expander's defaults — initial passes use these,
@@ -67,6 +74,86 @@ _LOCALIZATION_RETRY_FACTOR = 0.7  # multiplied each retry → more boxes surface
 _DEFAULT_ADJACENCY_PAD = 0.08
 _EXPAND_RETRY_FACTOR = 1.5  # multiplied each retry → wider neighbor net
 _MAX_ADJACENCY_PAD = 0.30  # cap so the pad stays meaningful
+_RETRY_SELECTION_CONFIDENCE_MARGIN = 0.15
+_ABSTAIN_OVERRIDE_MIN_CONFIDENCE = 0.45
+_VISUAL_READABILITY_RE = re.compile(
+    r"\b("
+    r"blur(?:ry|red)?|cannot\s+read|can't\s+read|difficult\s+to\s+read|"
+    r"fragmented|garbled|illegible|incomplete|low[- ]resolution|not\s+fully\s+readable|"
+    r"ocr[- ]?(?:damaged|garbled|poor)|pixelated|too\s+small|unclear|unreadable"
+    r")\b",
+    re.IGNORECASE,
+)
+_VISUAL_EVIDENCE_RE = re.compile(
+    r"\b(axis|chart|crop|diagram|figure|image|label|ocr|plot|schematic|signal|timing|visual)\b",
+    re.IGNORECASE,
+)
+_FOCUSED_RETRY_SUPPLEMENTAL_CONTEXT_TYPES = frozenset(
+    {
+        "caption",
+        "code",
+        "context_window",
+        "footnote",
+        "key-value region",
+        "key_value_region",
+        "list-item",
+        "list_item",
+        "page-header",
+        "section-header",
+        "section_header",
+        "table",
+        "text",
+        "title",
+    }
+)
+_MAX_FOCUSED_RETRY_SUPPLEMENTAL_PACKETS = 2
+_MAX_FOCUSED_RETRY_VISUAL_SIBLINGS = 2
+_FOCUSED_RETRY_VISUAL_SIBLING_RE = re.compile(
+    r"\b("
+    r"gridlines?|layout\s+overview|multiple\s+(?:waveforms?|traces?|panels?)|"
+    r"oscilloscope|panel|specific\s+(?:trace|signal|waveform)|"
+    r"timing|transition|waveforms?"
+    r")\b",
+    re.IGNORECASE,
+)
+_VISUAL_PACKET_TYPES = frozenset(
+    {
+        "bar_chart",
+        "candlestick",
+        "chart",
+        "curve",
+        "diagram",
+        "figure",
+        "image",
+        "line_chart",
+        "picture",
+        "plot",
+    }
+)
+_ANSWER_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_ANSWER_SELECTION_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "by",
+        "for",
+        "from",
+        "in",
+        "is",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "what",
+        "which",
+        "with",
+    }
+)
 
 
 @dataclass
@@ -94,22 +181,28 @@ class FocusWorkflow:
         cache: Any = None,
         tools: Any = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
+        max_evidence_retries: int = _DEFAULT_MAX_EVIDENCE_RETRIES,
         use_evidence_graph: bool = False,
         auto_zoom: bool = False,
         tool_set: str = "full",
         use_react_inspector: bool = False,
         multi_scale_packets: bool = False,
         chart_to_table_enabled: bool = False,
+        allow_layout_endpoint_fallback: bool = True,
+        layout_max_retries: int | None = None,
+        layout_timeout_s: float | None = None,
     ) -> None:
         self.backend_client = backend_client
         self.config = config
         self.tier_router = tier_router
         self.cache = cache
         self.tools = tools
-        # `max_retries` caps the verifier→retry loop. 0 reverts the workflow
-        # to the pre-2026-04-27 cascade (no loops); the default lets the
-        # verifier act as a controller, not just a judge.
+        # `max_retries` caps the full verifier→retry loop, including
+        # localization. `max_evidence_retries` gives evidence/reasoning
+        # repairs a separate small budget so verifier control is not all-or-
+        # nothing.
         self.max_retries = max_retries
+        self.max_evidence_retries = max_evidence_retries
         # Item 5: typed evidence-graph expansion. Default off pending a fresh
         # A/B under the post-2026-04-27 scorer (the n=30 regression that
         # gated this off was measured under the pre-fix scorer).
@@ -147,6 +240,12 @@ class FocusWorkflow:
         # for axis_value_interpolation / candlestick_ohlc_extraction
         # questions — most n=148 examples don't pay this cost.
         self.chart_to_table_enabled = chart_to_table_enabled
+        # Production/demo workflows can keep the historical full-page
+        # fallback. Research evals flip this off so a transient layout
+        # endpoint outage cannot contaminate headline accuracy.
+        self.allow_layout_endpoint_fallback = allow_layout_endpoint_fallback
+        self.layout_max_retries = layout_max_retries
+        self.layout_timeout_s = layout_timeout_s
 
     def _client_for(self, role: str) -> ModelClient | None:
         """Resolve a role-scoped client via `tier_router`, else return None.
@@ -169,6 +268,27 @@ class FocusWorkflow:
         if layout is None:
             return None
         return getattr(layout, "url", None)
+
+    def _layout_endpoint_retries(self) -> int | None:
+        """Resolve layout retry count from constructor override or config."""
+        if self.layout_max_retries is not None:
+            return self.layout_max_retries
+        layout = self._layout_endpoint_config()
+        return getattr(layout, "retries", None) if layout is not None else None
+
+    def _layout_endpoint_timeout_s(self) -> float | None:
+        """Resolve layout timeout from constructor override or config."""
+        if self.layout_timeout_s is not None:
+            return self.layout_timeout_s
+        layout = self._layout_endpoint_config()
+        timeout = getattr(layout, "timeout_s", None) if layout is not None else None
+        return float(timeout) if timeout is not None else None
+
+    def _layout_endpoint_config(self) -> Any | None:
+        endpoints = getattr(self.config, "endpoints", None) if self.config else None
+        if not endpoints:
+            return None
+        return endpoints.get("layout") if isinstance(endpoints, dict) else None
 
     def _layout_cache_dir(self) -> Path | None:
         """Resolve the on-disk cache dir for layout responses.
@@ -335,6 +455,7 @@ class FocusWorkflow:
             evidence,
             regions=regions,
             pdf_path=pdf_path,
+            images_by_page=images_by_page,
             adjacency_pad=adjacency_pad,
             recorder=recorder,
             step_counter=step_counter,
@@ -369,8 +490,15 @@ class FocusWorkflow:
         # without a smarter retry mutation).
         initial_supported = verdict.supported
         retries_used = 0
+        evidence_retries_used = 0
         loop_terminated = ""  # set in the loop body before break
         escalation_hint: str | None = None
+        answer_evidence = evidence
+        best_unsupported_answer: AnswerEvent | None = None
+        best_unsupported_evidence: EvidenceEvent | None = None
+        if not verdict.supported:
+            best_unsupported_answer = answer_event
+            best_unsupported_evidence = answer_evidence
 
         while True:
             action = verdict.next_action
@@ -378,6 +506,30 @@ class FocusWorkflow:
                 loop_terminated = "accepted"
                 break
             if action == "abstain":
+                if _should_keep_best_unsupported_on_retry_abstain(
+                    best_unsupported_answer,
+                    question_event=question_event,
+                    retries_used=retries_used,
+                ):
+                    _add_debug_event(
+                        recorder,
+                        stage="answer",
+                        event_type="selection",
+                        retry_attempt=retries_used,
+                        payload={
+                            "selected": "best_unsupported",
+                            "reason": "retry_abstain_after_evidence_repair",
+                            "selected_answer": best_unsupported_answer.answer,
+                            "selected_confidence": best_unsupported_answer.confidence,
+                            "discarded_answer": answer_event.answer,
+                            "discarded_confidence": answer_event.confidence,
+                        },
+                    )
+                    answer_event = best_unsupported_answer
+                    if best_unsupported_evidence is not None:
+                        answer_evidence = best_unsupported_evidence
+                    loop_terminated = "exhausted"
+                    break
                 # Replace the answer with a typed abstention so downstream
                 # scoring (which checks for abstention keywords) can match.
                 from focusparse.pipeline.events import AnswerEvent as _AnswerEvent
@@ -394,11 +546,22 @@ class FocusWorkflow:
             # Verdict wants a retry of some kind. Honor the budget: when we
             # can't retry, surface the current answer + flag exhaustion so
             # the trace shows the verifier wasn't satisfied.
-            if retries_used >= self.max_retries:
+            retry_budget = self._retry_budget_for_action(action)
+            if _should_allow_reasoner_shape_retry(
+                action=action,
+                answer=answer_event,
+                verdict=verdict,
+                question_event=question_event,
+                max_evidence_retries=self.max_evidence_retries,
+            ):
+                retry_budget = max(retry_budget, self.max_evidence_retries)
+            if retries_used >= retry_budget:
                 loop_terminated = "exhausted"
                 break
 
             retries_used += 1
+            if action in _EVIDENCE_RETRY_ACTIONS:
+                evidence_retries_used += 1
 
             if action == "retry_localization":
                 confidence_threshold *= _LOCALIZATION_RETRY_FACTOR
@@ -437,27 +600,56 @@ class FocusWorkflow:
                     evidence,
                     regions=regions,
                     pdf_path=pdf_path,
+                    images_by_page=images_by_page,
                     adjacency_pad=adjacency_pad,
                     recorder=recorder,
                     step_counter=step_counter,
                     retry_attempt=retries_used,
                     plan=plan,
                 )
+                retry_answer_evidence = evidence
             elif action == "expand_context":
                 adjacency_pad = min(adjacency_pad * _EXPAND_RETRY_FACTOR, _MAX_ADJACENCY_PAD)
+                verifier_missing_context = _verifier_missing_context(verdict)
+                target_packet_ids = _verifier_target_packet_ids(
+                    verdict,
+                    valid_packet_ids={packet.packet_id for packet in evidence.packets},
+                ) or list(answer_event.citations)
+                retry_plan = _plan_with_extra_evidence_types(plan, verifier_missing_context)
+                retry_visual_zoom = _verifier_requests_visual_readability_retry(
+                    verdict,
+                    target_packet_ids=target_packet_ids,
+                )
                 evidence = await self._run_expand(
                     evidence,
                     regions=regions,
                     pdf_path=pdf_path,
+                    images_by_page=images_by_page,
                     adjacency_pad=adjacency_pad,
                     recorder=recorder,
                     step_counter=step_counter,
                     retry_attempt=retries_used,
-                    plan=plan,
+                    plan=retry_plan,
+                    verifier_reason=verdict.reason,
+                    verifier_missing_context=verifier_missing_context,
+                    target_packet_ids=target_packet_ids,
+                    retry_visual_zoom=retry_visual_zoom,
                 )
+                retry_answer_evidence = _focused_retry_evidence(
+                    evidence,
+                    target_packet_ids,
+                    cited_packet_ids=list(answer_event.citations),
+                    verifier_reason=verdict.reason,
+                )
+                # The retry answer should know what the verifier thought was
+                # missing. When there are no cited/target packets, the explicit
+                # empty target list keeps expansion from sweeping every packet;
+                # the hint still gives the reasoner a focused repair instruction.
+                escalation_hint = verdict.reason
             elif action == "escalate_reasoner":
                 # No state change — just feed the verifier's reason into the
                 # next reasoner call so it knows what to address.
+                retry_answer_evidence = evidence
                 escalation_hint = verdict.reason
             else:
                 # Unknown action (future verifier extension) — accept the
@@ -470,21 +662,30 @@ class FocusWorkflow:
             # decides whether the loop continues.
             answer_event, reasoner_response = await self._run_answer(
                 question_event,
-                evidence,
+                retry_answer_evidence,
                 escalation_hint=escalation_hint,
                 recorder=recorder,
                 step_counter=step_counter,
                 retry_attempt=retries_used,
+                evidence_scope=_evidence_scope(evidence, retry_answer_evidence),
             )
+            answer_evidence = retry_answer_evidence
             verdict, verify_response = await self._run_verify(
                 question_event,
-                evidence,
+                answer_evidence,
                 answer_event,
                 backend_client=verifier_client,
                 recorder=recorder,
                 step_counter=step_counter,
                 retry_attempt=retries_used,
             )
+            if not verdict.supported and _is_better_unsupported_answer(
+                answer_event,
+                best_unsupported_answer,
+                question_text=question_event.question,
+            ):
+                best_unsupported_answer = answer_event
+                best_unsupported_evidence = answer_evidence
 
         # `loop_retry_helped`: did the retries flip the verdict from
         # unsupported → supported? Null when no retries fired (caller
@@ -492,6 +693,32 @@ class FocusWorkflow:
         loop_retry_helped: bool | None = None
         if retries_used > 0:
             loop_retry_helped = (not initial_supported) and verdict.supported
+
+        if (
+            loop_terminated == "exhausted"
+            and not verdict.supported
+            and best_unsupported_answer is not None
+            and best_unsupported_evidence is not None
+            and best_unsupported_answer is not answer_event
+        ):
+            _add_debug_event(
+                recorder,
+                stage="answer",
+                event_type="selection",
+                retry_attempt=retries_used,
+                payload={
+                    "selected": "best_unsupported",
+                    "reason": "retry_exhausted_without_support",
+                    "selected_answer": best_unsupported_answer.answer,
+                    "selected_confidence": best_unsupported_answer.confidence,
+                    "discarded_answer": answer_event.answer,
+                    "discarded_confidence": answer_event.confidence,
+                },
+            )
+            answer_event = best_unsupported_answer
+            evidence = best_unsupported_evidence
+        else:
+            evidence = answer_evidence
 
         # Convert packet-id citations back to {page, bbox} dicts.
         citations = _citations_from_packets(answer_event.citations, evidence.packets)
@@ -503,6 +730,7 @@ class FocusWorkflow:
 
         telemetry = _make_telemetry(reasoner_response)
         telemetry["retries_used"] = retries_used
+        telemetry["evidence_retries_used"] = evidence_retries_used
         telemetry["loop_terminated"] = loop_terminated
         telemetry["loop_retry_helped"] = loop_retry_helped
         return WorkflowResult(
@@ -513,6 +741,20 @@ class FocusWorkflow:
         )
 
     # -- per-stage runners (used by both initial cascade and retry loop) --
+
+    def _retry_budget_for_action(self, action: str) -> int:
+        """Return the retry budget for a verifier action.
+
+        `max_retries` remains the full-loop budget. Evidence-only actions get
+        a bounded default budget because they only re-run expand/answer/verify
+        or answer/verify; localization retries still require an explicit
+        `max_retries` override.
+        """
+        if action not in _EVIDENCE_RETRY_ACTIONS:
+            return self.max_retries
+        if action == "expand_context" and self.tool_set != "full":
+            return self.max_retries
+        return max(self.max_retries, self.max_evidence_retries)
 
     async def _run_localize(
         self,
@@ -534,6 +776,9 @@ class FocusWorkflow:
             layout_endpoint_url=self._layout_endpoint_url(),
             cache_dir=self._layout_cache_dir(),
             confidence_threshold=confidence_threshold,
+            allow_endpoint_fallback=self.allow_layout_endpoint_fallback,
+            layout_max_retries=self._layout_endpoint_retries(),
+            layout_timeout_s=self._layout_endpoint_timeout_s(),
         )
         n_fallback_pages = sum(
             1 for r in regions.candidates if "skeleton_full_page" in r.supporting_signals
@@ -681,6 +926,7 @@ class FocusWorkflow:
                         "n_real_packets": n_real_packets,
                         "plan_size": result.plan_size,
                         "fallback_used": result.fallback_used,
+                        "chart_to_table_enabled": self.chart_to_table_enabled,
                         "retry_attempt": retry_attempt,
                     },
                     obs_summary=(response.text[:200] if response and response.text else None),
@@ -701,6 +947,7 @@ class FocusWorkflow:
                     "n_real_packets": n_real_packets,
                     "plan_size": result.plan_size,
                     "fallback_used": result.fallback_used,
+                    "chart_to_table_enabled": self.chart_to_table_enabled,
                     "packets": [_packet_to_debug(p) for p in evidence.packets],
                 },
             )
@@ -721,7 +968,7 @@ class FocusWorkflow:
         n_real_packets = sum(
             1 for p in evidence.packets if p.provenance.tool != "skeleton_inspector_fallback"
         )
-        inspect_tier = "deterministic" if pdf_path is not None else "skeleton"
+        inspect_tier = "deterministic" if n_real_packets > 0 else "skeleton"
         recorder.record(
             TrajectoryStep(
                 step_index=step_counter.next(),
@@ -732,6 +979,7 @@ class FocusWorkflow:
                 args={
                     "n_packets": len(evidence.packets),
                     "n_real_packets": n_real_packets,
+                    "chart_to_table_enabled": self.chart_to_table_enabled,
                     "retry_attempt": retry_attempt,
                 },
             )
@@ -745,6 +993,7 @@ class FocusWorkflow:
             payload={
                 "n_packets": len(evidence.packets),
                 "n_real_packets": n_real_packets,
+                "chart_to_table_enabled": self.chart_to_table_enabled,
                 "packets": [_packet_to_debug(p) for p in evidence.packets],
             },
         )
@@ -756,11 +1005,16 @@ class FocusWorkflow:
         *,
         regions: RegionsEvent,
         pdf_path: Path | None,
+        images_by_page: dict[int, Path],
         adjacency_pad: float,
         recorder: TrajectoryRecorder,
         step_counter: _StepCounter,
         retry_attempt: int = 0,
         plan: PlanEvent | None = None,
+        verifier_reason: str | None = None,
+        verifier_missing_context: list[str] | None = None,
+        target_packet_ids: list[str] | None = None,
+        retry_visual_zoom: bool = False,
     ) -> EvidenceEvent:
         # Tool-set ablation: when running with the +2-tools (minimal) belt
         # we skip expand_context entirely. The trace records a passthrough
@@ -795,14 +1049,38 @@ class FocusWorkflow:
             evidence,
             regions=regions,
             pdf_path=pdf_path,
+            images_by_page=images_by_page,
             crop_cache_dir=self._role_cache_dir("crops"),
+            text_layer_cache_dir=self._text_layer_cache_dir(),
             adjacency_pad=adjacency_pad,
             use_evidence_graph=self.use_evidence_graph,
             plan=plan,
+            verifier_reason=verifier_reason,
+            verifier_missing_context=verifier_missing_context,
+            target_packet_ids=target_packet_ids,
+            retry_visual_zoom=retry_visual_zoom,
         )
+        before_neighbor_counts = {p.packet_id: len(p.linked_crop_refs) for p in evidence.packets}
+        before_zoom_counts = {
+            p.packet_id: _packet_scale_count(p, "zoomed") for p in evidence.packets
+        }
         n_with_neighbors = sum(1 for p in expanded.packets if p.linked_crop_refs)
         n_neighbors = sum(len(p.linked_crop_refs) for p in expanded.packets)
-        expand_tier = "deterministic" if n_with_neighbors > 0 else "skeleton"
+        n_neighbors_added = sum(
+            max(0, len(p.linked_crop_refs) - before_neighbor_counts.get(p.packet_id, 0))
+            for p in expanded.packets
+        )
+        n_zoomed_added = sum(
+            max(0, _packet_scale_count(p, "zoomed") - before_zoom_counts.get(p.packet_id, 0))
+            for p in expanded.packets
+        )
+        n_packets_with_new_neighbors = sum(
+            len(p.linked_crop_refs) > before_neighbor_counts.get(p.packet_id, 0)
+            for p in expanded.packets
+        )
+        expand_tier = (
+            "deterministic" if (n_with_neighbors > 0 or n_zoomed_added > 0) else "skeleton"
+        )
         recorder.record(
             TrajectoryStep(
                 step_index=step_counter.next(),
@@ -813,8 +1091,15 @@ class FocusWorkflow:
                     "n_packets": len(expanded.packets),
                     "n_with_neighbors": n_with_neighbors,
                     "n_neighbors_attached": n_neighbors,
+                    "n_neighbors_added": n_neighbors_added,
+                    "n_zoomed_added": n_zoomed_added,
+                    "n_packets_with_new_neighbors": n_packets_with_new_neighbors,
                     "adjacency_pad": adjacency_pad,
                     "retry_attempt": retry_attempt,
+                    "verifier_reason": verifier_reason,
+                    "verifier_missing_context": verifier_missing_context or [],
+                    "target_packet_ids": target_packet_ids or [],
+                    "visual_readability_retry": retry_visual_zoom,
                 },
             )
         )
@@ -828,7 +1113,14 @@ class FocusWorkflow:
                 "n_packets": len(expanded.packets),
                 "n_with_neighbors": n_with_neighbors,
                 "n_neighbors_attached": n_neighbors,
+                "n_neighbors_added": n_neighbors_added,
+                "n_zoomed_added": n_zoomed_added,
+                "n_packets_with_new_neighbors": n_packets_with_new_neighbors,
                 "adjacency_pad": adjacency_pad,
+                "verifier_reason": verifier_reason,
+                "verifier_missing_context": verifier_missing_context or [],
+                "target_packet_ids": target_packet_ids or [],
+                "visual_readability_retry": retry_visual_zoom,
                 "packets": [_packet_to_debug(p) for p in expanded.packets],
             },
         )
@@ -843,6 +1135,7 @@ class FocusWorkflow:
         recorder: TrajectoryRecorder,
         step_counter: _StepCounter,
         retry_attempt: int = 0,
+        evidence_scope: str = "full",
     ) -> tuple[AnswerEvent, ModelResponse]:
         answer_event, reasoner_response = await answer_from_evidence(
             question_event,
@@ -860,6 +1153,7 @@ class FocusWorkflow:
                     "n_packets": len(evidence.packets),
                     "retry_attempt": retry_attempt,
                     "had_escalation_hint": bool(escalation_hint),
+                    "evidence_scope": evidence_scope,
                 },
                 obs_summary=(reasoner_response.text[:200] if reasoner_response.text else None),
                 tokens_in=reasoner_response.tokens_in,
@@ -879,6 +1173,7 @@ class FocusWorkflow:
                 "citations": list(answer_event.citations),
                 "confidence": answer_event.confidence,
                 "had_escalation_hint": bool(escalation_hint),
+                "evidence_scope": evidence_scope,
             },
         )
         return answer_event, reasoner_response
@@ -942,6 +1237,488 @@ class FocusWorkflow:
 # ---------------------------------------------------------------------------
 # Helpers (pure, unit-testable)
 # ---------------------------------------------------------------------------
+
+
+def _verifier_missing_context(verdict: VerdictEvent) -> list[str]:
+    raw = verdict.diagnostics.get("missing_context")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        value = item.strip()
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _focused_retry_evidence(
+    evidence: EvidenceEvent,
+    target_packet_ids: list[str],
+    *,
+    cited_packet_ids: list[str] | None = None,
+    verifier_reason: str | None = None,
+) -> EvidenceEvent:
+    """Restrict verifier-directed retry answers to cited/target packets.
+
+    When the verifier names a visual/table target but the original answer also
+    cited same-page explanatory text, keep a tiny amount of that context. This
+    preserves verifier focus without dropping the packet that explains how to
+    interpret the visual evidence.
+    """
+    target_set = {pid for pid in target_packet_ids if pid}
+    if not target_set:
+        return evidence
+    target_packets = [packet for packet in evidence.packets if packet.packet_id in target_set]
+    if not target_packets:
+        return evidence
+    supplemental_set = _focused_retry_supplemental_context_ids(
+        evidence,
+        target_packets=target_packets,
+        target_set=target_set,
+        cited_packet_ids=cited_packet_ids or [],
+    )
+    visual_sibling_set = _focused_retry_visual_sibling_ids(
+        evidence,
+        target_packets=target_packets,
+        target_set=target_set,
+        cited_packet_ids=cited_packet_ids or [],
+        verifier_reason=verifier_reason,
+    )
+    keep_set = target_set | supplemental_set | visual_sibling_set
+    packets = [packet for packet in evidence.packets if packet.packet_id in keep_set]
+    return EvidenceEvent(packets=packets)
+
+
+def _focused_retry_supplemental_context_ids(
+    evidence: EvidenceEvent,
+    *,
+    target_packets: list[EvidencePacket],
+    target_set: set[str],
+    cited_packet_ids: list[str],
+) -> set[str]:
+    if not cited_packet_ids:
+        return set()
+
+    cited_set = {pid for pid in cited_packet_ids if pid and pid not in target_set}
+    if not cited_set:
+        return set()
+
+    target_pages = {packet.page for packet in target_packets}
+    out: set[str] = set()
+    for packet in evidence.packets:
+        if len(out) >= _MAX_FOCUSED_RETRY_SUPPLEMENTAL_PACKETS:
+            break
+        if packet.packet_id not in cited_set:
+            continue
+        if packet.page not in target_pages:
+            continue
+        if not _packet_is_explanatory_retry_context(packet):
+            continue
+        out.add(packet.packet_id)
+    return out
+
+
+def _packet_is_explanatory_retry_context(packet: EvidencePacket) -> bool:
+    region_type = (packet.region_type or "").strip().lower()
+    if region_type in _FOCUSED_RETRY_SUPPLEMENTAL_CONTEXT_TYPES:
+        return True
+    return bool(
+        (packet.text_layer_snippet and packet.text_layer_snippet.strip())
+        or (packet.ocr_snippet and packet.ocr_snippet.strip())
+    )
+
+
+def _focused_retry_visual_sibling_ids(
+    evidence: EvidenceEvent,
+    *,
+    target_packets: list[EvidencePacket],
+    target_set: set[str],
+    cited_packet_ids: list[str],
+    verifier_reason: str | None,
+) -> set[str]:
+    """Keep same-page visual subpanels when verifier says the target is an overview.
+
+    Timing diagrams and oscilloscope pages often produce one large visual
+    packet plus smaller same-page panel packets. If the verifier targets the
+    large overview, a retry that sends only that packet can remove the precise
+    panel that the reasoner needs to read gridlines or transitions.
+    """
+    if not verifier_reason or not _FOCUSED_RETRY_VISUAL_SIBLING_RE.search(verifier_reason):
+        return set()
+    visual_targets = [packet for packet in target_packets if _packet_is_visual(packet)]
+    if not visual_targets:
+        return set()
+
+    cited_set = {pid for pid in cited_packet_ids if pid}
+    candidates: list[tuple[int, float, float, str]] = []
+    for packet in evidence.packets:
+        if packet.packet_id in target_set or packet.packet_id in cited_set:
+            continue
+        if not _packet_is_visual(packet):
+            continue
+        relation = _best_visual_sibling_relation(packet, visual_targets)
+        if relation is None:
+            continue
+        bucket, distance = relation
+        candidates.append((bucket, distance, _bbox_area(packet.bbox_norm), packet.packet_id))
+
+    candidates.sort()
+    return {pid for _bucket, _distance, _area, pid in candidates[:_MAX_FOCUSED_RETRY_VISUAL_SIBLINGS]}
+
+
+def _packet_is_visual(packet: EvidencePacket) -> bool:
+    return (packet.region_type or "").strip().lower() in _VISUAL_PACKET_TYPES
+
+
+def _best_visual_sibling_relation(
+    packet: EvidencePacket,
+    targets: list[EvidencePacket],
+) -> tuple[int, float] | None:
+    best: tuple[int, float] | None = None
+    for target in targets:
+        if packet.page != target.page:
+            continue
+        if _bbox_contains(target.bbox_norm, packet.bbox_norm, tol=0.02):
+            relation = (0, _bbox_center_distance(target.bbox_norm, packet.bbox_norm))
+        elif _bbox_overlap_ratio(target.bbox_norm, packet.bbox_norm) >= 0.25:
+            relation = (1, _bbox_center_distance(target.bbox_norm, packet.bbox_norm))
+        else:
+            continue
+        if best is None or relation < best:
+            best = relation
+    return best
+
+
+def _bbox_contains(
+    outer: tuple[float, float, float, float],
+    inner: tuple[float, float, float, float],
+    *,
+    tol: float = 0.0,
+) -> bool:
+    return (
+        inner[0] >= outer[0] - tol
+        and inner[1] >= outer[1] - tol
+        and inner[2] <= outer[2] + tol
+        and inner[3] <= outer[3] + tol
+    )
+
+
+def _bbox_overlap_ratio(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0 = max(ax0, bx0)
+    iy0 = max(ay0, by0)
+    ix1 = min(ax1, bx1)
+    iy1 = min(ay1, by1)
+    if ix0 >= ix1 or iy0 >= iy1:
+        return 0.0
+    return ((ix1 - ix0) * (iy1 - iy0)) / max(_bbox_area(b), 1e-9)
+
+
+def _bbox_area(bbox: tuple[float, float, float, float]) -> float:
+    return max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
+
+
+def _bbox_center_distance(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    acx = (a[0] + a[2]) / 2.0
+    acy = (a[1] + a[3]) / 2.0
+    bcx = (b[0] + b[2]) / 2.0
+    bcy = (b[1] + b[3]) / 2.0
+    return ((acx - bcx) ** 2 + (acy - bcy) ** 2) ** 0.5
+
+
+def _evidence_scope(full_evidence: EvidenceEvent, answer_evidence: EvidenceEvent) -> str:
+    if len(answer_evidence.packets) < len(full_evidence.packets):
+        return "targeted"
+    return "full"
+
+
+def _verifier_requests_visual_readability_retry(
+    verdict: VerdictEvent,
+    *,
+    target_packet_ids: list[str],
+) -> bool:
+    """True when verifier wants the same visual evidence made more readable."""
+    if verdict.supported or verdict.next_action != "expand_context":
+        return False
+    if not target_packet_ids:
+        return False
+    reason = verdict.reason or ""
+    return bool(_VISUAL_READABILITY_RE.search(reason) and _VISUAL_EVIDENCE_RE.search(reason))
+
+
+def _verifier_target_packet_ids(
+    verdict: VerdictEvent,
+    *,
+    valid_packet_ids: set[str] | None = None,
+) -> list[str]:
+    raw = verdict.diagnostics.get("target_packet_ids")
+    raw_values: list[str] = []
+    if isinstance(raw, str):
+        raw_values.append(raw)
+    elif isinstance(raw, list):
+        raw_values.extend(item for item in raw if isinstance(item, str))
+    raw_values.extend(_packet_id_mentions(verdict.reason))
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw_values:
+        value = _normalize_packet_id_mention(item)
+        if value is None:
+            continue
+        if valid_packet_ids is not None and value not in valid_packet_ids:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _packet_scale_count(packet: EvidencePacket, scale: str) -> int:
+    return sum(1 for crop in packet.multi_scale_crops if crop.scale == scale)
+
+
+def _packet_id_mentions(text: str | None) -> list[str]:
+    """Extract packet-id-like mentions from verifier prose."""
+    if not text:
+        return []
+    mentions: list[str] = []
+    patterns = (
+        r"\bpkt[_-]?\d{1,4}\b",
+        r"\bpacket\s+(?:pkt[_-]?)?\d{1,4}\b",
+    )
+    for pattern in patterns:
+        mentions.extend(match.group(0) for match in re.finditer(pattern, text, re.IGNORECASE))
+    return mentions
+
+
+def _is_better_unsupported_answer(
+    candidate: AnswerEvent,
+    incumbent: AnswerEvent | None,
+    *,
+    question_text: str | None = None,
+) -> bool:
+    """Prefer the strongest unsupported answer if retries never get accepted.
+
+    Verifier-directed evidence retries are useful when they produce a supported
+    answer, but the n=148 branch-tip diagnostics showed several unsupported
+    retries overwrote a more plausible initial answer. If the loop exhausts
+    without support, keep the strongest answer the reasoner produced. A retry
+    can beat a slightly higher-confidence incumbent when it is more specific to
+    the question wording, which protects scorer-compliant fixes like
+    `G = 24` -> `Gain = 24`.
+    """
+    if incumbent is None:
+        return True
+    if candidate.citations and not incumbent.citations:
+        return True
+    if incumbent.citations and not candidate.citations:
+        return False
+    candidate_confidence = float(candidate.confidence or 0.0)
+    incumbent_confidence = float(incumbent.confidence or 0.0)
+    candidate_overlap = _answer_question_overlap(candidate.answer, question_text)
+    incumbent_overlap = _answer_question_overlap(incumbent.answer, question_text)
+    if (
+        _question_requests_single_entity(question_text)
+        and _answer_looks_list_like(incumbent.answer)
+        and not _answer_looks_list_like(candidate.answer)
+        and candidate_confidence + _entity_retry_selection_margin(question_text)
+        >= incumbent_confidence
+    ):
+        return True
+    if (
+        candidate_overlap > incumbent_overlap
+        and candidate_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= incumbent_confidence
+    ):
+        return True
+    if (
+        incumbent_overlap > candidate_overlap
+        and incumbent_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= candidate_confidence
+    ):
+        return False
+    return candidate_confidence > incumbent_confidence
+
+
+def _question_requests_single_entity(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    normalized = str(question_text).lower()
+    return bool(
+        re.search(
+            r"\bwhich\s+(?:[\w-]+\s+){0,3}"
+            r"(?:country|company|entity|parameter|region|line|series|label|row|column|"
+            r"value|variable)\b",
+            normalized,
+        )
+        or re.search(
+            r"\bwhich\s+\w+'s\s+",
+            normalized,
+        )
+    )
+
+
+def _entity_retry_selection_margin(question_text: str | None) -> float:
+    normalized = (question_text or "").lower()
+    if re.search(r"\b(?:variable|parameter|y[- ]axis|x[- ]axis)\b", normalized):
+        return 0.25
+    return _RETRY_SELECTION_CONFIDENCE_MARGIN
+
+
+def _answer_looks_list_like(answer: str | None) -> bool:
+    if not answer:
+        return False
+    normalized = str(answer).strip().lower()
+    if ";" in normalized or "," in normalized:
+        return True
+    if re.search(r"\b(?:and|or)\b", normalized):
+        return True
+    return len(_answer_selection_tokens(normalized)) > 3
+
+
+def _should_keep_best_unsupported_on_retry_abstain(
+    answer: AnswerEvent | None,
+    *,
+    question_event: QuestionEvent,
+    retries_used: int,
+) -> bool:
+    """Avoid erasing a cited candidate when an evidence retry gets timid.
+
+    The verifier's first-pass `abstain` remains authoritative. This guard only
+    applies after the controller already spent an evidence retry; empirically,
+    those late abstentions often mean "still unsupported" rather than "the
+    document proves this is unanswerable". Keep a non-abstention candidate so
+    the final trace preserves the best cited answer instead of replacing it
+    with an empty-citation abstention.
+    """
+    if retries_used <= 0 or answer is None:
+        return False
+    if _answer_type_is_unanswerable(question_event.answer_type):
+        return False
+    if not answer.citations:
+        return False
+    if _answer_looks_unanswerable(answer.answer):
+        return False
+    return float(answer.confidence or 0.0) >= _ABSTAIN_OVERRIDE_MIN_CONFIDENCE
+
+
+def _should_allow_reasoner_shape_retry(
+    *,
+    action: str,
+    answer: AnswerEvent,
+    verdict: VerdictEvent,
+    question_event: QuestionEvent,
+    max_evidence_retries: int,
+) -> bool:
+    """Allow a narrow default reasoner retry for verifier-detected answer shape.
+
+    Generic `escalate_reasoner` stays behind `max_retries`: it spends another
+    frontier call without improving evidence packets. This exception is scoped
+    to the common chart/table failure where the evidence is present, the
+    question asks for one entity, and the answer is list-like; the verifier
+    hint usually fixes that without another inspect/expand mutation.
+    """
+    if max_evidence_retries <= 0 or action != "escalate_reasoner":
+        return False
+    if verdict.supported:
+        return False
+    if not answer.citations:
+        return False
+    if not _question_requests_single_entity(question_event.question):
+        return False
+    if not _answer_looks_list_like(answer.answer):
+        return False
+    reason = verdict.reason.lower()
+    return bool(
+        "single" in reason
+        or "one " in reason
+        or "two " in reason
+        or "multiple" in reason
+        or "does not quantify" in reason
+        or "did not answer" in reason
+        or "actual question" in reason
+        or "which variable" in reason
+        or "y-axis variable" in reason
+        or "y axis variable" in reason
+    )
+
+
+def _answer_type_is_unanswerable(answer_type: str | None) -> bool:
+    if not answer_type:
+        return False
+    stem = str(answer_type).split(".")[-1].lower()
+    return stem == "unanswerable"
+
+
+def _answer_looks_unanswerable(answer: str | None) -> bool:
+    if not answer:
+        return True
+    normalized = str(answer).strip().lower()
+    return normalized in {"unanswerable", "unknown", "cannot determine", "can't determine"}
+
+
+def _answer_question_overlap(answer: str | None, question_text: str | None) -> int:
+    if not answer or not question_text:
+        return 0
+    q_tokens = _answer_selection_tokens(question_text)
+    if not q_tokens:
+        return 0
+    return len(q_tokens & _answer_selection_tokens(answer))
+
+
+def _answer_selection_tokens(text: str) -> set[str]:
+    normalized = str(text).lower()
+    normalized = normalized.replace("µ", "u")
+    return {
+        token
+        for token in _ANSWER_TOKEN_RE.findall(normalized)
+        if len(token) > 1 and token not in _ANSWER_SELECTION_STOPWORDS
+    }
+
+
+def _normalize_packet_id_mention(value: str) -> str | None:
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    match = re.fullmatch(r"pkt[_-]?(\d{1,4})", normalized)
+    if match:
+        return f"pkt_{int(match.group(1)):03d}"
+    match = re.fullmatch(r"packet\s+(?:pkt[_-]?)?(\d{1,4})", normalized)
+    if match:
+        return f"pkt_{int(match.group(1)):03d}"
+    match = re.fullmatch(r"\d{1,4}", normalized)
+    if match:
+        return f"pkt_{int(match.group(0)):03d}"
+    if re.fullmatch(r"[a-z][a-z0-9_-]{0,79}", normalized):
+        return normalized
+    return None
+
+
+def _plan_with_extra_evidence_types(plan: PlanEvent, extra_types: list[str]) -> PlanEvent:
+    if not extra_types:
+        return plan
+    evidence_types: list[str] = []
+    seen: set[str] = set()
+    for raw in [*plan.evidence_types, *extra_types]:
+        value = (raw or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        evidence_types.append(value)
+    if evidence_types == plan.evidence_types:
+        return plan
+    return plan.model_copy(update={"evidence_types": evidence_types})
 
 
 def _add_debug_event(
@@ -1125,6 +1902,7 @@ def _packet_to_debug(packet: EvidencePacket) -> dict[str, Any]:
         "confidence": packet.confidence,
         "provenance_tool": packet.provenance.tool if packet.provenance else None,
         "provenance_mode": packet.provenance.mode if packet.provenance else None,
+        "provenance_args_hash": packet.provenance.args_hash if packet.provenance else None,
     }
 
 
@@ -1249,6 +2027,7 @@ def _packet_to_summary(p: EvidencePacket) -> EvidencePacketSummary:
         region_type=p.region_type,
         local_crop_ref=p.local_crop_ref,
         linked_crop_refs=list(p.linked_crop_refs),
+        linked_neighbor_types=list(p.linked_neighbor_types),
         multi_scale_crops=[c.model_dump(mode="json") for c in p.multi_scale_crops],
         text_layer_snippet=p.text_layer_snippet,
         ocr_snippet=p.ocr_snippet,
@@ -1297,16 +2076,19 @@ def _format_hint(answer_type: object) -> str:
     stem = s.split(".")[-1].lower() if "." in s else s.lower()
     if stem == "numeric":
         return (
-            "Answer with a single number. If the question asks for a percentage, "
-            "include the % sign. Do not add explanations or units beyond what the "
-            "question asks for."
+            "Answer with a single number, including the requested unit or % sign "
+            "when the question explicitly asks for one. Do not add explanations "
+            "or extra units beyond what the question asks for."
         )
     if stem == "exact_match":
         return (
             "Answer with the exact label, identifier, or phrase from the document. "
             "Quote the document verbatim — do not paraphrase, abbreviate, or add "
             "explanation text that isn't present in the document. Match the "
-            "document's exact punctuation."
+            "document's exact punctuation. Even if the question asks for an "
+            "explanation, put only the final exact answer in the answer field. "
+            "For register bit-field assignments, omit spaces around '=' and "
+            "separate assignments with comma+space, e.g. [15:14]=b00, [8:5]=b1111."
         )
     if stem == "boolean":
         return "Answer 'yes' or 'no'."

@@ -66,6 +66,7 @@ def _region(
     region_type: str = "text",
     score: float = 0.5,
     expansion_hints: list[str] | None = None,
+    supporting_signals: list[str] | None = None,
 ) -> RegionCandidate:
     return RegionCandidate(
         region_id=region_id,
@@ -74,6 +75,7 @@ def _region(
         region_type=region_type,
         score=score,
         expansion_hints=expansion_hints or [],
+        supporting_signals=supporting_signals or [],
     )
 
 
@@ -172,6 +174,37 @@ async def test_full_rerank_sorts_by_relevance_times_score():
     # LLM was called once with the prompt + system message.
     assert response is not None
     assert response.tokens_in == 200
+
+
+async def test_prompt_surfaces_figure_class_metadata():
+    """Reranker needs the layout endpoint's figure subclass so chart plans
+    can prefer plots over logos/generic pictures."""
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                "plot_area",
+                region_type="picture",
+                score=0.6,
+                supporting_signals=["figure_class=line_chart"],
+            ),
+            _region(
+                "brand_mark",
+                region_type="picture",
+                score=0.95,
+                supporting_signals=["figure_class:logo"],
+            ),
+        ]
+    )
+    client = _FakeClient('{"regions": []}')
+    out, response = await rerank_regions(_question(), _plan(), regions, backend_client=client)
+
+    assert out is regions
+    assert response is not None
+    prompt = client.calls[0]["prompt"]
+    assert "region_id=plot_area" in prompt
+    assert "figure_class=line_chart" in prompt
+    assert "region_id=brand_mark" in prompt
+    assert "figure_class=logo" in prompt
 
 
 async def test_partial_rerank_keeps_original_ranking_for_unscored():

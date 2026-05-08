@@ -131,6 +131,349 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-08 — verifier-action diagnostics + evidence-only retry default
+
+The crop-fallback n=148 follow-up completed at
+`results/hf/sprint-2026-05-08/crop-fallback-run1/`:
+
+- Overall **44.6%** vs rebaseline-v2 focus +4 **43.9%** (+0.7pp hold/noise).
+- Datasheet **46.5%** vs **49.5%** (-3.0pp noise-).
+- Finance **40.4%** vs **31.9%** (+8.5pp hold).
+- Overall bbox IoU **86.4%** vs **66.1%** (+20.3pp hold).
+- Cost/correct regressed to **$0.0263** vs **$0.0176**.
+
+`inspect_region:crop_fallback_ocr` did **not** fire in the full run, so the
+accuracy movement should not be attributed to the crop OCR fallback. The
+important new signal is controller behavior: diagnostics now summarize verifier
+`next_action` counters overall, for unsupported verdicts, and for incorrect
+examples. On `crop-fallback-run1`, wrong examples were dominated by
+`expand_context` (**45**), with 17 wrong examples still accepted by the
+verifier. Evidence quality was already strong (`cited_image_only=0.0%`,
+`cited_text=100.0%`, expand called 100%, mean neighbors 11.54), which suggests
+the next accuracy lever is not blindly attaching more neighbor context.
+Follow-up diagnostics also summarize `retries_used`,
+`evidence_retries_used`, `loop_terminated`, and `loop_retry_helped`; the
+pre-retry crop-fallback run correctly shows **0.0%** retry and evidence-retry
+rates.
+
+Pipeline default changed accordingly: localization retries remain opt-in
+(`max_retries=0`), but FocusWorkflow now allows one bounded evidence-only retry
+by default for `expand_context` and `escalate_reasoner`. This reruns only
+expand/answer/verify or answer/verify, avoiding the noisy-box localization path
+that regressed in the 2026-04-27 n=30 A/B. HF CLI gained
+`--max-evidence-retries`; when `--max-retries` is explicitly provided, the
+evidence retry budget inherits it unless overridden, so `--max-retries 0`
+remains a true pre-loop baseline.
+
+Focused verification:
+
+- `tests/test_workflow.py tests/test_focus_harness.py tests/test_hf_eval_cli.py
+  tests/test_stage_metrics.py tests/test_diagnose_predictions.py`: **150
+  passed**, 5 warnings.
+- Ruff check and format-check were clean on touched workflow/harness/CLI/
+  diagnostics files.
+
+Cloud eval blocker/fix: Codex Cloud could not run the evidence-retry A/B
+because `.env` was absent and `third_party/parser-bench` could not be cloned
+non-interactively (`could not read Username for 'https://github.com'`). The
+parser-bench shim now falls back to a narrow local compatibility schema when
+the canonical submodule schema is missing, while still preferring the submodule
+whenever present. Verification for the fallback + eval CLI slice:
+`tests/test_parser_bench_shim.py tests/test_hf_loader.py tests/test_hf_eval_cli.py
+tests/test_diagnose_predictions.py`: **67 passed, 1 skipped**; ruff/format
+clean on the touched files.
+
+Verifier prompt follow-up: the `fin-10-K-0036` smoke showed the evidence
+packets already contained the needed values (`51,235` and `75,408`), but the
+verifier packet summaries were capped at 180 chars and could hide the decisive
+table rows. The verifier now keeps up to 500 chars per packet, marks
+`cited_by_answer=yes/no`, and explicitly tells the model to prefer
+`escalate_reasoner` over `expand_context` when the values are already present
+but the arithmetic/extraction is wrong. Local smoke at
+`results/hf/sprint-2026-05-08/verifier-richer-smoke-fin-10k-0036/` returned
+the correct **68%** with `retries_used=1`, `evidence_retries_used=1`, and
+`loop_retry_helped=true`; this is only a one-example mechanism check, not a
+ship gate.
+
+### 2026-05-08 — inspect crop-level OCR fallback for empty element OCR
+
+Low-risk inspector hardening landed to reduce `cited_image_only` style misses
+when a crop exists but element-mode OCR returns empty text:
+
+- `pipeline/inspector.py` now falls back to OCR on the already-materialized
+  crop (`_ocr_existing_crop`) after `inspect_region(mode="element")` returns
+  empty text or fails. This keeps packet commit levels unchanged and only
+  contributes advisory `ocr_snippet` text.
+- New provenance signal `inspect_region:crop_fallback_ocr` marks when this
+  rescue path fired.
+- Added `tests/test_inspector.py::test_pdf_path_uses_crop_fallback_ocr_when_element_ocr_empty`
+  to lock behavior and confidence propagation for text-bearing packets.
+
+Focused verification:
+
+- `env PYTHONPATH=src uv run pytest tests/test_inspector.py -q`: **38 passed**.
+- `env PYTHONPATH=src uv run ruff check src/focusparse/pipeline/inspector.py tests/test_inspector.py`:
+  **clean**.
+
+### 2026-05-07 — expand retry de-dup + line-aware table text
+
+Two low-risk evidence-path follow-ups landed on branch
+`codex/inspect-expand-page-image-fallback` after the strict evidence-text run:
+
+- `pipeline/expander.py` now preserves existing linked neighbor refs/types on
+  verifier-driven `expand_context` retries, skips already-linked crop refs, and
+  suppresses duplicate `Context [role]: ...` text lines. This directly targets
+  retry/broad-neighbor noise where the same caption or header could be repeated
+  in packet text and provenance.
+- `tools/get_text_layer.py` now preserves detected line breaks instead of
+  flattening every native PDF span with spaces, and bumps the text-layer cache
+  key with `line-aware-v2`. Large table snippets now keep row boundaries, which
+  makes cross-page financial table arithmetic less ambiguous to the reasoner.
+
+Focused verification:
+
+- `tests/test_expander.py`: **30 passed**.
+- Packet-path slice (`test_expander`, `test_reasoner`, `test_workflow`,
+  `test_focus_harness`): **117 passed**, 5 warnings.
+- `tests/test_get_text_layer.py`: **10 passed**, 5 warnings.
+- Packet/text-path slice (`test_get_text_layer`, `test_inspector`,
+  `test_expander`, `test_reasoner`, `test_workflow`, `test_focus_harness`):
+  **164 passed**, 5 warnings.
+- Ruff check and format-check were clean on touched files.
+
+Real smoke:
+`results/hf/sprint-2026-05-07/line-aware-smoke-fin-10k-0036/` reran
+`fin-10-K-0036` after the line-aware text patch. The prior strict
+evidence-text run predicted **84%** vs gold **68%** despite perfect
+localization; the smoke predicted **68%** with both supporting table packets
+cited. The shared layout endpoint returned a preflight 503, so the smoke used
+`--skip-layout-preflight` and cached layout for this already-run example.
+
+Instrumentation follow-up: `diagnose_predictions.py` now classifies each
+incorrect example into one primary failure reason: `lazy_or_no_bbox`,
+`empty_citation`, `localization_miss`, `partial_localization`, `abstained`,
+`cited_image_only`, `verifier_unsupported`, or `reasoning_or_extraction`. The
+summary table surfaces `top_failure`, the detailed section lists the full
+breakdown, and the JSON report includes `failure_reasons`.
+
+Regenerated focus +2/+4 diagnostics at
+`results/hf/headline-v1-rebaseline-v2/focus-toolset-diagnostics-v2.{md,json}`.
+Old rebaseline-v2 +2 top failure was `cited_image_only` (17), followed by
+partial/localization misses and lazy/no-bbox. Old +4 also topped out at
+`cited_image_only` (19) despite attaching mean **13.34** neighbors. This
+supports the mechanism claim that extra context/tool access alone does not fix
+unsupported evidence; disciplined packet construction and verification are the
+actual product lever.
+
+Eval reproducibility guardrail: while trying latest-branch
+`results/hf/sprint-2026-05-08/line-aware-run1/`, the run had to be interrupted
+twice because provider network/model calls stopped making progress (first after
+42 prediction files, then after 61). `OpenAIClient`, `AnthropicClient`, and
+`GeminiClient` now wrap each provider request in an `asyncio.timeout` bounded
+by `FOCUSPARSE_MODEL_TIMEOUT_S` (default **180s**, minimum **1s**), and
+`AGENTS.md` documents the env var. Timed-out examples can still be recorded as
+failures by the harness, but a stuck API request should no longer hang the
+whole headline run.
+
+### 2026-05-07 — Path A replicate hold + evidence text pathway
+
+Path A was run twice at n=148 on HF revision
+`3774c67f8b814392b6d04c939e904f749a3f52eb` for `focus --tool-set full`.
+Run 1 hit **48.6% Overall**; run 2 hit **52.7% Overall**. The replicate mean
+is **50.7% Overall**, +6.8pp vs rebaseline-v2 focus +4 at 43.9%, but the
+conservative replicate-CI union still overlaps the baseline CI, so the formal
+decision is **hold**, not ship-by-CI. Artifacts:
+`results/hf/sprint-2026-05-06/path-a-run{1,2}/headline_table.*`,
+`delta-vs-rebaseline-v2.md`, and
+`results/hf/sprint-2026-05-06/path-a-replicate-summary.{md,json}`.
+
+Diagnostics now read spec-level `per_example.jsonl` before sanitized prediction
+filenames so the report count matches the official run rows. The same report
+also surfaces verifier unsupported rate, expand_context call rate, mean linked
+neighbors, and top tool sequences. Path A diagnostics show high residual
+unsupported rates (75.0% and 79.1%) even after neighbor images reached the
+reasoner, pointing at packet completeness rather than path plumbing alone.
+
+Evidence-path patch in this worktree:
+
+- `pipeline/inspector.py`: visual packets (`picture` / `image` / `chart` /
+  `figure`) keep `commit_level="image"` but now get advisory
+  `inspect_region(mode="element")` OCR so embedded labels/callouts are not
+  invisible to verifier summaries.
+- `pipeline/reasoner.py`: packet descriptors now include a compact
+  `text_layer_snippet` / `ocr_snippet` line, so inspect-produced text reaches
+  the first-pass answer, not only the verifier.
+- `pipeline/expander.py`: reranker `needed_for` context roles can attach
+  adjacent regions even when the layout detector labels them as plain `text`
+  rather than a canonical annotation type; linked neighbor type falls back to
+  the explicit context role (for example `legend_binding`).
+- `pipeline/expander.py`: attached neighbors now get best-effort native text
+  extraction, with OCR fallback, and the snippets are appended to the parent
+  packet's visible text field as `Context [role]: ...`. This keeps
+  captions/footnotes/legend labels visible to the compact reasoner/verifier
+  packet summaries, not only as linked crop images.
+- `pipeline/inspector.py`: when the source PDF is missing but the staged page
+  PNG exists, inspect now crops the page image directly and OCRs that crop. This
+  converts no-PDF rows from whole-page skeleton packets into focused
+  deterministic evidence packets.
+- `pipeline/expander.py`: no-PDF expansion can now crop linked neighbors from
+  `images_by_page` and OCR those crops before appending `Context [role]: ...`.
+  `FocusWorkflow` forwards the page-image map to expand, and inspect tiering is
+  based on `n_real_packets` rather than PDF presence alone.
+
+Focused verification: 133 changed-file tests passed; broader
+reasoner/workflow/focus_harness/eval suite passed 123 tests after hydrating the
+parser-bench submodule in the temp worktree. Ruff check and format were clean
+on all changed files. After the page-image fallback patch, the full changed-area
+suite passed **220 tests**; direct inspector/expander tests passed **58 tests**
+after formatting; ruff check and format-check were clean over all changed Python
+files.
+
+Two evidence-text patch eval attempts were quarantined because layout endpoint
+outages would have contaminated the row: `evidence-text-run1-aborted-layout-503`
+and `evidence-text-run1-aborted-layout-midrun-503`. The second attempt showed
+that a startup preflight is not sufficient; the endpoint can return HTTP 503
+mid-run after many clean examples.
+
+Follow-up guardrail: HF focus evals now run with strict layout detection by
+default. `run_hf_eval.py` preflights the live endpoint before model calls, then
+passes `strict_layout_detection=True` so `LayoutEndpointUnavailable` /
+`StubResponseError` abort the eval instead of becoming skeleton-region examples.
+Use `--allow-layout-fallbacks` only for non-comparable exploratory runs. The
+script also exposes `--layout-detect-retries` / `--layout-detect-timeout-s`,
+and `FocusWorkflow` now actually consumes `configs/default.yaml`
+`endpoints.layout.retries` / `timeout_s`.
+
+Strict evidence-text run 1 completed at n=148 with
+`--layout-detect-retries 5`:
+
+- Overall: **52.7%** [44.6, 60.1], +8.8pp vs rebaseline-v2 focus +4 43.9%;
+  formal gate **hold** because CIs overlap.
+- Datasheet: **57.4%** [47.5, 66.3], +7.9pp.
+- Finance: **42.6%** [29.8, 57.4], +10.6pp.
+- Cost: **$1.52 total**, **$0.0195/correct** overall.
+- Diagnostics: verifier unsupported **70.9%**, expand_context called 100%,
+  mean neighbors **10.01**, lazy/empty citations **2.0%**.
+
+Artifacts:
+`results/hf/sprint-2026-05-07/evidence-text-run1/headline_table.*`,
+`delta-vs-rebaseline-v2.{md,json}`, `diagnostics.{md,json}`.
+During the strict run one page hit four 503s then recovered on the fifth retry,
+which validates the retry override and strict-failure behavior.
+
+Instrumentation follow-up: `diagnose_predictions.py` now adds an Evidence
+Packet Quality table. It resolves answer packet-id citations from
+`trace.debug_events[stage=answer].payload.citations` (falling back to answer
+step JSON) and joins them to `trace.evidence_snapshot`. Current strict
+evidence-text run metrics: **1183 packets**, packet text/context/chart coverage
+**69.1% / 71.4% / 0.0%**, cited packet text/context/chart coverage
+**77.6% / 74.9% / 0.0%**, cited image-only rate **22.4%**, and unsupported
+cited-image-only rate **28.8%**. Rebaseline-v2 +2 vs +4 diagnostics now live at
+`results/hf/headline-v1-rebaseline-v2/focus-toolset-diagnostics.{md,json}`:
+old +4 attached mean **13.34** neighbors but still had **42.9%** cited
+image-only packets and lower accuracy than +2, supporting the "more context
+without disciplined summarization can add noise" hypothesis.
+
+Trace schema bumped **v3 → v4**: `EvidencePacketSummary` and SFT export now carry
+`linked_neighbor_types` alongside `linked_crop_refs`, and the trace viewer labels
+linked crops by role (caption/footnote/legend/etc.) instead of only `linked N`.
+This fixes the artifact-audit finding that final `evidence_snapshot` preserved
+linked crop paths but dropped their semantic roles.
+
+No-PDF page-image smoke after the fallback patch:
+`results/hf/sprint-2026-05-07/page-image-expand-smoke-fin-0057/` on
+`fin-ecb_fsr_2024_may-0057`. Inspect produced **8/8 real packets** from staged
+page PNG crops; expand attached **9** linked neighbors to **7/8** packets; packet
+text/context/chart coverage was **100.0% / 87.5% / 0.0%** and the single cited
+packet was no longer image-only. The answer still failed and verifier remained
+unsupported, but the failure moved from "empty packets" to a genuine
+visual-detail limitation.
+
+Full n=148 page-image-fallback run:
+`results/hf/sprint-2026-05-07/page-image-fallback-run1/` completed under strict
+layout settings. Headline row: **48.6% Overall** [40.5, 56.8], **52.5%**
+Datasheet [42.6, 62.4], **40.4%** Finance [25.5, 55.3], **$1.73 total** and
+**$0.0241/correct** overall. Delta vs rebaseline-v2 focus +4: **+4.7pp
+Overall**, **+3.0pp Datasheet**, **+8.5pp Finance**; formal gate is still
+**hold** because CIs overlap, and cost/correct regressed. Diagnostics moved the
+evidence quality strongly: packet text/context/chart coverage **89.3% / 87.0% /
+0.0%**, cited packet text/context/chart coverage **100.0% / 94.6% / 0.0%**,
+cited image-only **0.0%**, verifier unsupported **66.2%**, mean neighbors
+**12.04**. Interpretation: the patch fixes the image-only/empty packet pathway,
+but answer accuracy did not improve beyond variance; next bottleneck is chart /
+curve value extraction and visual-detail reasoning, not merely missing packet
+text.
+
+Chart-focused follow-up on `dat-opa454-0018`:
+`results/hf/sprint-2026-05-07/chart-query-order-smoke-opa454-0018/` was run
+with `--chart-to-table`. The live localizer emits `figure_class=<name>`, while
+the old inspector gate only accepted the legacy `figure_class:<name>` form; the
+gate now accepts both. The reranker prompt now surfaces `figure_class`, and the
+inspector applies chart-aware ranking so `line_chart` crops outrank logos and
+generic picture containers for chart-reading plans. After OCR, chart packets are
+secondarily ordered by overlap with the question text (for example `V_OUT` /
+`mV`) so adjacent subplots matching the requested series/unit are shown first.
+Trace/debug instrumentation now records `chart_to_table_enabled` on inspect
+steps and `provenance_args_hash` on packet debug payloads, with
+`chart_to_table:attempt|empty|error` tags. `diagnose_predictions.py` reports
+chart attempt / empty / error rates from these debug packets. The smoke moved
+the cited evidence from a generic chart panel to the correct Figure 31 crop, but
+`chart_to_table` still returned empty CSV and the numeric answer was wrong
+(`-640` vs gold `-400`). Interpretation: routing/selection is now observable
+and better disciplined; the remaining chart bottleneck is numerical visual
+reading / extraction quality.
+
+Full n=148 chart-aware ranking run:
+`results/hf/sprint-2026-05-07/chart-aware-ranking-run1/` completed without
+layout/model aborts, but the later headline-table render attempt hit a layout
+preflight 503 after predictions were already complete; the script still merged
+the existing run rows. Headline row: **45.9% Overall** [37.8, 54.1], **46.5%**
+Datasheet [36.6, 55.4], **44.7%** Finance [29.8, 57.4], **$1.66 total** and
+**$0.0244/correct** overall. Delta vs rebaseline-v2 focus +4: **+2.0pp
+Overall**, **-3.0pp Datasheet**, **+12.8pp Finance**; formal gate is **hold**,
+and cost/correct regressed. Diagnostics: verifier unsupported **70.3%**,
+expand_context called **100%**, mean neighbors **12.00**, packet
+text/context/chart coverage **90.2% / 86.1% / 0.0%**, cited packet
+text/context/chart coverage **100.0% / 92.1% / 0.0%**, cited image-only
+**0.0%**, chart_to_table attempt/empty/error all **0.0%** because this full run
+did not enable `--chart-to-table`.
+
+Interpretation: chart-aware packet ordering/reranker metadata may help finance
+selection, but it regresses datasheets enough to land below the stronger
+strict evidence-text run. The useful finding is mechanistic: cited image-only is
+eliminated in the default full run, so inspect/expand evidence visibility is no
+longer the dominant failure. The remaining bottleneck is supported answer
+extraction from visually correct but numerically hard chart/curve evidence.
+
+Chart packet follow-up patch after the n=148 run:
+
+- `pipeline/inspector.py` now treats `curve_axis_reading` as a chart-reading
+  family and uses the existing `wants_chart` signal for `chart_to_table`
+  activation. This fixes a real smoke where `--chart-to-table` was enabled but
+  the planner emitted `question_family=curve_axis_reading`, so no chart
+  extraction or chart note ran.
+- Chart packets now parse oscilloscope-style scale labels from OCR text, such
+  as `Vour (400mV/div)`, `Viny (200mV/div)`, and `Time (2.5us/div)`. The packet
+  text includes a compact `Detected chart scales: ...` note, and when the
+  question names `V_OUT`/`V_IN`/time it adds `Question target scale: ...`.
+- `pipeline/expander.py` now drops clearly mismatched figure captions after
+  text extraction. If the packet OCR says `Figure 31` and a candidate caption
+  says only `Figure 33`, the linked crop/type is removed so the reasoner does
+  not see contradictory caption context.
+- New tests pin chart scale extraction, target-scale detection, evidence-type
+  chart gating despite family misses, and mismatched-caption filtering.
+
+Real smoke:
+`results/hf/sprint-2026-05-07/chart-gate-scale-smoke-opa454-0018/` on
+`dat-opa454-0018` with `--chart-to-table`. The trace now records
+`chart_to_table:attempt|empty|chart_scale_hint`, packet text contains
+`Question target scale: VOUT=400mV/div`, and expand_context attaches only the
+matching Figure 31 caption to the cited packet. The answer moved closer
+(`-320` vs gold `-400`) but still scored wrong and verifier stayed unsupported,
+now citing insufficient visual curve context rather than wrong scale or wrong
+packet. This narrows the remaining bottleneck to visual curve reading / zoomed
+chart evidence, not chart routing or caption attachment.
+
 ### 2026-05-06 — one-example trace dashboard smoke + Vercel demo
 
 Real harness smoke was run for three `gabrielbo/parser-bench` datasheet

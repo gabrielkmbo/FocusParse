@@ -180,12 +180,16 @@ async def test_propose_regions_forwards_endpoint_and_cache_kwargs(tmp_path, monk
         hf_token="explicit-token",
         cache_dir=cache_dir,
         confidence_threshold=0.42,
+        layout_max_retries=5,
+        layout_timeout_s=45.5,
     )
 
     assert captured["endpoint_url"] == "https://example.com/layout"
     assert captured["hf_token"] == "explicit-token"
     assert captured["cache_dir"] == cache_dir
     assert captured["confidence_threshold"] == 0.42
+    assert captured["max_retries"] == 5
+    assert captured["timeout_s"] == 45.5
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +220,24 @@ async def test_propose_regions_skeleton_on_endpoint_unavailable(tmp_path, monkey
     assert r.score == 0.9
 
 
+async def test_propose_regions_strict_endpoint_unavailable_raises(tmp_path, monkeypatch):
+    png_path = _write_tiny_png(tmp_path / "p1.png")
+
+    async def _fake_detect(png_bytes, **kwargs):
+        raise LayoutEndpointUnavailable("simulated outage")
+
+    monkeypatch.setattr("focusparse.pipeline.localizer.detect_layout", _fake_detect)
+
+    with pytest.raises(LayoutEndpointUnavailable, match="simulated outage"):
+        await propose_regions(
+            _question(),
+            _plan(),
+            _pages((1, 0.9)),
+            images_by_page={1: png_path},
+            allow_endpoint_fallback=False,
+        )
+
+
 async def test_propose_regions_skeleton_on_stub_response(tmp_path, monkeypatch):
     png_path = _write_tiny_png(tmp_path / "p1.png")
 
@@ -232,6 +254,24 @@ async def test_propose_regions_skeleton_on_stub_response(tmp_path, monkeypatch):
     )
     assert len(regions.candidates) == 1
     assert "layout_endpoint_stub" in regions.candidates[0].supporting_signals
+
+
+async def test_propose_regions_strict_stub_response_raises(tmp_path, monkeypatch):
+    png_path = _write_tiny_png(tmp_path / "p1.png")
+
+    async def _fake_detect(png_bytes, **kwargs):
+        raise StubResponseError("got the full-page stub")
+
+    monkeypatch.setattr("focusparse.pipeline.localizer.detect_layout", _fake_detect)
+
+    with pytest.raises(StubResponseError, match="full-page stub"):
+        await propose_regions(
+            _question(),
+            _plan(),
+            _pages((1, 0.5)),
+            images_by_page={1: png_path},
+            allow_endpoint_fallback=False,
+        )
 
 
 async def test_propose_regions_skeleton_when_no_boxes_above_threshold(tmp_path, monkeypatch):

@@ -1,10 +1,10 @@
 """Tests for `focusparse.pipeline.expander.expand_context` (sub-phase 2h).
 
 Covers the neighbor-attachment logic:
-  * passthrough when `regions` or `pdf_path` is None
+  * passthrough when no region list or no crop source is available
   * finds caption/footnote/section_header/title neighbors that overlap the
     padded packet bbox
-  * ignores unrelated region types (text/picture) even if spatially adjacent
+  * ignores unrelated region types (text/picture) unless reranker tags context
   * ignores the packet's own region (same bbox) in the candidate pool
   * caps at max_neighbors_per_packet
   * ranks neighbors by vertical distance (closer wins), tiebreaks on score
@@ -20,9 +20,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from focusparse.evidence.packet import EvidencePacket, PacketProvenance
+from PIL import Image
+
+from focusparse.evidence.packet import CropRef, EvidencePacket, PacketProvenance
 from focusparse.pipeline.events import EvidenceEvent, RegionCandidate, RegionsEvent
-from focusparse.pipeline.expander import expand_context
+from focusparse.pipeline.expander import _neighbor_types_from_verifier_reason, expand_context
 
 
 def _packet(
@@ -89,6 +91,14 @@ def _install_fake_inspect(monkeypatch, *, calls: list, should_fail: set | None =
     monkeypatch.setattr("focusparse.pipeline.expander.inspect_region", _fake)
 
 
+def _write_page_png(path: Path, *, size=(200, 100)) -> None:
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", size, "white")
+    ImageDraw.Draw(img).text((10, 10), "caption text", fill="black")
+    img.save(path)
+
+
 # ---------------------------------------------------------------------------
 # Passthrough paths
 # ---------------------------------------------------------------------------
@@ -102,7 +112,7 @@ async def test_passthrough_when_no_regions():
 
 
 async def test_passthrough_when_no_pdf_path():
-    """Without a PDF, we can't crop neighbors — return evidence unchanged."""
+    """Without a PDF or page image fallback, return evidence unchanged."""
     ev = EvidenceEvent(packets=[_packet(packet_id="p0", page=1, bbox_norm=(0, 0, 0.5, 0.5))])
     regions = RegionsEvent(
         candidates=[
@@ -111,6 +121,35 @@ async def test_passthrough_when_no_pdf_path():
     )
     out = await expand_context(ev, regions=regions, pdf_path=None)
     assert out.packets == ev.packets
+
+
+async def test_no_pdf_uses_page_image_for_neighbor_crop_and_text(tmp_path, monkeypatch):
+    """When PDFs are absent, linked neighbor crops can come from staged page PNGs."""
+    monkeypatch.setattr(
+        "focusparse.pipeline.expander._ocr_existing_crop",
+        lambda crop_path: ("caption from page image", 0.8),
+    )
+    page_image = tmp_path / "p1.png"
+    _write_page_png(page_image)
+    ev = EvidenceEvent(packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.1, 0.1, 0.9, 0.4))])
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.1, 0.1, 0.9, 0.4), region_type="picture"),
+            _region(page=1, bbox_norm=(0.15, 0.42, 0.85, 0.48), region_type="caption"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=None,
+        images_by_page={1: page_image},
+        crop_cache_dir=tmp_path / "crops",
+    )
+    packet = out.packets[0]
+    assert len(packet.linked_crop_refs) == 1
+    assert Path(packet.linked_crop_refs[0]).exists()
+    assert packet.linked_neighbor_types == ["caption"]
+    assert packet.text_layer_snippet == "Context [caption]: caption from page image"
 
 
 # ---------------------------------------------------------------------------
@@ -142,10 +181,213 @@ async def test_attaches_caption_below_figure(tmp_path, monkeypatch):
     packet = out.packets[0]
     assert len(packet.linked_crop_refs) == 1
     assert packet.linked_neighbor_types == ["caption"]
-    # inspect_region was called exactly once with mode=image + no expansion.
-    assert len(calls) == 1
-    assert calls[0]["mode"] == "image"
-    assert calls[0]["expansion"] == "none"
+    # inspect_region always crops the linked neighbor image; text/OCR context
+    # extraction may add more calls.
+    image_calls = [c for c in calls if c["mode"] == "image"]
+    assert len(image_calls) == 1
+    assert image_calls[0]["expansion"] == "none"
+
+
+async def test_attached_neighbor_text_reaches_packet_snippet(tmp_path, monkeypatch):
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    text_cache = tmp_path / "text_layer"
+    seen: dict = {}
+
+    class _TextOut:
+        text = "Figure 3. Output ripple at 500 mA"
+        source = "native"
+
+    async def _fake_get_text_layer(inp, *, cache_dir=None):
+        seen["page"] = inp.page
+        seen["bbox_norm"] = inp.bbox_norm
+        seen["cache_dir"] = cache_dir
+        return _TextOut()
+
+    monkeypatch.setattr("focusparse.pipeline.expander.get_text_layer", _fake_get_text_layer)
+
+    figure = _packet(
+        packet_id="p0",
+        page=1,
+        bbox_norm=(0.1, 0.1, 0.9, 0.4),
+        region_type="picture",
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.1, 0.1, 0.9, 0.4), region_type="picture"),
+            caption := _region(
+                page=1,
+                bbox_norm=(0.15, 0.42, 0.85, 0.48),
+                region_type="caption",
+            ),
+        ]
+    )
+
+    out = await expand_context(
+        EvidenceEvent(packets=[figure]),
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+        text_layer_cache_dir=text_cache,
+    )
+
+    packet = out.packets[0]
+    assert packet.linked_neighbor_types == ["caption"]
+    assert packet.text_layer_snippet == "Context [caption]: Figure 3. Output ripple at 500 mA"
+    assert seen == {
+        "page": 1,
+        "bbox_norm": list(caption.bbox_norm),
+        "cache_dir": text_cache,
+    }
+
+
+async def test_retry_expand_does_not_duplicate_existing_neighbor_context(tmp_path, monkeypatch):
+    """Verifier retries can call expand_context on an already-expanded packet.
+    Reattaching the same caption should be a no-op, not another context line."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+
+    class _TextOut:
+        text = "Figure 31. Large-Signal Step Response"
+        source = "native"
+
+    async def _fake_get_text_layer(inp, *, cache_dir=None):
+        return _TextOut()
+
+    monkeypatch.setattr("focusparse.pipeline.expander.get_text_layer", _fake_get_text_layer)
+
+    figure = _packet(
+        packet_id="p0",
+        page=1,
+        bbox_norm=(0.1, 0.1, 0.9, 0.4),
+        region_type="picture",
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.1, 0.1, 0.9, 0.4), region_type="picture"),
+            _region(page=1, bbox_norm=(0.15, 0.42, 0.85, 0.48), region_type="caption"),
+        ]
+    )
+
+    first = await expand_context(
+        EvidenceEvent(packets=[figure]),
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+    )
+    second = await expand_context(
+        first,
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+    )
+
+    packet = second.packets[0]
+    assert packet == first.packets[0]
+    assert packet.text_layer_snippet.count("Context [caption]:") == 1
+    assert packet.provenance.args_hash.count("expand_context:n1") == 1
+
+
+async def test_expand_context_deduplicates_repeated_context_text(tmp_path, monkeypatch):
+    """Broad neighbor scans can find duplicate captions. Keep the crops, but
+    only show the reasoner/verifier one copy of the repeated text line."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+
+    class _TextOut:
+        text = "Figure 31. Large-Signal Step Response"
+        source = "native"
+
+    async def _fake_get_text_layer(inp, *, cache_dir=None):
+        return _TextOut()
+
+    monkeypatch.setattr("focusparse.pipeline.expander.get_text_layer", _fake_get_text_layer)
+
+    figure = _packet(
+        packet_id="p0",
+        page=1,
+        bbox_norm=(0.1, 0.1, 0.9, 0.4),
+        region_type="picture",
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.1, 0.1, 0.9, 0.4),
+                region_type="picture",
+                relevance=0.8,
+                needed_for="primary",
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.15, 0.42, 0.85, 0.48),
+                region_type="caption",
+                relevance=0.9,
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.15, 0.45, 0.85, 0.49),
+                region_type="caption",
+                relevance=0.8,
+            ),
+        ]
+    )
+
+    out = await expand_context(
+        EvidenceEvent(packets=[figure]),
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+        max_neighbors_per_packet=2,
+    )
+
+    packet = out.packets[0]
+    assert len(packet.linked_crop_refs) == 2
+    assert packet.text_layer_snippet.count("Figure 31. Large-Signal Step Response") == 1
+
+
+async def test_mismatched_figure_caption_is_not_attached(tmp_path, monkeypatch):
+    """If the packet OCR says Figure 31, a neighboring Figure 33 caption is
+    misleading context and should be dropped after text extraction."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+
+    class _TextOut:
+        source = "native"
+
+        def __init__(self, text: str):
+            self.text = text
+
+    async def _fake_get_text_layer(inp, *, cache_dir=None):
+        if inp.bbox_norm[1] < 0.5:
+            return _TextOut("Figure 31. Large-Signal Step Response")
+        return _TextOut("Figure 33. Large-Signal Step Response")
+
+    monkeypatch.setattr("focusparse.pipeline.expander.get_text_layer", _fake_get_text_layer)
+
+    figure = _packet(
+        packet_id="p0",
+        page=1,
+        bbox_norm=(0.1, 0.1, 0.9, 0.4),
+        region_type="picture",
+    ).model_copy(update={"ocr_snippet": "OCR: Figure 31. VOUT (400mV/div)"})
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.1, 0.1, 0.9, 0.4), region_type="picture"),
+            _region(page=1, bbox_norm=(0.15, 0.42, 0.85, 0.48), region_type="caption"),
+            _region(page=1, bbox_norm=(0.15, 0.52, 0.85, 0.58), region_type="caption"),
+        ]
+    )
+
+    out = await expand_context(
+        EvidenceEvent(packets=[figure]),
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+        max_neighbors_per_packet=2,
+    )
+
+    packet = out.packets[0]
+    assert packet.linked_neighbor_types == ["caption"]
+    assert len(packet.linked_crop_refs) == 1
+    assert "0.42" in packet.linked_crop_refs[0]
+    assert "Figure 31. Large-Signal Step Response" in packet.ocr_snippet
+    assert "Figure 33" not in packet.ocr_snippet
 
 
 async def test_ignores_non_neighbor_region_types(tmp_path, monkeypatch):
@@ -648,6 +890,216 @@ async def test_query_aware_filters_to_planner_evidence_types(tmp_path, monkeypat
     assert "footnote" not in types  # planner didn't ask for footnotes
 
 
+async def test_planner_hint_initial_expand_uses_conservative_cap(tmp_path, monkeypatch):
+    """Coarse planner hints should not attach every nearby context block before verification."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.30, 0.52, 0.70, 0.56), region_type="caption"),
+            _region(page=1, bbox_norm=(0.30, 0.34, 0.70, 0.38), region_type="footnote"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["caption", "footnote"]),
+        max_neighbors_per_packet=2,
+    )
+    assert len(out.packets[0].linked_neighbor_types) == 1
+
+
+async def test_retry_expand_looks_past_already_linked_neighbors(tmp_path, monkeypatch):
+    """A verifier-triggered wider pass should not stop at duplicate neighbors."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.52, 0.70, 0.56),
+                region_type="caption",
+                relevance=0.9,
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.34, 0.70, 0.38),
+                region_type="footnote",
+                relevance=0.8,
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.57, 0.70, 0.60),
+                region_type="title",
+                relevance=0.7,
+            ),
+        ]
+    )
+    first = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        max_neighbors_per_packet=2,
+    )
+    assert first.packets[0].linked_neighbor_types == ["caption", "footnote"]
+
+    second = await expand_context(
+        first,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        max_neighbors_per_packet=2,
+        adjacency_pad=0.10,
+    )
+    assert second.packets[0].linked_neighbor_types == ["caption", "footnote", "title"]
+
+
+async def test_verifier_directed_chart_retry_allows_legend_and_axis_labels(tmp_path, monkeypatch):
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.30, 0.52, 0.70, 0.56), region_type="legend"),
+            _region(page=1, bbox_norm=(0.30, 0.34, 0.70, 0.38), region_type="axis_label"),
+            _region(page=1, bbox_norm=(0.30, 0.58, 0.70, 0.62), region_type="footnote"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["chart"]),
+        verifier_reason="missing legend and axis labels",
+        max_neighbors_per_packet=2,
+    )
+    assert set(out.packets[0].linked_neighbor_types) == {"axis_label", "legend"}
+
+
+async def test_verifier_reason_can_expand_beyond_original_plan_hint(tmp_path, monkeypatch):
+    """Verifier feedback should steer retries toward the missing context type."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.30, 0.52, 0.70, 0.56), region_type="caption"),
+            _region(page=1, bbox_norm=(0.30, 0.34, 0.70, 0.38), region_type="footnote"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["caption"]),
+        verifier_reason="unsupported: cited table row is missing the footnote note",
+        max_neighbors_per_packet=2,
+    )
+    assert set(out.packets[0].linked_neighbor_types) == {"caption", "footnote"}
+
+
+def test_verifier_reason_allows_table_cell_context_types():
+    allowed = _neighbor_types_from_verifier_reason("missing row and column cell value")
+    assert {"table", "text", "list-item", "key-value region"} <= allowed
+
+
+async def test_verifier_directed_table_retry_allows_nearby_text_regions(tmp_path, monkeypatch):
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.30, 0.52, 0.70, 0.56), region_type="text"),
+            _region(page=1, bbox_norm=(0.30, 0.34, 0.70, 0.38), region_type="table"),
+            _region(page=1, bbox_norm=(0.30, 0.58, 0.70, 0.62), region_type="picture"),
+        ]
+    )
+
+    initial = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["caption"]),
+        max_neighbors_per_packet=2,
+    )
+    assert initial.packets[0].linked_neighbor_types == []
+
+    retry = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["caption"]),
+        verifier_reason="missing row/column cell value from the table",
+        max_neighbors_per_packet=2,
+    )
+    assert set(retry.packets[0].linked_neighbor_types) == {"table", "text"}
+
+
+async def test_target_packet_ids_limit_which_packets_expand(tmp_path, monkeypatch):
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(packet_id="p0", page=1, bbox_norm=(0.10, 0.20, 0.40, 0.40)),
+            _packet(packet_id="p1", page=1, bbox_norm=(0.60, 0.20, 0.90, 0.40)),
+        ]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.10, 0.42, 0.40, 0.46), region_type="caption"),
+            _region(page=1, bbox_norm=(0.60, 0.42, 0.90, 0.46), region_type="caption"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["caption"]),
+        target_packet_ids=["p1"],
+    )
+    assert out.packets[0].linked_neighbor_types == []
+    assert out.packets[1].linked_neighbor_types == ["caption"]
+
+
+async def test_empty_target_packet_ids_expand_no_packets(tmp_path, monkeypatch):
+    """An explicit empty target list means a retry has no safe packet anchor."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(packet_id="p0", page=1, bbox_norm=(0.10, 0.20, 0.40, 0.40)),
+            _packet(packet_id="p1", page=1, bbox_norm=(0.60, 0.20, 0.90, 0.40)),
+        ]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.10, 0.42, 0.40, 0.46), region_type="caption"),
+            _region(page=1, bbox_norm=(0.60, 0.42, 0.90, 0.46), region_type="caption"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["caption"]),
+        target_packet_ids=[],
+    )
+    assert [p.linked_neighbor_types for p in out.packets] == [[], []]
+    assert calls == []
+
+
 async def test_query_aware_planner_no_hint_uses_fallback_max_1(tmp_path, monkeypatch):
     """Without planner hint AND without rerank scores, the spatial-only
     fallback is bounded to _FALLBACK_MAX_NEIGHBORS_PER_PACKET (= 1 as of
@@ -735,6 +1187,34 @@ async def test_query_aware_rerank_needed_for_role_attaches(tmp_path, monkeypatch
         pdf_path=Path("/fake.pdf"),
     )
     assert "caption" in out.packets[0].linked_neighbor_types
+
+
+async def test_query_aware_needed_for_role_can_attach_plain_text(tmp_path, monkeypatch):
+    """A reranker-tagged legend/axis context block may arrive from layout as
+    plain `text`; explicit `needed_for` context roles should still attach it."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.10, 0.20, 0.50, 0.60))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.10, 0.62, 0.50, 0.66),
+                region_type="text",
+                needed_for="legend_binding",
+            ),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+    )
+    packet = out.packets[0]
+    assert len(packet.linked_crop_refs) == 1
+    assert packet.linked_neighbor_types == ["legend_binding"]
 
 
 async def test_query_aware_planner_hint_drops_unmatched_types(tmp_path, monkeypatch):
@@ -852,3 +1332,514 @@ async def test_query_aware_relevance_orders_neighbors_by_score(tmp_path, monkeyp
     assert types[0] == "footnote"
     assert types[1] == "title"
     assert "caption" not in types
+
+
+async def test_initial_expand_skips_unscored_primary_when_reranker_present(tmp_path, monkeypatch):
+    """When rerank ran, do not spend first-pass neighbor budget on packets
+    whose own region had no query-conditioned score."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    bbox = (0.30, 0.40, 0.70, 0.50)
+    ev = EvidenceEvent(packets=[_packet(packet_id="p0", page=1, bbox_norm=bbox)])
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(page=1, bbox_norm=bbox, region_type="picture"),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.52, 0.70, 0.56),
+                region_type="caption",
+                relevance=0.9,
+            ),
+        ]
+    )
+    out = await expand_context(ev, regions=regions, pdf_path=Path("/fake.pdf"))
+    assert out.packets[0].linked_neighbor_types == []
+    assert calls == []
+
+
+async def test_initial_expand_keeps_high_relevance_primary(tmp_path, monkeypatch):
+    """A packet whose primary region was scored relevant keeps first-pass
+    expansion behavior."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    bbox = (0.30, 0.40, 0.70, 0.50)
+    ev = EvidenceEvent(packets=[_packet(packet_id="p0", page=1, bbox_norm=bbox)])
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(
+                page=1,
+                bbox_norm=bbox,
+                region_type="picture",
+                relevance=0.8,
+                needed_for="primary",
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.52, 0.70, 0.56),
+                region_type="caption",
+                relevance=0.9,
+            ),
+        ]
+    )
+    out = await expand_context(ev, regions=regions, pdf_path=Path("/fake.pdf"))
+    assert out.packets[0].linked_neighbor_types == ["caption"]
+    assert calls[0]["mode"] == "image"
+
+
+async def test_initial_reranked_expand_caps_total_neighbors(tmp_path, monkeypatch):
+    """Reranked first-pass expansion should not attach context to every packet.
+
+    The full n=148 runs showed examples with 15+ first-pass neighbor crops.
+    Since the reasoner sees every linked crop image, that behaves like tool
+    overload. Keep the initial pass small; verifier retries can still target
+    cited packets later.
+    """
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    packets = []
+    candidates = []
+    for idx in range(4):
+        y0 = 0.10 + idx * 0.20
+        bbox = (0.30, y0, 0.70, y0 + 0.08)
+        packets.append(_packet(packet_id=f"p{idx}", page=1, bbox_norm=bbox, region_type="picture"))
+        candidates.extend(
+            [
+                _region_with_signals(
+                    page=1,
+                    bbox_norm=bbox,
+                    region_type="picture",
+                    relevance=0.8,
+                    needed_for="primary",
+                ),
+                _region_with_signals(
+                    page=1,
+                    bbox_norm=(0.30, y0 + 0.09, 0.70, y0 + 0.11),
+                    region_type="caption",
+                    relevance=0.9,
+                ),
+                _region_with_signals(
+                    page=1,
+                    bbox_norm=(0.30, y0 - 0.04, 0.70, y0 - 0.02),
+                    region_type="footnote",
+                    relevance=0.8,
+                ),
+            ]
+        )
+
+    out = await expand_context(
+        EvidenceEvent(packets=packets),
+        regions=RegionsEvent(candidates=candidates),
+        pdf_path=Path("/fake.pdf"),
+        max_neighbors_per_packet=2,
+    )
+
+    assert [len(p.linked_neighbor_types) for p in out.packets] == [2, 2, 2, 0]
+    assert sum(len(p.linked_neighbor_types) for p in out.packets) == 6
+
+
+async def test_retry_expand_adds_context_window_for_target_packet(tmp_path, monkeypatch):
+    """Verifier retries attach a wider crop for the cited packet itself."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    seen_text_layer: dict = {}
+
+    class _TextOut:
+        text = "surrounding axis labels and row headers"
+        source = "native"
+
+    async def _fake_get_text_layer(inp, *, cache_dir=None):
+        seen_text_layer["page"] = inp.page
+        seen_text_layer["bbox_norm"] = inp.bbox_norm
+        seen_text_layer["cache_dir"] = cache_dir
+        return _TextOut()
+
+    monkeypatch.setattr("focusparse.pipeline.expander.get_text_layer", _fake_get_text_layer)
+
+    bbox = (0.30, 0.40, 0.70, 0.50)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(packet_id="p0", page=1, bbox_norm=bbox, region_type="Picture"),
+        ]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(page=1, bbox_norm=bbox, region_type="picture"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        verifier_reason="needs a larger readable visual context",
+        target_packet_ids=["p0"],
+    )
+    packet = out.packets[0]
+    assert packet.linked_neighbor_types == ["context_window"]
+    assert len(packet.linked_crop_refs) == 1
+    assert tuple(round(v, 2) for v in calls[0]["bbox_norm"]) == (0.06, 0.16, 0.94, 0.74)
+    assert tuple(round(v, 2) for v in seen_text_layer["bbox_norm"]) == (0.06, 0.16, 0.94, 0.74)
+    assert (
+        packet.text_layer_snippet
+        == "Context [context_window]: surrounding axis labels and row headers"
+    )
+
+
+async def test_retry_expand_adds_visual_panel_crops_for_large_timing_overview(
+    tmp_path, monkeypatch
+):
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    packet = _packet(
+        packet_id="p0",
+        page=19,
+        bbox_norm=(0.05, 0.10, 0.95, 0.90),
+        region_type="Picture",
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=19, bbox_norm=packet.bbox_norm, region_type="Picture"),
+        ]
+    )
+
+    out = await expand_context(
+        EvidenceEvent(packets=[packet]),
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+        verifier_reason=(
+            "The cited oscilloscope image visual content cannot be verified from "
+            "text alone; the transition and gridlines need panel crops."
+        ),
+        target_packet_ids=["p0"],
+    )
+
+    out_packet = out.packets[0]
+    assert out_packet.linked_neighbor_types.count("visual_panel") == 6
+    assert "context_window" in out_packet.linked_neighbor_types
+    image_bboxes = [
+        tuple(round(v, 4) for v in call["bbox_norm"]) for call in calls if call["mode"] == "image"
+    ]
+    assert (0.05, 0.10, 0.5, 0.3667) in image_bboxes
+    assert (0.5, 0.6333, 0.95, 0.9) in image_bboxes
+
+
+async def test_retry_expand_adds_union_context_window_for_fragmented_targets(
+    tmp_path, monkeypatch
+):
+    """Verifier retries over same-page fragments get one crop spanning them."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+
+    class _TextOut:
+        text = "full diagram context"
+        source = "native"
+
+    async def _fake_get_text_layer(inp, *, cache_dir=None):
+        return _TextOut()
+
+    monkeypatch.setattr("focusparse.pipeline.expander.get_text_layer", _fake_get_text_layer)
+
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                packet_id="p0",
+                page=1,
+                bbox_norm=(0.20, 0.30, 0.30, 0.36),
+                region_type="text",
+            ),
+            _packet(
+                packet_id="p1",
+                page=1,
+                bbox_norm=(0.58, 0.62, 0.68, 0.68),
+                region_type="text",
+            ),
+            _packet(
+                packet_id="p2",
+                page=2,
+                bbox_norm=(0.20, 0.30, 0.30, 0.36),
+                region_type="text",
+            ),
+        ]
+    )
+
+    out = await expand_context(
+        ev,
+        regions=RegionsEvent(candidates=[]),
+        pdf_path=Path("/fake.pdf"),
+        verifier_reason="pkt_000 and pkt_001 are disconnected fragments of the full diagram",
+        target_packet_ids=["p0", "p1"],
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["page"] == 1
+    assert tuple(round(v, 2) for v in calls[0]["bbox_norm"]) == (0.06, 0.16, 0.82, 0.82)
+    assert out.packets[0].linked_neighbor_types == ["context_window"]
+    assert out.packets[1].linked_neighbor_types == ["context_window"]
+    assert out.packets[0].linked_crop_refs == out.packets[1].linked_crop_refs
+    assert out.packets[2].linked_neighbor_types == []
+    assert out.packets[0].text_layer_snippet == "Context [context_window]: full diagram context"
+
+
+async def test_retry_expand_context_window_does_not_consume_neighbor_cap(tmp_path, monkeypatch):
+    """The wider retry crop is extra evidence; table/text neighbors still get
+    their normal cap."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    bbox = (0.30, 0.40, 0.70, 0.50)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(packet_id="p0", page=1, bbox_norm=bbox, region_type="Table"),
+        ]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(page=1, bbox_norm=bbox, region_type="table"),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.52, 0.70, 0.56),
+                region_type="table",
+                relevance=0.9,
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.34, 0.70, 0.38),
+                region_type="text",
+                relevance=0.8,
+            ),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        verifier_reason="missing row and column cell value",
+        target_packet_ids=["p0"],
+        max_neighbors_per_packet=2,
+    )
+    assert out.packets[0].linked_neighbor_types == ["context_window", "table", "text"]
+
+
+async def test_retry_visual_zoom_adds_zoomed_crop_for_target_packet(tmp_path, monkeypatch):
+    calls: list[dict] = []
+
+    async def _fake_zoom_crop(*, crop_ref, cache_dir, packet_id):
+        calls.append({"crop_ref": crop_ref, "cache_dir": cache_dir, "packet_id": packet_id})
+        return "/crops/p0_zoomed.png"
+
+    monkeypatch.setattr("focusparse.pipeline.expander._zoom_crop", _fake_zoom_crop)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                packet_id="p0",
+                page=7,
+                bbox_norm=(0.20, 0.30, 0.40, 0.50),
+                region_type="Picture",
+            ),
+            _packet(
+                packet_id="p1",
+                page=8,
+                bbox_norm=(0.50, 0.30, 0.70, 0.50),
+                region_type="Picture",
+            ),
+        ]
+    )
+
+    out = await expand_context(
+        ev,
+        regions=RegionsEvent(candidates=[]),
+        images_by_page={7: tmp_path / "unused.png", 8: tmp_path / "unused2.png"},
+        crop_cache_dir=tmp_path / "crops",
+        target_packet_ids=["p0"],
+        retry_visual_zoom=True,
+    )
+
+    assert calls == [
+        {
+            "crop_ref": "/tmp/p7_crop.png",
+            "cache_dir": tmp_path / "crops",
+            "packet_id": "p0",
+        }
+    ]
+    assert [crop.scale for crop in out.packets[0].multi_scale_crops] == ["tight", "zoomed"]
+    assert out.packets[0].multi_scale_crops[1].ref == "/crops/p0_zoomed.png"
+    assert out.packets[0].linked_crop_refs == []
+    assert "expand_context:visual_zoom1" in out.packets[0].provenance.args_hash
+    assert out.packets[1].multi_scale_crops == []
+
+
+async def test_retry_visual_zoom_with_missing_context_continues_to_neighbors(
+    tmp_path, monkeypatch
+):
+    async def _fake_zoom_crop(*, crop_ref, cache_dir, packet_id):
+        return "/crops/p0_zoomed.png"
+
+    monkeypatch.setattr("focusparse.pipeline.expander._zoom_crop", _fake_zoom_crop)
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                packet_id="p0",
+                page=7,
+                bbox_norm=(0.20, 0.30, 0.40, 0.50),
+                region_type="Picture",
+            ),
+        ]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=7, bbox_norm=(0.22, 0.51, 0.38, 0.56), region_type="caption"),
+        ]
+    )
+
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        verifier_reason="p0 crop is unreadable and needs the caption",
+        verifier_missing_context=["caption"],
+        target_packet_ids=["p0"],
+        retry_visual_zoom=True,
+    )
+
+    packet = out.packets[0]
+    assert [crop.scale for crop in packet.multi_scale_crops] == ["tight", "zoomed"]
+    assert packet.linked_neighbor_types == ["context_window", "caption"]
+    assert calls
+
+
+async def test_retry_visual_zoom_falls_back_to_context_when_zoom_fails(monkeypatch):
+    zoom_calls: list[dict] = []
+    inspect_calls: list[dict] = []
+
+    async def _fake_zoom_crop(*, crop_ref, cache_dir, packet_id):
+        zoom_calls.append({"crop_ref": crop_ref, "cache_dir": cache_dir, "packet_id": packet_id})
+        return None
+
+    monkeypatch.setattr("focusparse.pipeline.expander._zoom_crop", _fake_zoom_crop)
+    _install_fake_inspect(monkeypatch, calls=inspect_calls)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                packet_id="p0",
+                page=7,
+                bbox_norm=(0.20, 0.30, 0.40, 0.50),
+                region_type="Picture",
+            ),
+            _packet(
+                packet_id="p1",
+                page=7,
+                bbox_norm=(0.60, 0.30, 0.80, 0.50),
+                region_type="Picture",
+            ),
+        ]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=7, bbox_norm=(0.22, 0.51, 0.38, 0.56), region_type="caption"),
+        ]
+    )
+
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        verifier_reason="p0 crop is unreadable and needs the caption",
+        target_packet_ids=["p0"],
+        retry_visual_zoom=True,
+    )
+
+    assert zoom_calls == [{"crop_ref": "/tmp/p7_crop.png", "cache_dir": None, "packet_id": "p0"}]
+    assert out.packets[0].multi_scale_crops == []
+    assert out.packets[0].linked_neighbor_types == ["context_window", "caption"]
+    assert out.packets[1].linked_neighbor_types == []
+    assert inspect_calls
+
+
+async def test_retry_visual_zoom_uses_existing_tight_scale_without_neighbors(tmp_path, monkeypatch):
+    async def _fake_zoom_crop(*, crop_ref, cache_dir, packet_id):
+        return "/crops/p0_zoomed.png"
+
+    async def _fail_inspect_region(*args, **kwargs):
+        raise AssertionError("visual zoom retry should not crop neighbors")
+
+    async def _fail_get_text_layer(*args, **kwargs):
+        raise AssertionError("visual zoom retry should not extract text")
+
+    monkeypatch.setattr("focusparse.pipeline.expander._zoom_crop", _fake_zoom_crop)
+    monkeypatch.setattr("focusparse.pipeline.expander.inspect_region", _fail_inspect_region)
+    monkeypatch.setattr("focusparse.pipeline.expander.get_text_layer", _fail_get_text_layer)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                packet_id="p0",
+                page=1,
+                bbox_norm=(0.20, 0.30, 0.40, 0.50),
+                region_type="Picture",
+            ).model_copy(
+                update={
+                    "multi_scale_crops": [
+                        CropRef(
+                            ref="/crops/p0_tight.png",
+                            bbox_norm=(0.20, 0.30, 0.40, 0.50),
+                            scale="tight",
+                        )
+                    ],
+                    "linked_crop_refs": ["/crops/existing_caption.png"],
+                    "linked_neighbor_types": ["caption"],
+                }
+            ),
+        ]
+    )
+
+    out = await expand_context(
+        ev,
+        regions=RegionsEvent(candidates=[]),
+        images_by_page={1: tmp_path / "unused.png"},
+        target_packet_ids=["p0"],
+        retry_visual_zoom=True,
+    )
+
+    packet = out.packets[0]
+    assert [crop.scale for crop in packet.multi_scale_crops] == ["tight", "zoomed"]
+    assert packet.multi_scale_crops[0].ref == "/crops/p0_tight.png"
+    assert packet.linked_crop_refs == ["/crops/existing_caption.png"]
+
+
+async def test_retry_visual_zoom_direct_resize_fallback_when_sandbox_returns_none(
+    tmp_path,
+    monkeypatch,
+):
+    async def _fake_zoom_crop(*, crop_ref, cache_dir, packet_id):
+        return None
+
+    crop_path = tmp_path / "target.png"
+    Image.new("RGB", (24, 12), color=(255, 255, 255)).save(crop_path)
+    monkeypatch.setattr("focusparse.pipeline.expander._zoom_crop", _fake_zoom_crop)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                packet_id="p0",
+                page=1,
+                bbox_norm=(0.20, 0.30, 0.40, 0.50),
+                region_type="Picture",
+            ).model_copy(update={"local_crop_ref": str(crop_path)}),
+        ]
+    )
+
+    out = await expand_context(
+        ev,
+        regions=RegionsEvent(candidates=[]),
+        images_by_page={1: tmp_path / "unused.png"},
+        crop_cache_dir=tmp_path / "crops",
+        target_packet_ids=["p0"],
+        retry_visual_zoom=True,
+    )
+
+    packet = out.packets[0]
+    assert [crop.scale for crop in packet.multi_scale_crops] == ["tight", "zoomed"]
+    assert packet.multi_scale_crops[0].ref == str(crop_path)
+    zoom_ref = Path(packet.multi_scale_crops[1].ref)
+    assert zoom_ref.exists()
+    with Image.open(zoom_ref) as zoomed:
+        assert zoomed.size == (48, 24)
+    assert "expand_context:visual_zoom1_direct" in packet.provenance.args_hash

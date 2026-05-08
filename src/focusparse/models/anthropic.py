@@ -6,6 +6,7 @@ under `response.usage`. No prompt caching in v1.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import time
@@ -13,7 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from focusparse.eval.pricing import compute_usd
+from focusparse.models._timeouts import model_timeout_s
 from focusparse.models.base import ModelResponse
+from focusparse.models.images import read_model_image_bytes
 
 
 class AnthropicClient:
@@ -33,11 +36,12 @@ class AnthropicClient:
             raise RuntimeError("ANTHROPIC_API_KEY not set; cannot call Anthropic.")
         from anthropic import AsyncAnthropic
 
-        client = AsyncAnthropic(api_key=self.api_key)
+        timeout_s = model_timeout_s()
+        client = AsyncAnthropic(api_key=self.api_key, timeout=timeout_s)
 
         content: list[dict[str, Any]] = []
         for img_path in images or []:
-            data = Path(img_path).read_bytes()
+            data = read_model_image_bytes(Path(img_path))
             b64 = base64.b64encode(data).decode("ascii")
             content.append(
                 {
@@ -60,7 +64,8 @@ class AnthropicClient:
             kwargs["system"] = system
 
         t0 = time.perf_counter()
-        resp = await client.messages.create(**kwargs)
+        async with asyncio.timeout(timeout_s):
+            resp = await client.messages.create(**kwargs)
         latency_ms = int((time.perf_counter() - t0) * 1000)
 
         text = ""

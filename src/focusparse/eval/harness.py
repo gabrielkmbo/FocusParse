@@ -35,6 +35,7 @@ from focusparse.eval.scoring import (
 from focusparse.eval.stage_metrics import StageMetrics, aggregate_stage_metrics
 from focusparse.models.base import ModelClient
 from focusparse.pipeline.workflow import FocusWorkflow, SimpleBaselineAgent, WorkflowResult
+from focusparse.tools.layout_detect import LayoutEndpointUnavailable, StubResponseError
 
 if TYPE_CHECKING:
     from focusparse._parser_bench import BenchmarkExample
@@ -317,12 +318,16 @@ async def run_focus_eval(
     tier_router: Any = None,
     pdfs_root: Path | None = None,
     max_retries: int | None = None,
+    max_evidence_retries: int | None = None,
     use_evidence_graph: bool = False,
     auto_zoom: bool = False,
     tool_set: str = "full",
     use_react_inspector: bool = False,
     multi_scale_packets: bool = False,
     chart_to_table_enabled: bool = False,
+    strict_layout_detection: bool = False,
+    layout_max_retries: int | None = None,
+    layout_timeout_s: float | None = None,
 ) -> dict[str, Any]:
     """Run `FocusWorkflow` over an iterable of examples.
 
@@ -351,6 +356,10 @@ async def run_focus_eval(
             it to `FocusWorkflow.run(pdf_path=...)`, which feeds native text
             into the FTS router. Missing files silently degrade to the
             skeleton router — the run keeps going.
+        strict_layout_detection: when True, layout endpoint outage/stub errors
+            abort the eval instead of becoming skeleton-region examples.
+        layout_max_retries / layout_timeout_s: optional overrides for the
+            layout detector transport. None falls through to config/defaults.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -361,12 +370,21 @@ async def run_focus_eval(
         "backend_client": backend_client,
         "config": config,
         "tier_router": tier_router,
+        "allow_layout_endpoint_fallback": not strict_layout_detection,
+        "layout_max_retries": layout_max_retries,
+        "layout_timeout_s": layout_timeout_s,
     }
     if max_retries is not None:
         # Caller-side override (e.g. baseline=0 vs item-3=2) controls the
         # verifier→retry loop. None falls through to FocusWorkflow's built-
         # in default.
         workflow_kwargs["max_retries"] = max_retries
+    if max_evidence_retries is not None:
+        # Separate budget for evidence-only controller actions
+        # (`expand_context` / `escalate_reasoner`). This lets the default
+        # workflow try one low-risk repair while keeping localization retries
+        # opt-in.
+        workflow_kwargs["max_evidence_retries"] = max_evidence_retries
     if use_evidence_graph:
         # Item-5 toggle: typed graph expansion in expand_context. Off by
         # default pending a fresh A/B under the post-2026-04-27 scorer.
@@ -445,6 +463,10 @@ async def run_focus_eval(
                     record["agentic_meta"] = agentic_meta
                 cache_path.write_text(json.dumps(record, default=str))
             except Exception as exc:
+                if strict_layout_detection and isinstance(
+                    exc, (LayoutEndpointUnavailable, StubResponseError)
+                ):
+                    raise
                 logger.exception("Example %s failed: %s", example.id, exc)
                 record = _error_record(example, protocol=protocol, error=str(exc))
 

@@ -19,23 +19,29 @@ below a figure, footnotes at the bottom of a chart, and section
 headers above a table, while filtering unrelated regions on the other
 side of the page.
 
-When `regions` or `pdf_path` is unavailable the stage returns evidence
-unchanged — downstream stages get exactly the pre-2h passthrough
-behavior, preserving every existing caller.
+When `regions` or both crop sources (`pdf_path` and `images_by_page`) are
+unavailable the stage returns evidence unchanged — downstream stages get exactly
+the pre-2h passthrough behavior, preserving every existing caller.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
+from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
-from focusparse.evidence.packet import EvidencePacket, PacketProvenance
+from focusparse.evidence.packet import CropRef, EvidencePacket, PacketProvenance
 from focusparse.pipeline.events import EvidenceEvent, PlanEvent, RegionCandidate, RegionsEvent
 from focusparse.pipeline.evidence_graph import (
     extract_figure_class,
     find_graph_neighbors,
     has_graph_entry,
 )
+from focusparse.pipeline.inspector import _crop_page_image, _ocr_existing_crop, _zoom_crop
+from focusparse.tools.get_text_layer import GetTextLayerInput, get_text_layer
 from focusparse.tools.inspect_region import InspectRegionInput, inspect_region
 
 logger = logging.getLogger(__name__)
@@ -44,8 +50,11 @@ logger = logging.getLogger(__name__)
 # other pictures / text blocks are not "annotations", they're siblings.
 _NEIGHBOR_TYPES: frozenset[str] = frozenset(
     {
+        "axis-label",
+        "axis_label",
         "caption",
         "footnote",
+        "legend",
         "section_header",
         "section-header",
         "title",
@@ -60,12 +69,28 @@ _NEIGHBOR_TYPES: frozenset[str] = frozenset(
 # never attach "figure" or "chart" as a neighbor because those are siblings,
 # not annotations.
 _EVIDENCE_TYPE_TO_NEIGHBOR_TYPES: dict[str, frozenset[str]] = {
+    "axis": frozenset({"axis-label", "axis_label"}),
+    "axis_label": frozenset({"axis-label", "axis_label"}),
+    "axis-label": frozenset({"axis-label", "axis_label"}),
     "caption": frozenset({"caption"}),
+    "column_header": frozenset({"page-header", "section_header", "section-header", "title"}),
+    "continuation": frozenset(
+        {"page-header", "page-footer", "section_header", "section-header", "title"}
+    ),
     "footnote": frozenset({"footnote"}),
     "header": frozenset({"page-header", "section_header", "section-header", "title"}),
     "footer": frozenset({"page-footer"}),
+    "chart": frozenset({"axis-label", "axis_label", "caption", "legend", "title"}),
+    "legend": frozenset({"legend"}),
+    "row_header": frozenset({"page-header", "section_header", "section-header", "title"}),
+    "table": frozenset(
+        {"caption", "footnote", "page-header", "section_header", "section-header", "title"}
+    ),
     "title": frozenset({"title", "section_header", "section-header"}),
     "section_header": frozenset({"section_header", "section-header", "title"}),
+    "unit": frozenset({"axis-label", "axis_label", "caption", "legend"}),
+    "x_axis": frozenset({"axis-label", "axis_label"}),
+    "y_axis": frozenset({"axis-label", "axis_label"}),
 }
 
 # Reranker `needed_for` roles that indicate "this region is a context
@@ -100,10 +125,87 @@ _DEFAULT_MAX_NEIGHBORS_PER_PACKET = 2
 # the reranker didn't run. Halves the spatial-only-fallback budget so
 # a query-blind expansion can't dominate the reasoner's image budget.
 _FALLBACK_MAX_NEIGHBORS_PER_PACKET = 1
+# First-pass expansion with reranker scores can still flood the reasoner when
+# many inspected packets look relevant. Keep the initial evidence budget small;
+# verifier-directed retries remain target-packet based and are not capped here.
+_INITIAL_RERANKED_TOTAL_NEIGHBOR_CAP = 6
+_INITIAL_CAP_EXEMPT_QUESTION_FAMILIES = frozenset(
+    {
+        "axis_value_interpolation",
+        "chart_caption_fusion",
+        "chart_footnote_fusion",
+        "chart_table_cross_ref",
+        "curve_axis_reading",
+        "dual_axis_disambiguation",
+        "legend_series_binding",
+        "multi_chart_comparison",
+        "timing_diagram_reading",
+    }
+)
 # Expand the packet's bbox by this fraction of the [0,1] range on each side
 # when testing for neighbor overlap. 0.08 ≈ ~1 inch on a Letter page at 300
 # DPI — enough to catch a caption a few text lines away.
 _DEFAULT_ADJACENCY_PAD = 0.08
+_RETRY_CONTEXT_WINDOW_PAD = 0.24
+_MAX_VISUAL_ZOOM_RETRY_PACKETS = 2
+_RETRY_VISUAL_ZOOM_MAX_DIM = 2048
+_MAX_LINKED_CONTEXT_TEXT_CHARS = 240
+_FIGURE_REF_RE = re.compile(r"\b(?:fig(?:ure)?\.?)\s*(?P<num>\d+[A-Za-z]?)\b", re.IGNORECASE)
+_CONTEXT_LINE_RE = re.compile(r"^Context\s+\[[^\]]+\]:\s*(?P<text>.*)$", re.IGNORECASE)
+_CONTEXT_WINDOW_REGION_TYPES: frozenset[str] = frozenset(
+    {
+        "bar_chart",
+        "candlestick",
+        "caption",
+        "chart",
+        "code",
+        "curve",
+        "diagram",
+        "figure",
+        "form",
+        "image",
+        "key-value region",
+        "key_value_region",
+        "line_chart",
+        "list-item",
+        "list_item",
+        "picture",
+        "plot",
+        "table",
+        "text",
+    }
+)
+_RETRY_UNION_CONTEXT_PAD = 0.14
+_RETRY_UNION_CONTEXT_RE = re.compile(
+    r"\b("
+    r"disconnect(?:ed)?|fragment(?:ed|s)?|full\s+(?:diagram|figure|context)|"
+    r"larger\s+(?:crop|context|view)|surrounding\s+(?:context|diagram|figure)|"
+    r"too\s+small|unclear|garbled|illegible|not\s+enough\s+context"
+    r")\b",
+    re.IGNORECASE,
+)
+_RETRY_VISUAL_PANEL_RE = re.compile(
+    r"\b("
+    r"actual\s+visual|gridlines?|oscilloscope|panel|text\s+alone|"
+    r"timing|trace|transition|visual\s+content|waveforms?"
+    r")\b",
+    re.IGNORECASE,
+)
+_RETRY_VISUAL_PANEL_TYPES: frozenset[str] = frozenset(
+    {
+        "chart",
+        "curve",
+        "diagram",
+        "figure",
+        "image",
+        "line_chart",
+        "picture",
+        "plot",
+    }
+)
+_RETRY_VISUAL_PANEL_MIN_AREA = 0.20
+_RETRY_VISUAL_PANEL_ROWS = 3
+_RETRY_VISUAL_PANEL_COLS = 2
 
 
 async def expand_context(
@@ -111,12 +213,18 @@ async def expand_context(
     *,
     regions: RegionsEvent | None = None,
     pdf_path: Path | None = None,
+    images_by_page: dict[int, Path] | None = None,
     crop_cache_dir: Path | None = None,
+    text_layer_cache_dir: Path | None = None,
     max_neighbors_per_packet: int = _DEFAULT_MAX_NEIGHBORS_PER_PACKET,
     adjacency_pad: float = _DEFAULT_ADJACENCY_PAD,
     use_evidence_graph: bool = False,
     plan: PlanEvent | None = None,
+    verifier_reason: str | None = None,
+    verifier_missing_context: list[str] | None = None,
+    target_packet_ids: list[str] | None = None,
     relevance_threshold: float = _DEFAULT_NEIGHBOR_RELEVANCE_THRESHOLD,
+    retry_visual_zoom: bool = False,
 ) -> EvidenceEvent:
     """Attach annotation neighbors to each packet, or pass through unchanged.
 
@@ -125,11 +233,15 @@ async def expand_context(
         regions: full `RegionsEvent` from the localizer. When None, the
             stage is a passthrough — we need the full region list to find
             neighbors the inspector didn't promote to a packet.
-        pdf_path: source PDF. Required for cropping neighbor regions;
-            without it, the expander is a passthrough (we don't want to
-            invent crop refs that point nowhere).
+        pdf_path: source PDF. Preferred for cropping/OCR of neighbor regions.
+            When unavailable, the expander can still crop already-rendered page
+            PNGs from `images_by_page`.
+        images_by_page: optional 1-indexed page -> rendered page PNG fallback
+            used when `pdf_path` is unavailable.
         crop_cache_dir: where neighbor crop PNGs go. Content-addressed by
             `inspect_region` so repeated calls on the same region are free.
+        text_layer_cache_dir: optional cache dir for native text snippets
+            extracted from attached neighbor regions.
         max_neighbors_per_packet: cap (plan §2e says 4 to keep packets
             compact). Halved automatically when neither `plan` nor the
             reranker provided a relevance signal (see
@@ -137,11 +249,23 @@ async def expand_context(
         adjacency_pad: fractional bbox expansion for the overlap test.
         plan: optional `PlanEvent`. When provided, `plan.evidence_types`
             filters neighbor candidates to types the planner asked for
-            (e.g. "caption" → only attach captions). Without `plan` and
-            without reranker relevance scores, the expander falls back
-            to a tighter spatial-only budget — the rebaseline-v2 finding
-            (2026-05-05) showed that query-blind expansion attached ~13
-            neighbors per example and hurt 11 of 13 affected examples.
+            (e.g. "caption" → only attach captions).
+        verifier_reason: optional unsupported-verdict reason from a verifier
+            retry. Mentions like "missing legend" or "needs footnote" add
+            targeted neighbor types even if the original planner hint was
+            narrower. Without `verifier_reason` or reranker relevance scores,
+            the expander uses a tighter initial budget even when the planner
+            supplied coarse hints — the rebaseline-v2 finding (2026-05-05)
+            showed that broad expansion attached ~13 neighbors per example
+            and hurt 11 of 13 affected examples.
+        verifier_missing_context: structured verifier hints such as
+            ``["caption", "legend"]``. Pure visual-readability retries remain
+            zoom-only, but these hints allow the retry to add the requested
+            context after the zoom succeeds.
+        target_packet_ids: optional packet ids to expand. Verifier-driven
+            retries use this to avoid adding fresh context to packets the
+            answer did not cite. ``None`` means expand all eligible packets
+            (initial pass); an explicit empty list means expand none.
         relevance_threshold: when the reranker (Phase 2 item 4) scored
             candidates, neighbors below this threshold are filtered out
             even if they overlap spatially. Default 0.3.
@@ -150,19 +274,36 @@ async def expand_context(
         An `EvidenceEvent` with the same packets, each potentially carrying
         `linked_crop_refs` / `linked_neighbor_types` / updated provenance.
     """
-    if regions is None or pdf_path is None:
+    if regions is None or (pdf_path is None and not images_by_page):
         return evidence
+
+    if retry_visual_zoom:
+        zoomed = await _expand_retry_visual_zoom(
+            evidence,
+            crop_cache_dir=crop_cache_dir,
+            target_packet_ids=target_packet_ids,
+        )
+        if _zoom_added(evidence, zoomed):
+            evidence = zoomed
+            if _visual_zoom_retry_should_stay_narrow(
+                verifier_missing_context=verifier_missing_context,
+                verifier_reason=verifier_reason,
+            ):
+                return evidence
 
     # Resolve which neighbor region_types the planner permits. Empty set
     # means "no planner hint" → fall back to the conservative budget.
-    permitted_neighbor_types = _resolve_permitted_neighbor_types(plan)
+    permitted_neighbor_types = _resolve_permitted_neighbor_types(
+        plan,
+        verifier_reason=verifier_reason,
+    )
     has_planner_hint = bool(permitted_neighbor_types)
     has_rerank_signal = any(
         c.relevance is not None or c.needed_for is not None for c in regions.candidates
     )
     effective_max = (
         max_neighbors_per_packet
-        if (has_planner_hint or has_rerank_signal)
+        if (verifier_reason or has_rerank_signal)
         else _FALLBACK_MAX_NEIGHBORS_PER_PACKET
     )
 
@@ -173,11 +314,46 @@ async def expand_context(
         regions_by_page.setdefault(r.page, []).append(r)
 
     new_packets: list[EvidencePacket] = []
+    target_filter_active = target_packet_ids is not None
+    target_set = {pid for pid in (target_packet_ids or []) if pid}
+    total_new_neighbor_cap = (
+        _INITIAL_RERANKED_TOTAL_NEIGHBOR_CAP
+        if _should_cap_initial_reranked_expansion(
+            plan,
+            has_rerank_signal=has_rerank_signal,
+            verifier_reason=verifier_reason,
+            target_filter_active=target_filter_active,
+        )
+        else None
+    )
+    total_new_neighbor_links = 0
+    retry_union_context = await _retry_union_context_windows(
+        evidence,
+        target_set=target_set,
+        target_filter_active=target_filter_active,
+        verifier_reason=verifier_reason,
+        pdf_path=pdf_path,
+        images_by_page=images_by_page,
+        crop_cache_dir=crop_cache_dir,
+        text_layer_cache_dir=text_layer_cache_dir,
+    )
     for packet in evidence.packets:
+        if target_filter_active and packet.packet_id not in target_set:
+            new_packets.append(packet)
+            continue
         candidates_on_page = regions_by_page.get(packet.page, [])
         # Find the matching RegionCandidate so we can read figure_class +
         # expansion_hints (populated by item 4's reranker).
         primary_region = _match_primary_region(packet, candidates_on_page)
+        if not _should_initially_expand_packet(
+            primary_region,
+            has_rerank_signal=has_rerank_signal,
+            verifier_reason=verifier_reason,
+            target_filter_active=target_filter_active,
+            relevance_threshold=relevance_threshold,
+        ):
+            new_packets.append(packet)
+            continue
 
         # Graph walker is opt-in (default off) since the n=30 A/B on
         # 2026-04-27 showed it regressed region_recall (-0.113),
@@ -191,13 +367,27 @@ async def expand_context(
             else None
         )
         graph_matches: list[tuple[RegionCandidate, str]] = []
+        existing_link_count = len([ref for ref in packet.linked_crop_refs if ref])
+        candidate_limit = max_neighbors_per_packet + existing_link_count
+        new_link_cap = effective_max
+        remaining_total_links: int | None = None
+        if total_new_neighbor_cap is not None:
+            remaining_total_links = total_new_neighbor_cap - total_new_neighbor_links
+            if remaining_total_links <= 0:
+                new_packets.append(packet)
+                continue
+            new_link_cap = min(new_link_cap, remaining_total_links)
+            candidate_limit = min(candidate_limit, existing_link_count + new_link_cap)
         if use_evidence_graph and has_graph_entry(packet.region_type, figure_class):
             hints = primary_region.expansion_hints if primary_region else None
             graph_matches = find_graph_neighbors(
                 primary_region or _synth_primary_from_packet(packet),
                 candidates_on_page,
                 expansion_hints=hints,
-            )[:max_neighbors_per_packet]
+            )[:candidate_limit]
+            new_link_cap = max_neighbors_per_packet
+            if remaining_total_links is not None:
+                new_link_cap = min(new_link_cap, remaining_total_links)
 
         if graph_matches:
             neighbors_with_role: list[tuple[RegionCandidate, str]] = list(graph_matches)
@@ -207,48 +397,225 @@ async def expand_context(
             spatial = _pick_neighbors(
                 packet,
                 candidates_on_page,
-                max_n=effective_max,
+                max_n=candidate_limit,
                 pad=adjacency_pad,
                 permitted_neighbor_types=permitted_neighbor_types,
                 has_planner_hint=has_planner_hint,
                 relevance_threshold=relevance_threshold,
             )
-            neighbors_with_role = [(n, (n.region_type or "").lower() or "unknown") for n in spatial]
+            neighbors_with_role = [(n, _neighbor_role(n)) for n in spatial]
 
-        if not neighbors_with_role:
+        context_window_ref = None
+        context_window_text = None
+        context_window_bbox = None
+        visual_panel_refs: list[str] = []
+        union_context = retry_union_context.get(packet.packet_id)
+        if union_context is not None:
+            context_window_ref = union_context.ref
+            context_window_text = union_context.text
+            context_window_bbox = union_context.bbox
+        elif _should_attach_retry_context_window(
+            packet,
+            verifier_reason=verifier_reason,
+            target_filter_active=target_filter_active,
+        ):
+            context_window_bbox = _context_window_bbox(packet)
+            context_window_ref = await _crop_context_window(
+                packet,
+                pdf_path=pdf_path,
+                page_image=(images_by_page or {}).get(packet.page),
+                crop_cache_dir=crop_cache_dir,
+                bbox=context_window_bbox,
+            )
+            if context_window_ref and context_window_bbox is not None:
+                context_window_text = await _extract_neighbor_text(
+                    _synth_context_window_region(packet, context_window_bbox),
+                    role="context_window",
+                    pdf_path=pdf_path,
+                    crop_ref=context_window_ref,
+                    text_layer_cache_dir=text_layer_cache_dir,
+                    crop_cache_dir=crop_cache_dir,
+                )
+        visual_panel_refs = await _retry_visual_panel_crops(
+            packet,
+            verifier_reason=verifier_reason,
+            target_filter_active=target_filter_active,
+            pdf_path=pdf_path,
+            page_image=(images_by_page or {}).get(packet.page),
+            crop_cache_dir=crop_cache_dir,
+        )
+
+        if not neighbors_with_role and context_window_ref is None and not visual_panel_refs:
             new_packets.append(packet)
             continue
 
-        linked_refs: list[str] = []
-        linked_types: list[str] = []
+        linked_refs: list[str] = list(packet.linked_crop_refs)
+        linked_types: list[str] = list(packet.linked_neighbor_types)
+        linked_texts: list[tuple[str, str]] = []
+        seen_linked_refs = {ref for ref in linked_refs if ref}
+        n_new_links = 0
+        n_new_neighbor_links = 0
+        if context_window_ref and context_window_ref not in seen_linked_refs:
+            linked_refs.append(context_window_ref)
+            linked_types.append("context_window")
+            if context_window_text:
+                linked_texts.append(("context_window", context_window_text))
+            seen_linked_refs.add(context_window_ref)
+            n_new_links += 1
+        for panel_ref in visual_panel_refs:
+            if panel_ref in seen_linked_refs:
+                continue
+            linked_refs.append(panel_ref)
+            linked_types.append("visual_panel")
+            seen_linked_refs.add(panel_ref)
+            n_new_links += 1
+        packet_figure_refs = _figure_refs_from_text(packet.text_layer_snippet, packet.ocr_snippet)
         for neighbor, role in neighbors_with_role:
+            if n_new_neighbor_links >= new_link_cap:
+                break
             crop_ref = await _crop_neighbor(
                 neighbor,
                 pdf_path=pdf_path,
+                page_image=(images_by_page or {}).get(neighbor.page),
                 crop_cache_dir=crop_cache_dir,
             )
             if crop_ref is None:
                 continue
+            if crop_ref in seen_linked_refs:
+                continue
+            linked_text = await _extract_neighbor_text(
+                neighbor,
+                role=role,
+                pdf_path=pdf_path,
+                crop_ref=crop_ref,
+                text_layer_cache_dir=text_layer_cache_dir,
+                crop_cache_dir=crop_cache_dir,
+            )
+            if linked_text:
+                if _neighbor_text_mismatches_packet_figure(
+                    packet_figure_refs,
+                    role=role,
+                    linked_text=linked_text,
+                ):
+                    continue
+                linked_texts.append((role, linked_text))
             linked_refs.append(crop_ref)
             # Use the graph's semantic role (caption / title / footnote /
             # legend / axis) when present; falls back to the raw region_type
             # for spatial-heuristic matches.
             linked_types.append(role)
+            seen_linked_refs.add(crop_ref)
+            n_new_links += 1
+            n_new_neighbor_links += 1
 
-        if not linked_refs:
+        if n_new_links == 0:
             new_packets.append(packet)
             continue
+        total_new_neighbor_links += n_new_neighbor_links
 
-        new_packets.append(
-            packet.model_copy(
-                update={
-                    "linked_crop_refs": linked_refs,
-                    "linked_neighbor_types": linked_types,
-                    "provenance": _updated_provenance(packet.provenance, len(linked_refs)),
-                }
-            )
-        )
+        updates = {
+            "linked_crop_refs": linked_refs,
+            "linked_neighbor_types": linked_types,
+            "provenance": _updated_provenance(packet.provenance, n_new_links),
+        }
+        updates.update(_context_text_updates(packet, linked_texts))
+        new_packets.append(packet.model_copy(update=updates))
     return EvidenceEvent(packets=new_packets)
+
+
+@dataclass(frozen=True)
+class _RetryContextWindow:
+    ref: str
+    bbox: tuple[float, float, float, float]
+    text: str | None = None
+
+
+async def _retry_union_context_windows(
+    evidence: EvidenceEvent,
+    *,
+    target_set: set[str],
+    target_filter_active: bool,
+    verifier_reason: str | None,
+    pdf_path: Path | None,
+    images_by_page: dict[int, Path] | None,
+    crop_cache_dir: Path | None,
+    text_layer_cache_dir: Path | None,
+) -> dict[str, _RetryContextWindow]:
+    """Build one wider same-page crop for fragmented multi-packet retries."""
+    if not _should_attach_retry_union_context(
+        evidence,
+        target_set=target_set,
+        target_filter_active=target_filter_active,
+        verifier_reason=verifier_reason,
+    ):
+        return {}
+
+    out: dict[str, _RetryContextWindow] = {}
+    for packets in _target_packets_grouped_by_page(evidence, target_set).values():
+        if len(packets) < 2:
+            continue
+        bbox = _union_context_bbox(packets)
+        anchor = packets[0]
+        ref = await _crop_context_window(
+            anchor,
+            pdf_path=pdf_path,
+            page_image=(images_by_page or {}).get(anchor.page),
+            crop_cache_dir=crop_cache_dir,
+            bbox=bbox,
+            pad=0.0,
+        )
+        if ref is None:
+            continue
+        text = await _extract_neighbor_text(
+            _synth_context_window_region(anchor, bbox),
+            role="context_window",
+            pdf_path=pdf_path,
+            crop_ref=ref,
+            text_layer_cache_dir=text_layer_cache_dir,
+            crop_cache_dir=crop_cache_dir,
+        )
+        window = _RetryContextWindow(ref=ref, bbox=bbox, text=text)
+        for packet in packets:
+            out[packet.packet_id] = window
+    return out
+
+
+def _should_attach_retry_union_context(
+    evidence: EvidenceEvent,
+    *,
+    target_set: set[str],
+    target_filter_active: bool,
+    verifier_reason: str | None,
+) -> bool:
+    if not (target_filter_active and verifier_reason and len(target_set) >= 2):
+        return False
+    if not _RETRY_UNION_CONTEXT_RE.search(verifier_reason):
+        return False
+    return any(
+        len(packets) >= 2
+        for packets in _target_packets_grouped_by_page(evidence, target_set).values()
+    )
+
+
+def _target_packets_grouped_by_page(
+    evidence: EvidenceEvent,
+    target_set: set[str],
+) -> dict[int, list[EvidencePacket]]:
+    by_page: dict[int, list[EvidencePacket]] = {}
+    for packet in evidence.packets:
+        if packet.packet_id in target_set:
+            by_page.setdefault(packet.page, []).append(packet)
+    return by_page
+
+
+def _union_context_bbox(
+    packets: list[EvidencePacket],
+) -> tuple[float, float, float, float]:
+    x0 = min(packet.bbox_norm[0] for packet in packets)
+    y0 = min(packet.bbox_norm[1] for packet in packets)
+    x1 = max(packet.bbox_norm[2] for packet in packets)
+    y1 = max(packet.bbox_norm[3] for packet in packets)
+    return _pad_bbox((x0, y0, x1, y1), pad=_RETRY_UNION_CONTEXT_PAD)
 
 
 # ---------------------------------------------------------------------------
@@ -266,10 +633,11 @@ def _pick_neighbors(
     has_planner_hint: bool = False,
     relevance_threshold: float = _DEFAULT_NEIGHBOR_RELEVANCE_THRESHOLD,
 ) -> list[RegionCandidate]:
-    """Return up to `max_n` annotation-type regions adjacent to `packet`.
+    """Return up to `max_n` context regions adjacent to `packet`.
 
     Selection (query-aware as of 2026-05-05):
-      * region_type must be in `_NEIGHBOR_TYPES`
+      * region_type must be in `_NEIGHBOR_TYPES`, OR the reranker must tag
+        the region with a context `needed_for` role
       * must not BE the packet region (same bbox / same region_id)
       * padded packet bbox must overlap the candidate bbox
       * AND at least one of the following:
@@ -299,7 +667,8 @@ def _pick_neighbors(
     matches: list[tuple[int, float, float, float, RegionCandidate]] = []
     for cand in candidates:
         ctype = (cand.region_type or "").lower()
-        if ctype not in _NEIGHBOR_TYPES:
+        has_context_role = cand.needed_for in _RERANK_CONTEXT_ROLES
+        if ctype not in _NEIGHBOR_TYPES and ctype not in permitted and not has_context_role:
             continue
         if _bbox_equal(cand.bbox_norm, packet.bbox_norm):
             continue
@@ -340,7 +709,294 @@ def _pick_neighbors(
     return [cand for _b, _p, _d, _s, cand in matches[:max_n]]
 
 
-def _resolve_permitted_neighbor_types(plan: PlanEvent | None) -> frozenset[str]:
+def _neighbor_role(cand: RegionCandidate) -> str:
+    """Role descriptor shown to the reasoner for an attached neighbor."""
+    ctype = (cand.region_type or "").lower()
+    if ctype in _NEIGHBOR_TYPES:
+        return ctype
+    if cand.needed_for in _RERANK_CONTEXT_ROLES:
+        return str(cand.needed_for)
+    return ctype or "unknown"
+
+
+def _should_initially_expand_packet(
+    primary_region: RegionCandidate | None,
+    *,
+    has_rerank_signal: bool,
+    verifier_reason: str | None,
+    target_filter_active: bool,
+    relevance_threshold: float,
+) -> bool:
+    """Gate first-pass expansion to packets with query-conditioned support.
+
+    Once the reranker has annotated the region list, adding context to every
+    inspected packet can flood the reasoner with neighbors from packets the
+    reranker did not select. Verifier-directed retries are exempt: at that
+    point the controller has already named target packets and missing context.
+    """
+    if verifier_reason or target_filter_active:
+        return True
+    if not has_rerank_signal or primary_region is None:
+        return True
+    if primary_region.needed_for == "primary":
+        return True
+    if primary_region.needed_for in _RERANK_CONTEXT_ROLES:
+        return True
+    if primary_region.expansion_hints:
+        return True
+    return primary_region.relevance is not None and primary_region.relevance >= relevance_threshold
+
+
+def _should_cap_initial_reranked_expansion(
+    plan: PlanEvent | None,
+    *,
+    has_rerank_signal: bool,
+    verifier_reason: str | None,
+    target_filter_active: bool,
+) -> bool:
+    """Apply the run-level context budget to text/table-ish first passes.
+
+    Visual chart/timing families often need several sibling packets plus axes
+    or legends before the first answer. Text/table families are where the
+    latest full run showed large neighbor fanout without corresponding
+    support, so cap them until a verifier retry names target packets.
+    """
+    if not has_rerank_signal or verifier_reason or target_filter_active:
+        return False
+    family = (plan.question_family if plan else None) or ""
+    return family not in _INITIAL_CAP_EXEMPT_QUESTION_FAMILIES
+
+
+def _should_attach_retry_context_window(
+    packet: EvidencePacket,
+    *,
+    verifier_reason: str | None,
+    target_filter_active: bool,
+) -> bool:
+    """Verifier retries add a wider crop for the cited/target packet itself."""
+    if not (verifier_reason and target_filter_active):
+        return False
+    region_type = (packet.region_type or "").strip().lower()
+    return not region_type or region_type in _CONTEXT_WINDOW_REGION_TYPES
+
+
+async def _retry_visual_panel_crops(
+    packet: EvidencePacket,
+    *,
+    verifier_reason: str | None,
+    target_filter_active: bool,
+    pdf_path: Path | None,
+    page_image: Path | None,
+    crop_cache_dir: Path | None,
+) -> list[str]:
+    """Attach panel-scale crops for large timing/oscilloscope overview figures."""
+    if not _should_attach_retry_visual_panels(
+        packet,
+        verifier_reason=verifier_reason,
+        target_filter_active=target_filter_active,
+    ):
+        return []
+
+    refs: list[str] = []
+    for bbox in _visual_panel_bboxes(packet.bbox_norm):
+        ref = await _crop_context_window(
+            packet,
+            pdf_path=pdf_path,
+            page_image=page_image,
+            crop_cache_dir=crop_cache_dir,
+            bbox=bbox,
+            pad=0.0,
+        )
+        if ref:
+            refs.append(ref)
+    return refs
+
+
+def _should_attach_retry_visual_panels(
+    packet: EvidencePacket,
+    *,
+    verifier_reason: str | None,
+    target_filter_active: bool,
+) -> bool:
+    if not (target_filter_active and verifier_reason):
+        return False
+    if not _RETRY_VISUAL_PANEL_RE.search(verifier_reason):
+        return False
+    if (packet.region_type or "").strip().lower() not in _RETRY_VISUAL_PANEL_TYPES:
+        return False
+    return _bbox_area(packet.bbox_norm) >= _RETRY_VISUAL_PANEL_MIN_AREA
+
+
+def _visual_panel_bboxes(
+    bbox: tuple[float, float, float, float],
+) -> list[tuple[float, float, float, float]]:
+    x0, y0, x1, y1 = bbox
+    width = max(0.0, x1 - x0)
+    height = max(0.0, y1 - y0)
+    if width <= 0.0 or height <= 0.0:
+        return []
+    out: list[tuple[float, float, float, float]] = []
+    for row in range(_RETRY_VISUAL_PANEL_ROWS):
+        for col in range(_RETRY_VISUAL_PANEL_COLS):
+            px0 = x0 + width * col / _RETRY_VISUAL_PANEL_COLS
+            px1 = x0 + width * (col + 1) / _RETRY_VISUAL_PANEL_COLS
+            py0 = y0 + height * row / _RETRY_VISUAL_PANEL_ROWS
+            py1 = y0 + height * (row + 1) / _RETRY_VISUAL_PANEL_ROWS
+            out.append((px0, py0, px1, py1))
+    return out
+
+
+async def _expand_retry_visual_zoom(
+    evidence: EvidenceEvent,
+    *,
+    crop_cache_dir: Path | None,
+    target_packet_ids: list[str] | None,
+) -> EvidenceEvent:
+    """Add a zoomed copy of cited visual crops without adding new context.
+
+    This path is intentionally narrower than normal `expand_context`: it only
+    sharpens already-selected evidence after a verifier explicitly complained
+    about readability. No neighbor crops, context windows, or native text are
+    added, keeping the retry's action space small.
+    """
+    target_set = {pid for pid in (target_packet_ids or []) if pid}
+    if not target_set:
+        return evidence
+
+    zoomed = 0
+    new_packets: list[EvidencePacket] = []
+    for packet in evidence.packets:
+        if packet.packet_id not in target_set or zoomed >= _MAX_VISUAL_ZOOM_RETRY_PACKETS:
+            new_packets.append(packet)
+            continue
+        if _packet_has_scale(packet, "zoomed"):
+            new_packets.append(packet)
+            continue
+        crop_ref, bbox = _tight_crop_for_zoom(packet)
+        if not crop_ref:
+            new_packets.append(packet)
+            continue
+        zoom_tag = "expand_context:visual_zoom1"
+        zoom_ref = await _zoom_crop(
+            crop_ref=crop_ref,
+            cache_dir=crop_cache_dir,
+            packet_id=packet.packet_id,
+        )
+        if not zoom_ref:
+            zoom_ref = _direct_zoom_crop(
+                crop_ref=crop_ref,
+                cache_dir=crop_cache_dir,
+            )
+            zoom_tag = "expand_context:visual_zoom1_direct"
+        if not zoom_ref:
+            new_packets.append(packet)
+            continue
+        multi_scale = list(packet.multi_scale_crops)
+        if not multi_scale:
+            multi_scale.append(CropRef(ref=crop_ref, bbox_norm=bbox, scale="tight"))
+        multi_scale.append(CropRef(ref=zoom_ref, bbox_norm=bbox, scale="zoomed"))
+        new_packets.append(
+            packet.model_copy(
+                update={
+                    "multi_scale_crops": multi_scale,
+                    "provenance": _updated_provenance(
+                        packet.provenance,
+                        0,
+                        tag=zoom_tag,
+                    ),
+                }
+            )
+        )
+        zoomed += 1
+    return EvidenceEvent(packets=new_packets)
+
+
+def _tight_crop_for_zoom(
+    packet: EvidencePacket,
+) -> tuple[str | None, tuple[float, float, float, float]]:
+    for crop in packet.multi_scale_crops:
+        if crop.scale == "tight" and crop.ref:
+            return crop.ref, crop.bbox_norm
+    return packet.local_crop_ref or None, packet.bbox_norm
+
+
+def _direct_zoom_crop(
+    *,
+    crop_ref: str,
+    cache_dir: Path | None,
+) -> str | None:
+    """Deterministically upsample a crop when the sandboxed zoom path fails.
+
+    Verifier-directed visual retries are only useful if the next reasoner call
+    actually receives sharper evidence. `run_python` is still the first path,
+    but transient sandbox/process failures should not collapse a readability
+    retry back into ordinary neighbor expansion.
+    """
+    crop_path = Path(crop_ref)
+    if not crop_path.exists():
+        return None
+
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+
+    try:
+        with Image.open(crop_path) as img:
+            img = img.convert("RGB")
+            target_w, target_h = img.width * 2, img.height * 2
+            if max(target_w, target_h) > _RETRY_VISUAL_ZOOM_MAX_DIM:
+                scale = _RETRY_VISUAL_ZOOM_MAX_DIM / max(target_w, target_h)
+                target_w = max(1, int(round(target_w * scale)))
+                target_h = max(1, int(round(target_h * scale)))
+            out = img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+            buf = BytesIO()
+            out.save(buf, format="PNG")
+            png_bytes = buf.getvalue()
+    except (OSError, ValueError):
+        return None
+
+    out_dir = Path(cache_dir) if cache_dir is not None else crop_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ref = hashlib.sha256(png_bytes).hexdigest()[:16]
+    out_path = out_dir / f"{ref}.png"
+    if not out_path.exists():
+        out_path.write_bytes(png_bytes)
+    return str(out_path)
+
+
+def _packet_has_scale(packet: EvidencePacket, scale: str) -> bool:
+    return any(c.scale == scale for c in packet.multi_scale_crops)
+
+
+def _zoom_added(before: EvidenceEvent, after: EvidenceEvent) -> bool:
+    before_counts = {p.packet_id: _packet_scale_count(p, "zoomed") for p in before.packets}
+    return any(
+        _packet_scale_count(packet, "zoomed") > before_counts.get(packet.packet_id, 0)
+        for packet in after.packets
+    )
+
+
+def _visual_zoom_retry_should_stay_narrow(
+    *,
+    verifier_missing_context: list[str] | None,
+    verifier_reason: str | None,
+) -> bool:
+    """Keep pure readability retries zoom-only, but honor missing context asks."""
+    if verifier_missing_context:
+        return False
+    return not _neighbor_types_from_verifier_reason(verifier_reason)
+
+
+def _packet_scale_count(packet: EvidencePacket, scale: str) -> int:
+    return sum(1 for crop in packet.multi_scale_crops if crop.scale == scale)
+
+
+def _resolve_permitted_neighbor_types(
+    plan: PlanEvent | None,
+    *,
+    verifier_reason: str | None = None,
+) -> frozenset[str]:
     """Map `plan.evidence_types` (planner vocab) to the set of detector-vocab
     region_types the expander is allowed to attach as neighbors.
 
@@ -348,17 +1004,73 @@ def _resolve_permitted_neighbor_types(plan: PlanEvent | None) -> frozenset[str]:
     callers fall back to the legacy spatial heuristic in that case (with a
     tighter neighbor cap to bound noise).
     """
-    if plan is None or not plan.evidence_types:
-        return frozenset()
     permitted: set[str] = set()
-    for raw in plan.evidence_types:
-        key = (raw or "").strip().lower()
-        if not key:
-            continue
-        aliases = _EVIDENCE_TYPE_TO_NEIGHBOR_TYPES.get(key)
-        if aliases:
-            permitted |= aliases
+    if plan is not None:
+        for raw in plan.evidence_types:
+            key = (raw or "").strip().lower()
+            if not key:
+                continue
+            aliases = _EVIDENCE_TYPE_TO_NEIGHBOR_TYPES.get(key)
+            if aliases:
+                permitted |= aliases
+    permitted |= _neighbor_types_from_verifier_reason(verifier_reason)
     return frozenset(permitted)
+
+
+def _neighbor_types_from_verifier_reason(reason: str | None) -> frozenset[str]:
+    """Infer targeted context-neighbor types from verifier failure text."""
+    if not reason:
+        return frozenset()
+    normalized = reason.lower()
+    normalized = re.sub(r"[^a-z0-9_ -]+", " ", normalized)
+    wanted: set[str] = set()
+    token_checks: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
+        (
+            ("axis label", "axis labels", "tick label", "tick labels"),
+            frozenset({"axis-label", "axis_label"}),
+        ),
+        (("caption", "captions"), frozenset({"caption"})),
+        (("footnote", "footnotes", "note", "notes"), frozenset({"footnote"})),
+        (
+            ("header", "headers", "row label", "column label"),
+            frozenset({"page-header", "section_header", "section-header", "title"}),
+        ),
+        (
+            (
+                "cell",
+                "cells",
+                "column",
+                "columns",
+                "row",
+                "rows",
+                "table",
+                "tables",
+                "value",
+                "values",
+            ),
+            frozenset(
+                {
+                    "code",
+                    "key-value region",
+                    "key_value_region",
+                    "list-item",
+                    "list_item",
+                    "table",
+                    "text",
+                }
+            ),
+        ),
+        (("legend", "legends"), frozenset({"legend"})),
+        (("title", "section title"), frozenset({"title", "section_header", "section-header"})),
+        (
+            ("continuation", "continued", "previous page", "next page"),
+            frozenset({"page-header", "page-footer", "section_header", "section-header", "title"}),
+        ),
+    )
+    for needles, aliases in token_checks:
+        if any(needle in normalized for needle in needles):
+            wanted |= aliases
+    return frozenset(wanted)
 
 
 def _pad_bbox(
@@ -390,6 +1102,10 @@ def _bbox_equal(
     tol: float = 1e-6,
 ) -> bool:
     return all(abs(ai - bi) < tol for ai, bi in zip(a, b, strict=False))
+
+
+def _bbox_area(bbox: tuple[float, float, float, float]) -> float:
+    return max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
 
 
 def _match_primary_region(
@@ -430,30 +1146,273 @@ def _synth_primary_from_packet(packet: EvidencePacket) -> RegionCandidate:
 async def _crop_neighbor(
     neighbor: RegionCandidate,
     *,
-    pdf_path: Path,
+    pdf_path: Path | None,
+    page_image: Path | None,
     crop_cache_dir: Path | None,
 ) -> str | None:
     """Render a cropped PNG for a neighbor region; return None on failure."""
-    try:
-        out = await inspect_region(
-            InspectRegionInput(
-                doc_path=str(pdf_path),
-                page=neighbor.page,
-                bbox_norm=neighbor.bbox_norm,
-                mode="image",
-                expansion="none",  # neighbor bboxes are already tight
-            ),
-            cache_dir=crop_cache_dir,
-        )
-        return out.crop_ref
-    except (FileNotFoundError, ValueError) as exc:
-        logger.debug(
-            "neighbor crop failed for page=%d bbox=%s: %s",
-            neighbor.page,
-            neighbor.bbox_norm,
-            exc,
-        )
+    if pdf_path is not None:
+        try:
+            out = await inspect_region(
+                InspectRegionInput(
+                    doc_path=str(pdf_path),
+                    page=neighbor.page,
+                    bbox_norm=neighbor.bbox_norm,
+                    mode="image",
+                    expansion="none",  # neighbor bboxes are already tight
+                ),
+                cache_dir=crop_cache_dir,
+            )
+            return out.crop_ref
+        except (FileNotFoundError, ValueError) as exc:
+            logger.debug(
+                "neighbor crop failed for page=%d bbox=%s: %s",
+                neighbor.page,
+                neighbor.bbox_norm,
+                exc,
+            )
+
+    if page_image is not None:
+        try:
+            return _crop_page_image(
+                page_image,
+                neighbor.bbox_norm,
+                cache_dir=crop_cache_dir,
+                expansion=0.0,
+            )
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            logger.debug(
+                "neighbor page-image crop failed for page=%d bbox=%s: %s",
+                neighbor.page,
+                neighbor.bbox_norm,
+                exc,
+            )
+    return None
+
+
+async def _crop_context_window(
+    packet: EvidencePacket,
+    *,
+    pdf_path: Path | None,
+    page_image: Path | None,
+    crop_cache_dir: Path | None,
+    bbox: tuple[float, float, float, float] | None = None,
+    pad: float = _RETRY_CONTEXT_WINDOW_PAD,
+) -> str | None:
+    """Render a wider crop around the packet bbox for verifier retries."""
+    bbox = bbox or _context_window_bbox(packet, pad=pad)
+    if bbox is None:
         return None
+    if pdf_path is not None:
+        try:
+            out = await inspect_region(
+                InspectRegionInput(
+                    doc_path=str(pdf_path),
+                    page=packet.page,
+                    bbox_norm=bbox,
+                    mode="image",
+                    expansion="none",
+                ),
+                cache_dir=crop_cache_dir,
+            )
+            return out.crop_ref
+        except (FileNotFoundError, ValueError) as exc:
+            logger.debug(
+                "context-window crop failed for packet=%s page=%d bbox=%s: %s",
+                packet.packet_id,
+                packet.page,
+                bbox,
+                exc,
+            )
+
+    if page_image is not None:
+        try:
+            return _crop_page_image(
+                page_image,
+                bbox,
+                cache_dir=crop_cache_dir,
+                expansion=0.0,
+            )
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            logger.debug(
+                "context-window page-image crop failed for packet=%s page=%d bbox=%s: %s",
+                packet.packet_id,
+                packet.page,
+                bbox,
+                exc,
+            )
+    return None
+
+
+def _context_window_bbox(
+    packet: EvidencePacket,
+    *,
+    pad: float = _RETRY_CONTEXT_WINDOW_PAD,
+) -> tuple[float, float, float, float] | None:
+    bbox = _pad_bbox(packet.bbox_norm, pad=pad)
+    if _bbox_equal(bbox, packet.bbox_norm):
+        return None
+    return bbox
+
+
+def _synth_context_window_region(
+    packet: EvidencePacket,
+    bbox: tuple[float, float, float, float],
+) -> RegionCandidate:
+    return RegionCandidate(
+        region_id=f"{packet.packet_id}_context_window",
+        page=packet.page,
+        bbox_norm=bbox,
+        region_type=packet.region_type or "context_window",
+        score=float(packet.confidence),
+    )
+
+
+async def _extract_neighbor_text(
+    neighbor: RegionCandidate,
+    *,
+    role: str,
+    pdf_path: Path | None,
+    crop_ref: str | None,
+    text_layer_cache_dir: Path | None,
+    crop_cache_dir: Path | None,
+) -> str | None:
+    """Best-effort text snippet for an attached neighbor.
+
+    The reasoner sees linked neighbor images, but the verifier and packet
+    descriptor are text-first. Pull native text where possible; fall back to
+    OCR so captions/footnotes/legend labels do not disappear from those
+    compact summaries.
+    """
+    if pdf_path is not None:
+        try:
+            text_out = await get_text_layer(
+                GetTextLayerInput(
+                    doc_path=str(pdf_path),
+                    page=neighbor.page,
+                    bbox_norm=neighbor.bbox_norm,
+                ),
+                cache_dir=text_layer_cache_dir,
+            )
+            text = _clean_context_text(text_out.text)
+            if text:
+                return text
+        except (FileNotFoundError, ValueError) as exc:
+            logger.debug(
+                "neighbor text layer failed for role=%s page=%d bbox=%s: %s",
+                role,
+                neighbor.page,
+                neighbor.bbox_norm,
+                exc,
+            )
+
+        try:
+            ocr_out = await inspect_region(
+                InspectRegionInput(
+                    doc_path=str(pdf_path),
+                    page=neighbor.page,
+                    bbox_norm=neighbor.bbox_norm,
+                    mode="element",
+                    expansion="none",
+                ),
+                cache_dir=crop_cache_dir,
+            )
+            return _clean_context_text(ocr_out.ocr_text)
+        except (FileNotFoundError, ValueError) as exc:
+            logger.debug(
+                "neighbor OCR failed for role=%s page=%d bbox=%s: %s",
+                role,
+                neighbor.page,
+                neighbor.bbox_norm,
+                exc,
+            )
+            return None
+
+    if crop_ref:
+        text, _confidence = _ocr_existing_crop(Path(crop_ref))
+        return _clean_context_text(text)
+    return None
+
+
+def _context_text_updates(
+    packet: EvidencePacket, linked_texts: list[tuple[str, str]]
+) -> dict[str, str]:
+    """Append linked-neighbor snippets to whichever packet text field is visible."""
+    if not linked_texts:
+        return {}
+
+    seen_text_keys = _existing_context_text_keys(packet)
+    context_lines: list[str] = []
+    for role, text in linked_texts:
+        cleaned = text.strip()
+        if not cleaned:
+            continue
+        key = _context_text_key(cleaned)
+        if key in seen_text_keys:
+            continue
+        seen_text_keys.add(key)
+        context_lines.append(f"Context [{role}]: {cleaned}")
+    if not context_lines:
+        return {}
+    context = "\n".join(context_lines)
+    if packet.text_layer_snippet:
+        return {"text_layer_snippet": f"{packet.text_layer_snippet.rstrip()}\n{context}"}
+    if packet.ocr_snippet:
+        return {"ocr_snippet": f"{packet.ocr_snippet.rstrip()}\n{context}"}
+    return {"text_layer_snippet": context}
+
+
+def _existing_context_text_keys(packet: EvidencePacket) -> set[str]:
+    """Return normalized context snippets already attached to a packet."""
+    keys: set[str] = set()
+    for snippet in (packet.text_layer_snippet, packet.ocr_snippet):
+        for line in (snippet or "").splitlines():
+            match = _CONTEXT_LINE_RE.match(line.strip())
+            if match:
+                keys.add(_context_text_key(match.group("text")))
+    return keys
+
+
+def _context_text_key(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def _clean_context_text(text: str | None) -> str | None:
+    cleaned = " ".join((text or "").split())
+    if not cleaned:
+        return None
+    if len(cleaned) <= _MAX_LINKED_CONTEXT_TEXT_CHARS:
+        return cleaned
+    return cleaned[: _MAX_LINKED_CONTEXT_TEXT_CHARS - 3].rstrip() + "..."
+
+
+def _figure_refs_from_text(*texts: str | None) -> set[str]:
+    """Return figure numbers mentioned in packet or neighbor text."""
+    refs: set[str] = set()
+    for text in texts:
+        for match in _FIGURE_REF_RE.finditer(text or ""):
+            refs.add(match.group("num").lower())
+    return refs
+
+
+def _neighbor_text_mismatches_packet_figure(
+    packet_figure_refs: set[str],
+    *,
+    role: str,
+    linked_text: str,
+) -> bool:
+    """Drop obviously wrong figure captions from chart/image packets.
+
+    Dense chart pages often have several adjacent captions. If a primary
+    packet OCR says "Figure 31" and a candidate caption says only "Figure 33",
+    attaching that caption gives the reasoner conflicting context. We only
+    filter caption-like neighbors and only when both sides contain figure refs.
+    """
+    role_key = (role or "").lower()
+    if "caption" not in role_key or not packet_figure_refs:
+        return False
+    neighbor_refs = _figure_refs_from_text(linked_text)
+    return bool(neighbor_refs) and packet_figure_refs.isdisjoint(neighbor_refs)
 
 
 # ---------------------------------------------------------------------------
@@ -461,14 +1420,19 @@ async def _crop_neighbor(
 # ---------------------------------------------------------------------------
 
 
-def _updated_provenance(prev: PacketProvenance, n_neighbors: int) -> PacketProvenance:
+def _updated_provenance(
+    prev: PacketProvenance,
+    n_neighbors: int,
+    *,
+    tag: str | None = None,
+) -> PacketProvenance:
     """Stamp that expand_context contributed N neighbors to this packet.
 
     We keep the original `tool` + `mode` (the inspector owns those) and
     encode the expansion as a suffix in `args_hash` so trace readers can
     tell whether a packet was expanded without a dedicated field.
     """
-    expand_tag = f"expand_context:n{n_neighbors}"
+    expand_tag = tag or f"expand_context:n{n_neighbors}"
     merged = (prev.args_hash + "|" + expand_tag) if prev.args_hash else expand_tag
     return PacketProvenance(
         tool=prev.tool,

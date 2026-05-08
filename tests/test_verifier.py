@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from focusparse.evidence.packet import EvidencePacket, PacketProvenance
+from focusparse.evidence.packet import CropRef, EvidencePacket, PacketProvenance
 from focusparse.models.base import ModelResponse
 from focusparse.pipeline.events import (
     AnswerEvent,
@@ -205,6 +205,121 @@ async def test_verify_prompt_includes_packet_summary_and_citations():
     # reasoner's answer + cited packet_ids are visible.
     assert "3.6 V" in prompt
     assert "pA" in prompt
+    assert "cited_by_answer=yes" in prompt
+    assert "cited_by_answer=no" in prompt
+    system = client.calls[0]["system"]
+    assert "same cited row" in system
+    assert "AEC-Q100" in system
+    assert "lowest/highest/min/max" in system
+
+
+async def test_verify_prompt_keeps_enough_table_text_for_math_verdict():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "math error", '
+        '"next_action": "escalate_reasoner", "confidence": 0.8}'
+    )
+    long_table = (
+        "Cash and equivalents $ 12,976 Goodwill 51,001 Intangible assets 21,969 "
+        "Other assets 2,503 Long-term debt (2,799) Long-term income taxes (1,946) "
+        "Deferred income taxes (4,676) Other liabilities (3,620) Total purchase "
+        "price $ 75,408 segment row More Personal Computing acquisitions 51,235"
+    )
+    await verify_answer(
+        _question(domain="finance"),
+        _evidence(_packet("pA", snippet=long_table)),
+        _answer(answer="84%", citations=["pA"]),
+        backend_client=client,
+    )
+
+    prompt = client.calls[0]["prompt"]
+    assert "Total purchase price $ 75,408" in prompt
+    assert "More Personal Computing acquisitions 51,235" in prompt
+    assert "Prefer `escalate_reasoner`" in client.calls[0]["system"]
+
+
+async def test_verify_prompt_focuses_long_packet_text_on_question_terms():
+    client = _FakeVerifierClient(
+        '{"supported": true, "reason": "ok", "next_action": "accept", "confidence": 0.9}'
+    )
+    long_table = "\n".join(
+        [
+            "BCR[22:20] Meaning",
+            "b000 IMVA match when BRP is not linked",
+            "b001 joint IMVA and context ID match",
+            "b010 context ID match",
+            "b011 joint IMVA or DMVA and context ID match",
+            "b100 IMVA mismatch when BRP is not linked",
+            "b101 joint IMVA mismatch and context ID match",
+        ]
+        + ["filler row"] * 80
+    )
+    question = _question()
+    question.question = "Which BCR[22:20] value means IMVA mismatch when the BRP is not linked?"
+    await verify_answer(
+        question,
+        _evidence(_packet("pA", snippet=long_table)),
+        _answer(answer="b100", citations=["pA"]),
+        backend_client=client,
+    )
+
+    prompt = client.calls[0]["prompt"]
+    assert "b100 IMVA mismatch when BRP is not linked" in prompt
+    assert "b101 joint IMVA mismatch" in prompt
+
+
+async def test_verify_prompt_anchors_cited_packet_on_proposed_answer_row():
+    client = _FakeVerifierClient(
+        '{"supported": true, "reason": "ok", "next_action": "accept", "confidence": 0.9}'
+    )
+    long_table = "\n".join(
+        [
+            "BCR[22:20] Meaning",
+            "b000 The corresponding BVR is compared against the IMVA bus.",
+            "b001 They generate a breakpoint debug event on a joint IMVA and context ID match.",
+            "b010 It generates a breakpoint debug event on a context ID match.",
+            "b011 They generate a joint IMVA or DMVA and context ID match.",
+            "b100 The corresponding BVR is compared against the IMVA bus.",
+            "It generates a breakpoint debug event on an IMVA mismatch.",
+            "b101 They generate a breakpoint debug event on a joint IMVA mismatch and context ID match.",
+        ]
+        + ["filler row"] * 120
+    )
+    question = _question()
+    question.question = (
+        "Which BCR[22:20] value corresponds to an IMVA mismatch when the BRP is not "
+        "linked with context ID linked codes?"
+    )
+    await verify_answer(
+        question,
+        _evidence(_packet("pA", snippet=long_table)),
+        _answer(answer="b100", citations=["pA"]),
+        backend_client=client,
+    )
+
+    prompt = client.calls[0]["prompt"]
+    assert "b100 The corresponding BVR is compared against the IMVA bus." in prompt
+    assert "It generates a breakpoint debug event on an IMVA mismatch." in prompt
+    assert prompt.index("b100 The corresponding BVR") < prompt.index("b010 It generates")
+
+
+async def test_verify_prompt_summarizes_multi_scale_chart_context():
+    client = _FakeVerifierClient(
+        '{"supported": true, "reason": "ok", "next_action": "accept", "confidence": 0.9}'
+    )
+    packet = _packet("pA")
+    packet.multi_scale_crops = [
+        CropRef(ref="/tight.png", bbox_norm=(0.1, 0.2, 0.4, 0.3), scale="tight"),
+        CropRef(ref="/chart.png", bbox_norm=(0.0, 0.1, 0.6, 0.5), scale="chart_context"),
+    ]
+    await verify_answer(
+        _question(domain="datasheet"),
+        _evidence(packet),
+        _answer(citations=["pA"]),
+        backend_client=client,
+    )
+    prompt = client.calls[0]["prompt"]
+    assert "scales=[tight:[0.100, 0.200, 0.400, 0.300]" in prompt
+    assert "chart_context:[0.000, 0.100, 0.600, 0.500]" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +359,96 @@ async def test_verify_llm_rejects_invalid_next_action():
     assert verdict.confidence == 0.9
     assert verdict.next_action == "accept"
     assert verdict.reason == "ok"
+
+
+@pytest.mark.parametrize(
+    ("raw_action", "expected"),
+    [
+        ("Expand_Context", "expand_context"),
+        ("expand context.", "expand_context"),
+        ("retry-localization", "retry_localization"),
+        ("`escalate_reasoner`", "escalate_reasoner"),
+    ],
+)
+async def test_verify_llm_normalizes_common_next_action_variants(raw_action, expected):
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "needs repair", '
+        f'"next_action": "{raw_action}", "confidence": 0.7}}'
+    )
+    verdict, _ = await verify_answer(
+        _question(),
+        _evidence(_packet()),
+        _answer(confidence=0.42),
+        backend_client=client,
+    )
+    assert verdict.supported is False
+    assert verdict.next_action == expected
+
+
+async def test_verify_llm_populates_missing_context_diagnostics():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "missing legend", '
+        '"next_action": "expand_context", "confidence": 0.7, '
+        '"diagnostics": {"missing_context": ["footnote", "bogus", "column header"], '
+        '"target_packet_ids": ["pkt_000"]}}'
+    )
+    verdict, _ = await verify_answer(
+        _question(),
+        _evidence(_packet()),
+        _answer(confidence=0.42),
+        backend_client=client,
+    )
+    assert verdict.diagnostics == {
+        "missing_context": ["footnote", "column_header", "legend"],
+        "target_packet_ids": ["pkt_000"],
+    }
+
+
+async def test_verify_llm_supported_true_forces_accept_action():
+    client = _FakeVerifierClient(
+        '{"supported": true, "reason": "evidence supports the answer", '
+        '"next_action": "escalate_reasoner", "confidence": 0.7}'
+    )
+    verdict, _ = await verify_answer(
+        _question(),
+        _evidence(_packet()),
+        _answer(confidence=0.42),
+        backend_client=client,
+    )
+    assert verdict.supported is True
+    assert verdict.next_action == "accept"
+    assert verdict.diagnostics["normalized_next_action"] == "escalate_reasoner"
+
+
+async def test_verify_llm_supported_false_accept_redirects_to_repair():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "missing footnote", '
+        '"next_action": "accept", "confidence": 0.7}'
+    )
+    verdict, _ = await verify_answer(
+        _question(),
+        _evidence(_packet()),
+        _answer(confidence=0.42),
+        backend_client=client,
+    )
+    assert verdict.supported is False
+    assert verdict.next_action == "expand_context"
+    assert verdict.diagnostics["missing_context"] == ["footnote"]
+    assert verdict.diagnostics["normalized_next_action"] == "accept"
+
+
+async def test_verify_llm_infers_missing_context_from_reason():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "missing legend and footnote; continued table '
+        'on next page", "next_action": "expand_context", "confidence": 0.7}'
+    )
+    verdict, _ = await verify_answer(
+        _question(),
+        _evidence(_packet()),
+        _answer(confidence=0.42),
+        backend_client=client,
+    )
+    assert verdict.diagnostics["missing_context"] == ["footnote", "legend", "continuation"]
 
 
 async def test_verify_llm_rejects_non_bool_supported():

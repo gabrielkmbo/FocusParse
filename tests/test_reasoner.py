@@ -16,7 +16,13 @@ from focusparse.evidence.packet import (
     PacketProvenance,
 )
 from focusparse.pipeline.events import EvidenceEvent
-from focusparse.pipeline.reasoner import _collect_packet_images, _render_packet_line
+from focusparse.pipeline.reasoner import (
+    _MAX_PACKET_TEXT_CHARS,
+    _collect_packet_images,
+    _format_hint,
+    _parse_reasoner_response,
+    _render_packet_line,
+)
 
 
 def _packet(
@@ -27,6 +33,10 @@ def _packet(
     local_crop_ref: str = "/cache/crops/abc.png",
     page_thumbnail_ref: str = "/cache/pages/p3.png",
     multi_scale: list[CropRef] | None = None,
+    linked_crop_refs: list[str] | None = None,
+    linked_neighbor_types: list[str] | None = None,
+    text_layer_snippet: str | None = None,
+    ocr_snippet: str | None = None,
 ) -> EvidencePacket:
     return EvidencePacket(
         packet_id=packet_id,
@@ -35,6 +45,10 @@ def _packet(
         page_thumbnail_ref=page_thumbnail_ref,
         local_crop_ref=local_crop_ref,
         multi_scale_crops=multi_scale or [],
+        linked_crop_refs=linked_crop_refs or [],
+        linked_neighbor_types=linked_neighbor_types or [],
+        text_layer_snippet=text_layer_snippet,
+        ocr_snippet=ocr_snippet,
         provenance=PacketProvenance(tool="t", args_hash=""),
     )
 
@@ -129,6 +143,134 @@ def test_collect_packet_images_mixed_legacy_and_multi_scale() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Path A (2026-05-06): linked_crop_refs reach the reasoner as images.
+# Pre-Path-A this was dead code; the 2026-05-06 memory entry has the diagnosis.
+# ---------------------------------------------------------------------------
+
+
+def test_collect_packet_images_includes_linked_crop_refs() -> None:
+    """A packet with 2 linked neighbor crops surfaces them after the primary."""
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                local_crop_ref="/cache/primary.png",
+                linked_crop_refs=["/cache/caption.png", "/cache/footnote.png"],
+                linked_neighbor_types=["caption", "footnote"],
+            )
+        ]
+    )
+    images = _collect_packet_images(ev)
+    # Order is primary → linked, so the reasoner reads "this is the focus,
+    # then the context."
+    assert images == [
+        Path("/cache/primary.png"),
+        Path("/cache/caption.png"),
+        Path("/cache/footnote.png"),
+    ]
+
+
+def test_collect_packet_images_dedupes_neighbors_across_packets() -> None:
+    """A neighbor ref shared between two packets appears once in the image list."""
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                packet_id="pkt_000",
+                local_crop_ref="/cache/a.png",
+                linked_crop_refs=["/cache/shared_caption.png"],
+                linked_neighbor_types=["caption"],
+            ),
+            _packet(
+                packet_id="pkt_001",
+                local_crop_ref="/cache/b.png",
+                linked_crop_refs=["/cache/shared_caption.png", "/cache/footnote.png"],
+                linked_neighbor_types=["caption", "footnote"],
+            ),
+        ]
+    )
+    images = _collect_packet_images(ev)
+    assert images == [
+        Path("/cache/a.png"),
+        Path("/cache/shared_caption.png"),
+        Path("/cache/b.png"),
+        Path("/cache/footnote.png"),
+    ]
+
+
+def test_collect_packet_images_skips_empty_neighbor_refs() -> None:
+    """Empty-string entries in linked_crop_refs are filtered out."""
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                local_crop_ref="/cache/primary.png",
+                linked_crop_refs=["", "/cache/real.png", ""],
+                linked_neighbor_types=["caption", "footnote", "title"],
+            )
+        ]
+    )
+    images = _collect_packet_images(ev)
+    assert images == [Path("/cache/primary.png"), Path("/cache/real.png")]
+
+
+def test_collect_packet_images_neighbors_follow_multi_scale() -> None:
+    """When BOTH multi_scale_crops AND linked_crop_refs are populated, the
+    image order is: tight → context → linked. (Multi-scale primaries first,
+    then expand_context's neighbors.)"""
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                multi_scale=[
+                    CropRef(ref="/cache/tight.png", bbox_norm=(0.1, 0.2, 0.5, 0.6), scale="tight"),
+                    CropRef(ref="/cache/ctx.png", bbox_norm=(0.0, 0.0, 0.8, 0.9), scale="context"),
+                ],
+                linked_crop_refs=["/cache/caption.png"],
+                linked_neighbor_types=["caption"],
+            )
+        ]
+    )
+    images = _collect_packet_images(ev)
+    assert images == [
+        Path("/cache/tight.png"),
+        Path("/cache/ctx.png"),
+        Path("/cache/caption.png"),
+    ]
+
+
+def test_collect_packet_images_skips_text_only_header_neighbors() -> None:
+    """Header-like neighbors with extracted text stay in prompt text, not images."""
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                local_crop_ref="/cache/primary.png",
+                linked_crop_refs=["/cache/header.png", "/cache/caption.png"],
+                linked_neighbor_types=["section-header", "caption"],
+                text_layer_snippet=(
+                    "Context [section-header]: Electrical Characteristics\n"
+                    "Context [caption]: Figure 4. Load transient response"
+                ),
+            )
+        ]
+    )
+    images = _collect_packet_images(ev)
+    assert images == [Path("/cache/primary.png"), Path("/cache/caption.png")]
+
+
+def test_collect_packet_images_keeps_header_neighbor_without_extracted_text() -> None:
+    """Do not hide a header crop unless expand actually recovered its text."""
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                local_crop_ref="/cache/primary.png",
+                linked_crop_refs=["/cache/header.png"],
+                linked_neighbor_types=["section-header"],
+                text_layer_snippet="Main packet text only",
+            )
+        ]
+    )
+    images = _collect_packet_images(ev)
+    assert images == [Path("/cache/primary.png"), Path("/cache/header.png")]
+
+
+# ---------------------------------------------------------------------------
 # _render_packet_line
 # ---------------------------------------------------------------------------
 
@@ -150,8 +292,37 @@ def test_render_packet_line_multi_scale_packet() -> None:
         ]
     )
     line = _render_packet_line(p)
-    assert "2 image scales" in line
-    assert "tight + context" in line
+    assert "2 image scales in order" in line
+    assert "tight [0.000, 0.000, 1.000, 1.000]" in line
+    assert "context [0.000, 0.000, 1.000, 1.000]" in line
+
+
+def test_render_packet_line_names_zoomed_scale() -> None:
+    p = _packet(
+        multi_scale=[
+            CropRef(ref="/a.png", bbox_norm=(0.1, 0.2, 0.5, 0.6), scale="tight"),
+            CropRef(ref="/b.png", bbox_norm=(0.1, 0.2, 0.5, 0.6), scale="zoomed"),
+        ]
+    )
+    line = _render_packet_line(p)
+    assert "zoomed [0.100, 0.200, 0.500, 0.600]" in line
+
+
+def test_render_packet_line_names_chart_context_scale() -> None:
+    """chart_context is a distinct wider crop, not a generic neighbor."""
+    p = _packet(
+        multi_scale=[
+            CropRef(ref="/a.png", bbox_norm=(0.1, 0.2, 0.4, 0.5), scale="tight"),
+            CropRef(
+                ref="/b.png",
+                bbox_norm=(0.0, 0.1, 0.6, 0.7),
+                scale="chart_context",
+            ),
+        ]
+    )
+    line = _render_packet_line(p)
+    assert "chart_context [0.000, 0.100, 0.600, 0.700]" in line
+    assert "wider crop for axes, legends, and curve geometry" in line
 
 
 def test_render_packet_line_single_scale_does_not_annotate() -> None:
@@ -163,6 +334,58 @@ def test_render_packet_line_single_scale_does_not_annotate() -> None:
     )
     line = _render_packet_line(p)
     assert "image scales" not in line
+
+
+def test_render_packet_line_includes_native_text_snippet() -> None:
+    p = _packet(text_layer_snippet="VCC max 3.6 V\nConditions: TA = 25 C")
+    line = _render_packet_line(p)
+    assert "Extracted text" in line
+    assert "VCC max 3.6 V Conditions: TA = 25 C" in line
+
+
+def test_render_packet_line_falls_back_to_ocr_snippet() -> None:
+    p = _packet(ocr_snippet="axis label: Gross margin")
+    line = _render_packet_line(p)
+    assert "axis label: Gross margin" in line
+
+
+def test_render_packet_line_prefers_native_text_over_ocr() -> None:
+    p = _packet(text_layer_snippet="native text", ocr_snippet="ocr text")
+    line = _render_packet_line(p)
+    assert "native text" in line
+    assert "ocr text" not in line
+
+
+def test_render_packet_line_truncates_long_text_snippet() -> None:
+    p = _packet(text_layer_snippet="x" * (_MAX_PACKET_TEXT_CHARS + 20))
+    line = _render_packet_line(p)
+    assert ("x" * _MAX_PACKET_TEXT_CHARS) not in line
+    assert "..." in line
+
+
+def test_render_packet_line_focuses_long_table_text_on_question_terms() -> None:
+    table_text = "\n".join(
+        [
+            "Part Number",
+            "RT9187C 2.5 5.5 600 300 Enable Input Ultra-Low Noise SOT-23-5",
+            "RT2519 2.2 6 1000 190 High PSRR Industrial Grade VDFN3x3-8A",
+            "RTQ2510-QA 2.2 6 1000 190",
+            "Enable Input Ultra-Low Noise High PSRR AEC-Q100",
+            "VDFN3x3-8",
+        ]
+    )
+    p = _packet(text_layer_snippet=table_text + "\n" + ("filler row\n" * 80))
+    line = _render_packet_line(
+        p,
+        question_text=(
+            "Which AEC-Q100 part with Enable Input, Ultra-Low Noise, "
+            "and High PSRR has the lowest Iq, and what package is it?"
+        ),
+    )
+    assert "RTQ2510-QA" in line
+    assert "AEC-Q100" in line
+    assert "VDFN3x3-8" in line
+    assert "RT9187C" not in line
 
 
 # ---------------------------------------------------------------------------
@@ -200,3 +423,120 @@ def test_render_packet_line_chart_without_confidence_renders_advisory() -> None:
     assert "Chart extraction" in line
     assert "advisory" in line
     assert "confidence=" not in line
+
+
+def test_numeric_format_hint_preserves_requested_units() -> None:
+    hint = _format_hint("numeric")
+    assert "single number" in hint
+    assert "requested unit" in hint
+    assert "% sign" in hint
+
+
+def test_exact_match_format_hint_overrides_explain_wording() -> None:
+    hint = _format_hint("exact_match")
+    assert "only the final exact answer" in hint
+    assert "Even if the question asks for an explanation" in hint
+    assert "omit spaces around '='" in hint
+
+
+def test_parse_reasoner_response_canonicalizes_bit_assignments() -> None:
+    answer, citations, confidence = _parse_reasoner_response(
+        (
+            '{"answer":"[15:14] = b00; [8:5] = b1111; [4:3] = b11",'
+            '"citations":["pkt_000"],"confidence":0.98}'
+        ),
+        valid_packet_ids={"pkt_000"},
+    )
+
+    assert answer == "[15:14]=b00, [8:5]=b1111, [4:3]=b11"
+    assert citations == ["pkt_000"]
+    assert confidence == 0.98
+
+
+def test_parse_reasoner_response_keeps_verbose_bit_prose_unchanged() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"[15:14] = b00 because the table says secure or non-secure; '
+            '[8:5] = b1111","citations":[],"confidence":0.5}'
+        ),
+        valid_packet_ids=set(),
+    )
+
+    assert "because" in answer
+
+
+# ---------------------------------------------------------------------------
+# Path A: linked_neighbor_types appear in the descriptor
+# ---------------------------------------------------------------------------
+
+
+def test_render_packet_line_lists_neighbor_types() -> None:
+    """The reasoner sees which images that follow are context, by role."""
+    p = _packet(
+        linked_crop_refs=["/cache/cap.png", "/cache/foot.png"],
+        linked_neighbor_types=["caption", "footnote"],
+    )
+    line = _render_packet_line(p)
+    assert "Attached neighbor images (2)" in line
+    assert "caption, footnote" in line
+
+
+def test_render_packet_line_omits_neighbors_when_empty() -> None:
+    p = _packet()  # no linked_neighbor_types
+    line = _render_packet_line(p)
+    assert "Attached neighbor" not in line
+
+
+def test_render_packet_line_neighbor_count_matches_types() -> None:
+    """Three image neighbors -> "Attached neighbor images (3)"."""
+    p = _packet(
+        linked_crop_refs=["/a", "/b", "/c"],
+        linked_neighbor_types=["caption", "footnote", "section_header"],
+    )
+    line = _render_packet_line(p)
+    assert "Attached neighbor images (3)" in line
+    assert "section_header" in line
+
+
+def test_render_packet_line_explains_context_window() -> None:
+    """Verifier retry context windows are described as wider same-packet crops."""
+    p = _packet(
+        linked_crop_refs=["/cache/context.png"],
+        linked_neighbor_types=["context_window"],
+    )
+    line = _render_packet_line(p)
+    assert "Attached neighbor images (1): context_window" in line
+    assert "wider crop around the same packet" in line
+    assert "row/column headers" in line
+
+
+def test_render_packet_line_lists_text_only_neighbor_context() -> None:
+    p = _packet(
+        linked_crop_refs=["/cache/section.png", "/cache/caption.png"],
+        linked_neighbor_types=["section_header", "caption"],
+        text_layer_snippet=(
+            "Context [section_header]: Absolute Maximum Ratings\n"
+            "Context [caption]: Figure 7. Output ripple"
+        ),
+    )
+    line = _render_packet_line(p)
+    assert "Attached neighbor images (1): caption" in line
+    assert "Attached text-only context (1): section_header='Absolute Maximum Ratings'" in line
+
+
+# ---------------------------------------------------------------------------
+# Path A: system prompt explains the primary-vs-context layout
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_explains_neighbor_layout() -> None:
+    """The reasoner's system prompt tells the LLM that neighbor images
+    means the images that follow are CONTEXT — not the primary focus."""
+    from focusparse.pipeline.reasoner import _SYSTEM_PROMPT
+
+    assert "Attached neighbor images" in _SYSTEM_PROMPT
+    assert "Attached text-only context" in _SYSTEM_PROMPT
+    assert "primary crop" in _SYSTEM_PROMPT
+    assert "context_window" in _SYSTEM_PROMPT
+    assert "zoomed" in _SYSTEM_PROMPT
+    assert "context" in _SYSTEM_PROMPT.lower()

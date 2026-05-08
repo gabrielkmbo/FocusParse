@@ -10,6 +10,7 @@ OSS-VLM endpoints exposing an OpenAI-compatible API (useful post-FocusTrain).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import time
@@ -17,7 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from focusparse.eval.pricing import compute_usd
+from focusparse.models._timeouts import model_timeout_s
 from focusparse.models.base import ModelResponse
+from focusparse.models.images import read_model_image_bytes
 
 
 class OpenAIClient:
@@ -45,14 +48,15 @@ class OpenAIClient:
             raise RuntimeError("OPENAI_API_KEY not set; cannot call OpenAI.")
         from openai import AsyncOpenAI
 
-        client_kwargs: dict[str, Any] = {"api_key": self.api_key}
+        timeout_s = model_timeout_s()
+        client_kwargs: dict[str, Any] = {"api_key": self.api_key, "timeout": timeout_s}
         if self.base_url:
             client_kwargs["base_url"] = self.base_url
         client = AsyncOpenAI(**client_kwargs)
 
         user_content: list[dict[str, Any]] = []
         for img_path in images or []:
-            data = Path(img_path).read_bytes()
+            data = read_model_image_bytes(Path(img_path))
             b64 = base64.b64encode(data).decode("ascii")
             user_content.append(
                 {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"}
@@ -67,11 +71,12 @@ class OpenAIClient:
         input_messages.append({"role": "user", "content": user_content})
 
         t0 = time.perf_counter()
-        resp = await client.responses.create(
-            model=self.model,
-            input=input_messages,
-            max_output_tokens=max_tokens or self.max_completion_tokens,
-        )
+        async with asyncio.timeout(timeout_s):
+            resp = await client.responses.create(
+                model=self.model,
+                input=input_messages,
+                max_output_tokens=max_tokens or self.max_completion_tokens,
+            )
         latency_ms = int((time.perf_counter() - t0) * 1000)
 
         text = getattr(resp, "output_text", None) or ""

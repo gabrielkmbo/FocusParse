@@ -24,14 +24,20 @@ import pytest
 
 from focusparse.evidence.packet import EvidencePacket, PacketProvenance
 from focusparse.models.base import ModelResponse
+from focusparse.pipeline.events import AnswerEvent, EvidenceEvent, QuestionEvent, VerdictEvent
 from focusparse.pipeline.workflow import (
     FocusWorkflow,
     SimpleBaselineAgent,
     WorkflowResult,
     _citations_from_packets,
+    _focused_retry_evidence,
     _images_by_page,
     _infer_doc_id,
+    _is_better_unsupported_answer,
     _page_number_from_filename,
+    _should_allow_reasoner_shape_retry,
+    _verifier_requests_visual_readability_retry,
+    _verifier_target_packet_ids,
 )
 
 # ---------------------------------------------------------------------------
@@ -120,6 +126,262 @@ def test_citations_from_packets_silently_drops_unknown_refs():
 
 def test_citations_from_packets_empty_list_yields_empty():
     assert _citations_from_packets([], []) == []
+
+
+def test_verifier_target_packet_ids_normalizes_diagnostics_and_prose():
+    from focusparse.pipeline.events import VerdictEvent
+
+    verdict = VerdictEvent(
+        supported=False,
+        reason="Packet 003 still needs the legend; pkt-004 has the table header.",
+        next_action="expand_context",
+        confidence=0.6,
+        diagnostics={"target_packet_ids": ["003", "Packet pkt_002", "pkt_999"]},
+    )
+
+    assert _verifier_target_packet_ids(
+        verdict,
+        valid_packet_ids={"pkt_002", "pkt_003", "pkt_004"},
+    ) == ["pkt_003", "pkt_002", "pkt_004"]
+
+
+def test_verifier_visual_readability_retry_requires_precise_signal():
+    from focusparse.pipeline.events import VerdictEvent
+
+    verdict = VerdictEvent(
+        supported=False,
+        reason="pkt_000 crop is blurry and the axis label is unreadable",
+        next_action="expand_context",
+        confidence=0.6,
+    )
+    assert _verifier_requests_visual_readability_retry(verdict, target_packet_ids=["pkt_000"])
+
+    fragmented_chart = verdict.model_copy(
+        update={
+            "reason": (
+                "The OCR text from pkt_001 is too fragmented and unclear to reliably "
+                "read the chart structure."
+            )
+        }
+    )
+    assert _verifier_requests_visual_readability_retry(
+        fragmented_chart,
+        target_packet_ids=["pkt_001"],
+    )
+
+    diagram = verdict.model_copy(update={"reason": "pkt_000 diagram text is garbled/unreadable"})
+    assert _verifier_requests_visual_readability_retry(diagram, target_packet_ids=["pkt_000"])
+
+    missing_neighbor = verdict.model_copy(
+        update={
+            "reason": "pkt_000 needs the legend",
+            "diagnostics": {"missing_context": ["legend"]},
+        }
+    )
+    assert not _verifier_requests_visual_readability_retry(
+        missing_neighbor,
+        target_packet_ids=["pkt_000"],
+    )
+
+    vague = verdict.model_copy(update={"reason": "pkt_000 needs the legend"})
+    assert not _verifier_requests_visual_readability_retry(vague, target_packet_ids=["pkt_000"])
+
+
+def test_focused_retry_keeps_same_page_cited_explanatory_context():
+    target = EvidencePacket(
+        packet_id="pkt_000",
+        page=2,
+        bbox_norm=(0.10, 0.20, 0.40, 0.50),
+        region_type="figure",
+        page_thumbnail_ref="/tmp/page.png",
+        local_crop_ref="/tmp/figure.png",
+        provenance=PacketProvenance(tool="test", args_hash="target"),
+    )
+    explanatory = EvidencePacket(
+        packet_id="pkt_002",
+        page=2,
+        bbox_norm=(0.10, 0.55, 0.70, 0.65),
+        region_type="text",
+        text_layer_snippet="Use IOUT at the OUT terminal, not VRECT.",
+        page_thumbnail_ref="/tmp/page.png",
+        local_crop_ref="/tmp/text.png",
+        provenance=PacketProvenance(tool="test", args_hash="text"),
+    )
+    other_page = EvidencePacket(
+        packet_id="pkt_003",
+        page=3,
+        bbox_norm=(0.10, 0.20, 0.40, 0.50),
+        region_type="text",
+        text_layer_snippet="Wrong page",
+        page_thumbnail_ref="/tmp/page3.png",
+        local_crop_ref="/tmp/text3.png",
+        provenance=PacketProvenance(tool="test", args_hash="other"),
+    )
+
+    out = _focused_retry_evidence(
+        EvidenceEvent(packets=[target, explanatory, other_page]),
+        ["pkt_000"],
+        cited_packet_ids=["pkt_000", "pkt_002", "pkt_003"],
+    )
+
+    assert [packet.packet_id for packet in out.packets] == ["pkt_000", "pkt_002"]
+
+
+def test_focused_retry_keeps_visual_subpanels_for_overview_retry():
+    overview = EvidencePacket(
+        packet_id="pkt_000",
+        page=19,
+        bbox_norm=(0.05, 0.10, 0.95, 0.90),
+        region_type="Picture",
+        page_thumbnail_ref="/tmp/page.png",
+        local_crop_ref="/tmp/overview.png",
+        provenance=PacketProvenance(tool="test", args_hash="overview"),
+    )
+    subpanel = EvidencePacket(
+        packet_id="pkt_007",
+        page=19,
+        bbox_norm=(0.50, 0.15, 0.90, 0.35),
+        region_type="Picture",
+        ocr_snippet="PGOOD CH1 Time (5us/Div)",
+        page_thumbnail_ref="/tmp/page.png",
+        local_crop_ref="/tmp/subpanel.png",
+        provenance=PacketProvenance(tool="test", args_hash="subpanel"),
+    )
+    far_visual = EvidencePacket(
+        packet_id="pkt_003",
+        page=20,
+        bbox_norm=(0.50, 0.15, 0.90, 0.35),
+        region_type="Picture",
+        page_thumbnail_ref="/tmp/page20.png",
+        local_crop_ref="/tmp/far.png",
+        provenance=PacketProvenance(tool="test", args_hash="far"),
+    )
+    text_packet = EvidencePacket(
+        packet_id="pkt_004",
+        page=19,
+        bbox_norm=(0.50, 0.15, 0.90, 0.35),
+        region_type="Text",
+        text_layer_snippet="not a visual subpanel",
+        page_thumbnail_ref="/tmp/page.png",
+        local_crop_ref="/tmp/text.png",
+        provenance=PacketProvenance(tool="test", args_hash="text"),
+    )
+
+    out = _focused_retry_evidence(
+        EvidenceEvent(packets=[overview, subpanel, far_visual, text_packet]),
+        ["pkt_000"],
+        cited_packet_ids=["pkt_000"],
+        verifier_reason=(
+            "Packet pkt_000 is a layout overview containing multiple waveforms, "
+            "not a clear oscilloscope trace with visible gridlines."
+        ),
+    )
+
+    assert [packet.packet_id for packet in out.packets] == ["pkt_000", "pkt_007"]
+
+
+def test_retry_answer_selector_allows_question_specific_fix_within_margin():
+    incumbent = AnswerEvent(answer="G = 24", citations=["pkt_000"], confidence=0.87)
+    candidate = AnswerEvent(answer="Gain = 24", citations=["pkt_000"], confidence=0.81)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="Which gain setting has the highest response?",
+    )
+
+
+def test_retry_answer_selector_keeps_higher_confidence_when_overlap_ties():
+    incumbent = AnswerEvent(answer="4 µs", citations=["pkt_000"], confidence=0.74)
+    candidate = AnswerEvent(answer="8 µs", citations=["pkt_000"], confidence=0.64)
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="What is the C2V hold time?",
+    )
+
+
+def test_retry_answer_selector_prefers_single_entity_fix_within_margin():
+    incumbent = AnswerEvent(answer="UK and US", citations=["pkt_000"], confidence=0.89)
+    candidate = AnswerEvent(answer="Germany", citations=["pkt_003"], confidence=0.75)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Based on the charts and the footnote, which country's 10-year government "
+            "bond yield showed the least change?"
+        ),
+    )
+
+
+def test_retry_answer_selector_prefers_concise_variable_answer():
+    incumbent = AnswerEvent(
+        answer="P RX,AC = (V RECT x I OUT ) / Eff RECT + P res_loss + P offset",
+        citations=["pkt_003"],
+        confidence=0.96,
+    )
+    candidate = AnswerEvent(answer="I OUT", citations=["pkt_003"], confidence=0.80)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Which Y-axis variable, VRECT or IOUT, should be used to calculate output "
+            "power at OUT?"
+        ),
+    )
+
+
+def test_retry_answer_selector_prefers_variable_over_descriptive_fragment():
+    incumbent = AnswerEvent(
+        answer="IOUT is the output current from ADC",
+        citations=["pkt_003"],
+        confidence=0.85,
+    )
+    candidate = AnswerEvent(answer="IOUT", citations=["pkt_000", "pkt_003"], confidence=0.82)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Which Y-axis variable, VRECT or IOUT, should be used to calculate output "
+            "power at OUT?"
+        ),
+    )
+
+
+def test_variable_question_allows_reasoner_shape_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason=(
+            "The reasoner did not answer the actual question, which asks which "
+            "Y-axis variable should be used."
+        ),
+        next_action="escalate_reasoner",
+        confidence=0.75,
+    )
+    answer = AnswerEvent(
+        answer="P RX,AC = (V RECT x I OUT ) / Eff RECT + P res_loss + P offset",
+        citations=["pkt_003"],
+        confidence=0.95,
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="Which Y-axis variable, VRECT or IOUT, should be used?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -734,7 +996,11 @@ async def test_loop_expand_context_reruns_only_expand_answer_verify(
     reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
     verifier = _ScriptedClient(
         [
-            _verdict_json(supported=False, next_action="expand_context"),
+            _verdict_json(
+                supported=False,
+                next_action="expand_context",
+                reason="missing footnote context",
+            ),
             _verdict_json(supported=True, next_action="accept"),
         ]
     )
@@ -761,6 +1027,289 @@ async def test_loop_expand_context_reruns_only_expand_answer_verify(
     expand_steps = [s for s in result.trace.steps if s.stage == "expand_context"]
     pads = [s.args.get("adjacency_pad") for s in expand_steps]
     assert pads[0] < pads[1], f"adjacency_pad should grow on retry; got {pads}"
+    assert expand_steps[1].args["verifier_missing_context"] == ["footnote"]
+    assert expand_steps[1].args["verifier_reason"] == "missing footnote context"
+    assert expand_steps[1].args["target_packet_ids"] == ["pkt_000"]
+    assert "n_neighbors_added" in expand_steps[1].args
+    answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
+    assert answer_steps[0].args.get("had_escalation_hint") is False
+    assert answer_steps[1].args.get("had_escalation_hint") is True
+
+
+async def test_loop_expand_context_retries_once_by_default(
+    tmp_path, parser_bench_submodule_present
+):
+    """Evidence-only retries have one default budget even when localization
+    retries are disabled. This lets verifier feedback repair inspect/expand
+    evidence without re-opening the noisy localization retry path."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(supported=False, next_action="expand_context"),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["evidence_retries_used"] == 1
+    assert result.telemetry["loop_terminated"] == "accepted"
+    stage_counts = _stage_counts(result)
+    assert stage_counts["localize"] == 1
+    assert stage_counts["inspect"] == 1
+    assert stage_counts["expand_context"] == 2
+    assert stage_counts["answer"] == 2
+    assert stage_counts["verify"] == 2
+
+
+async def test_loop_expand_context_visual_readability_retry_zooms_target_crop(
+    tmp_path, monkeypatch, parser_bench_submodule_present
+):
+    """Unreadable visual evidence gets a zoom retry, not broader neighbors."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    async def _fake_zoom_crop(*, crop_ref, cache_dir, packet_id):
+        return str(tmp_path / f"{packet_id}_zoomed.png")
+
+    monkeypatch.setattr("focusparse.pipeline.expander._zoom_crop", _fake_zoom_crop)
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.4}',
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="expand_context",
+                reason="pkt_000 crop is blurry and the axis label is unreadable",
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    expand_steps = [s for s in result.trace.steps if s.stage == "expand_context"]
+    assert expand_steps[1].args["visual_readability_retry"] is True
+    assert expand_steps[1].args["n_zoomed_added"] == 1
+    assert expand_steps[1].args["n_neighbors_added"] == 0
+    assert reasoner.calls[1]["n_images"] > reasoner.calls[0]["n_images"]
+
+
+async def test_loop_expand_context_retry_answers_with_target_packets_only(
+    tmp_path, parser_bench_submodule_present
+):
+    """Verifier-targeted evidence retries do not resend every packet."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.4}',
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="expand_context",
+                reason="pkt_000 needs clearer supporting context",
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(),
+        [
+            tmp_path / "datasheet-A_page_0003_300dpi.png",
+            tmp_path / "datasheet-A_page_0007_300dpi.png",
+        ],
+        protocol="focus",
+    )
+
+    answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
+    assert answer_steps[0].args["n_packets"] == 2
+    assert answer_steps[0].args["evidence_scope"] == "full"
+    assert answer_steps[1].args["n_packets"] == 1
+    assert answer_steps[1].args["evidence_scope"] == "targeted"
+    assert "pkt_000" in reasoner.calls[1]["prompt"]
+    assert "pkt_001" not in reasoner.calls[1]["prompt"]
+
+
+async def test_loop_exhausted_keeps_best_unsupported_answer(
+    tmp_path, parser_bench_submodule_present
+):
+    """If an evidence retry remains unsupported, do not let it overwrite a
+    higher-confidence prior answer.
+
+    This pins the timing-diagram failure where the first answer was `4 µs`,
+    the verifier requested more context, and the retry drifted to `8 µs`.
+    """
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "4 µs", "citations": ["pkt_000"], "confidence": 0.74}',
+            '{"answer": "8 µs", "citations": ["pkt_000"], "confidence": 0.64}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(supported=False, next_action="expand_context"),
+            _verdict_json(supported=False, next_action="expand_context"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "4 µs"
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["loop_terminated"] == "exhausted"
+    selection_events = [
+        e for e in result.trace.debug_events if e.stage == "answer" and e.event_type == "selection"
+    ]
+    assert selection_events
+    assert selection_events[-1].payload["selected"] == "best_unsupported"
+
+
+async def test_retry_abstain_keeps_cited_unsupported_answer(
+    tmp_path, parser_bench_submodule_present
+):
+    """A late abstain after evidence repair should not erase a cited answer.
+
+    This pins the ADS1299 regression where the first answer was the scorer-
+    correct `10 mA`, the verifier requested more context, and the post-retry
+    verdict abstained even though the best answer still had citations.
+    """
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "10 mA", "citations": ["pkt_000"], "confidence": 0.91}',
+            '{"answer": "10 mA", "citations": ["pkt_000"], "confidence": 0.42}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(supported=False, next_action="expand_context"),
+            _verdict_json(supported=False, next_action="abstain"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "10 mA"
+    assert result.citations
+    assert result.telemetry["loop_terminated"] == "exhausted"
+    selection_events = [
+        e for e in result.trace.debug_events if e.stage == "answer" and e.event_type == "selection"
+    ]
+    assert selection_events[-1].payload["reason"] == "retry_abstain_after_evidence_repair"
+
+
+async def test_loop_expand_context_with_no_citations_targets_no_packets(
+    tmp_path, parser_bench_submodule_present
+):
+    """Verifier-directed expansion needs a packet anchor; empty citations
+    become a focused reasoner retry instead of expanding all packets."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "5.5", "citations": [], "confidence": 0.4}',
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="expand_context",
+                reason="missing caption context",
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    expand_steps = [s for s in result.trace.steps if s.stage == "expand_context"]
+    assert expand_steps[1].args["target_packet_ids"] == []
+    assert expand_steps[1].args["n_neighbors_added"] == 0
+    answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
+    assert answer_steps[1].args.get("had_escalation_hint") is True
+    assert "missing caption context" in reasoner.calls[1]["prompt"]
+    assert "Keep the answer field concise" in reasoner.calls[1]["prompt"]
+
+
+async def test_loop_evidence_retry_can_be_explicitly_disabled(
+    tmp_path, parser_bench_submodule_present
+):
+    """max_evidence_retries=0 preserves a strict pre-loop baseline for
+    evaluator A/Bs that need no controller actions at all."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    verifier = _FakeClient(_verdict_json(supported=False, next_action="expand_context"))
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        max_retries=0,
+        max_evidence_retries=0,
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.telemetry["retries_used"] == 0
+    assert result.telemetry["evidence_retries_used"] == 0
+    assert result.telemetry["loop_terminated"] == "exhausted"
+    stage_counts = _stage_counts(result)
+    assert stage_counts["expand_context"] == 1
+    assert stage_counts["answer"] == 1
+    assert stage_counts["verify"] == 1
 
 
 async def test_loop_escalate_reasoner_reruns_only_answer_verify(
@@ -809,6 +1358,92 @@ async def test_loop_escalate_reasoner_reruns_only_answer_verify(
     answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
     assert answer_steps[0].args.get("had_escalation_hint") is False
     assert answer_steps[1].args.get("had_escalation_hint") is True
+
+
+async def test_loop_escalate_reasoner_is_not_default_evidence_retry(
+    tmp_path, parser_bench_submodule_present
+):
+    """Default evidence retries are reserved for evidence-changing actions.
+
+    `escalate_reasoner` remains available when max_retries is explicitly
+    enabled, but the default +4 headline path should not spend another
+    frontier answer call without changing inspect/expand packets.
+    """
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.4}')
+    verifier = _FakeClient(
+        _verdict_json(
+            supported=False,
+            next_action="escalate_reasoner",
+            reason="reasoner mis-read the cited table cell",
+        )
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.telemetry["retries_used"] == 0
+    assert result.telemetry["evidence_retries_used"] == 0
+    assert result.telemetry["loop_terminated"] == "exhausted"
+    stage_counts = _stage_counts(result)
+    assert stage_counts["answer"] == 1
+    assert stage_counts["verify"] == 1
+    assert stage_counts["expand_context"] == 1
+
+
+async def test_loop_allows_single_entity_shape_retry(
+    tmp_path, parser_bench_submodule_present
+):
+    """A list-like answer to a singular entity question gets one hinted retry."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "UK and US", "citations": ["pkt_000"], "confidence": 0.89}',
+            '{"answer": "Germany", "citations": ["pkt_000"], "confidence": 0.75}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="escalate_reasoner",
+                reason="The answer identifies two countries but the question asks for a single country.",
+            ),
+            _verdict_json(
+                supported=False,
+                next_action="expand_context",
+                reason="The answer is plausible but still unsupported.",
+            ),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+    example = _make_example().model_copy(
+        update={
+            "question": "Which country's 10-year government bond yield changed least?",
+            "answer_type": "exact_match",
+        }
+    )
+
+    result = await workflow.run(
+        example, [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "Germany"
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["evidence_retries_used"] == 0
+    answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
+    assert len(answer_steps) == 2
+    assert "Keep the answer field concise" in reasoner.calls[1]["prompt"]
 
 
 async def test_loop_abstain_terminates_with_unanswerable(tmp_path, parser_bench_submodule_present):
@@ -1113,6 +1748,7 @@ async def test_simple_agent_prompt_includes_numeric_format_hint(
 
     prompt = client.calls[0]["prompt"]
     assert "single number" in prompt.lower()
+    assert "requested unit" in prompt.lower()
 
 
 async def test_simple_agent_prompt_includes_exact_match_hint(
@@ -1131,6 +1767,7 @@ async def test_simple_agent_prompt_includes_exact_match_hint(
 
     prompt = client.calls[0]["prompt"]
     assert "exact label" in prompt.lower()
+    assert "only the final exact answer" in prompt.lower()
 
 
 async def test_simple_agent_prompt_includes_boolean_hint(tmp_path, parser_bench_submodule_present):

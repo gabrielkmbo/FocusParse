@@ -232,6 +232,39 @@ async def test_run_focus_eval_handles_backend_error(tmp_path, parser_bench_submo
     assert per["error"].startswith("simulated")
 
 
+async def test_run_focus_eval_strict_layout_detection_raises(
+    tmp_path, monkeypatch, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    from PIL import Image
+
+    from focusparse.tools.layout_detect import LayoutEndpointUnavailable
+
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    Image.new("RGB", (8, 6), color="white").save(image_dir / "ex-strict_page_0003_300dpi.png")
+
+    async def _fake_detect(*args: Any, **kwargs: Any):
+        raise LayoutEndpointUnavailable("mid-run 503")
+
+    monkeypatch.setattr("focusparse.pipeline.localizer.detect_layout", _fake_detect)
+
+    with pytest.raises(LayoutEndpointUnavailable, match="mid-run 503"):
+        await run_focus_eval(
+            [_make_example("ex-strict")],
+            backend_client=_FakeClient('{"answer": "5.5", "citations": ["pkt_000"]}'),
+            backend="fake",
+            model="fake-1",
+            protocol="focus_default",
+            output_dir=tmp_path / "run",
+            images_root=tmp_path,
+            limit=1,
+            strict_layout_detection=True,
+        )
+
+
 # ---------------------------------------------------------------------------
 # pdf_path resolution (sub-phase 2f end-to-end)
 # ---------------------------------------------------------------------------
