@@ -35,7 +35,8 @@ class AnthropicClient:
             raise RuntimeError("ANTHROPIC_API_KEY not set; cannot call Anthropic.")
         from anthropic import AsyncAnthropic
 
-        client = AsyncAnthropic(api_key=self.api_key)
+        timeout_s = model_timeout_s()
+        client = AsyncAnthropic(api_key=self.api_key, timeout=timeout_s)
 
         content: list[dict[str, Any]] = []
         for img_path in images or []:
@@ -62,7 +63,7 @@ class AnthropicClient:
             kwargs["system"] = system
 
         t0 = time.perf_counter()
-        async with asyncio.timeout(model_timeout_s()):
+        async with asyncio.timeout(timeout_s):
             resp = await client.messages.create(**kwargs)
         latency_ms = int((time.perf_counter() - t0) * 1000)
 

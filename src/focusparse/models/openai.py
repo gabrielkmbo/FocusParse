@@ -47,7 +47,8 @@ class OpenAIClient:
             raise RuntimeError("OPENAI_API_KEY not set; cannot call OpenAI.")
         from openai import AsyncOpenAI
 
-        client_kwargs: dict[str, Any] = {"api_key": self.api_key}
+        timeout_s = model_timeout_s()
+        client_kwargs: dict[str, Any] = {"api_key": self.api_key, "timeout": timeout_s}
         if self.base_url:
             client_kwargs["base_url"] = self.base_url
         client = AsyncOpenAI(**client_kwargs)
@@ -69,7 +70,7 @@ class OpenAIClient:
         input_messages.append({"role": "user", "content": user_content})
 
         t0 = time.perf_counter()
-        async with asyncio.timeout(model_timeout_s()):
+        async with asyncio.timeout(timeout_s):
             resp = await client.responses.create(
                 model=self.model,
                 input=input_messages,
