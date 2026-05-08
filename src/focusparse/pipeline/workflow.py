@@ -107,6 +107,29 @@ _FOCUSED_RETRY_SUPPLEMENTAL_CONTEXT_TYPES = frozenset(
     }
 )
 _MAX_FOCUSED_RETRY_SUPPLEMENTAL_PACKETS = 2
+_MAX_FOCUSED_RETRY_VISUAL_SIBLINGS = 2
+_FOCUSED_RETRY_VISUAL_SIBLING_RE = re.compile(
+    r"\b("
+    r"gridlines?|layout\s+overview|multiple\s+(?:waveforms?|traces?|panels?)|"
+    r"oscilloscope|panel|specific\s+(?:trace|signal|waveform)|"
+    r"timing|transition|waveforms?"
+    r")\b",
+    re.IGNORECASE,
+)
+_VISUAL_PACKET_TYPES = frozenset(
+    {
+        "bar_chart",
+        "candlestick",
+        "chart",
+        "curve",
+        "diagram",
+        "figure",
+        "image",
+        "line_chart",
+        "picture",
+        "plot",
+    }
+)
 _ANSWER_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _ANSWER_SELECTION_STOPWORDS = frozenset(
     {
@@ -616,6 +639,7 @@ class FocusWorkflow:
                     evidence,
                     target_packet_ids,
                     cited_packet_ids=list(answer_event.citations),
+                    verifier_reason=verdict.reason,
                 )
                 # The retry answer should know what the verifier thought was
                 # missing. When there are no cited/target packets, the explicit
@@ -1237,6 +1261,7 @@ def _focused_retry_evidence(
     target_packet_ids: list[str],
     *,
     cited_packet_ids: list[str] | None = None,
+    verifier_reason: str | None = None,
 ) -> EvidenceEvent:
     """Restrict verifier-directed retry answers to cited/target packets.
 
@@ -1257,7 +1282,14 @@ def _focused_retry_evidence(
         target_set=target_set,
         cited_packet_ids=cited_packet_ids or [],
     )
-    keep_set = target_set | supplemental_set
+    visual_sibling_set = _focused_retry_visual_sibling_ids(
+        evidence,
+        target_packets=target_packets,
+        target_set=target_set,
+        cited_packet_ids=cited_packet_ids or [],
+        verifier_reason=verifier_reason,
+    )
+    keep_set = target_set | supplemental_set | visual_sibling_set
     packets = [packet for packet in evidence.packets if packet.packet_id in keep_set]
     return EvidenceEvent(packets=packets)
 
@@ -1299,6 +1331,111 @@ def _packet_is_explanatory_retry_context(packet: EvidencePacket) -> bool:
         (packet.text_layer_snippet and packet.text_layer_snippet.strip())
         or (packet.ocr_snippet and packet.ocr_snippet.strip())
     )
+
+
+def _focused_retry_visual_sibling_ids(
+    evidence: EvidenceEvent,
+    *,
+    target_packets: list[EvidencePacket],
+    target_set: set[str],
+    cited_packet_ids: list[str],
+    verifier_reason: str | None,
+) -> set[str]:
+    """Keep same-page visual subpanels when verifier says the target is an overview.
+
+    Timing diagrams and oscilloscope pages often produce one large visual
+    packet plus smaller same-page panel packets. If the verifier targets the
+    large overview, a retry that sends only that packet can remove the precise
+    panel that the reasoner needs to read gridlines or transitions.
+    """
+    if not verifier_reason or not _FOCUSED_RETRY_VISUAL_SIBLING_RE.search(verifier_reason):
+        return set()
+    visual_targets = [packet for packet in target_packets if _packet_is_visual(packet)]
+    if not visual_targets:
+        return set()
+
+    cited_set = {pid for pid in cited_packet_ids if pid}
+    candidates: list[tuple[int, float, float, str]] = []
+    for packet in evidence.packets:
+        if packet.packet_id in target_set or packet.packet_id in cited_set:
+            continue
+        if not _packet_is_visual(packet):
+            continue
+        relation = _best_visual_sibling_relation(packet, visual_targets)
+        if relation is None:
+            continue
+        bucket, distance = relation
+        candidates.append((bucket, distance, _bbox_area(packet.bbox_norm), packet.packet_id))
+
+    candidates.sort()
+    return {pid for _bucket, _distance, _area, pid in candidates[:_MAX_FOCUSED_RETRY_VISUAL_SIBLINGS]}
+
+
+def _packet_is_visual(packet: EvidencePacket) -> bool:
+    return (packet.region_type or "").strip().lower() in _VISUAL_PACKET_TYPES
+
+
+def _best_visual_sibling_relation(
+    packet: EvidencePacket,
+    targets: list[EvidencePacket],
+) -> tuple[int, float] | None:
+    best: tuple[int, float] | None = None
+    for target in targets:
+        if packet.page != target.page:
+            continue
+        if _bbox_contains(target.bbox_norm, packet.bbox_norm, tol=0.02):
+            relation = (0, _bbox_center_distance(target.bbox_norm, packet.bbox_norm))
+        elif _bbox_overlap_ratio(target.bbox_norm, packet.bbox_norm) >= 0.25:
+            relation = (1, _bbox_center_distance(target.bbox_norm, packet.bbox_norm))
+        else:
+            continue
+        if best is None or relation < best:
+            best = relation
+    return best
+
+
+def _bbox_contains(
+    outer: tuple[float, float, float, float],
+    inner: tuple[float, float, float, float],
+    *,
+    tol: float = 0.0,
+) -> bool:
+    return (
+        inner[0] >= outer[0] - tol
+        and inner[1] >= outer[1] - tol
+        and inner[2] <= outer[2] + tol
+        and inner[3] <= outer[3] + tol
+    )
+
+
+def _bbox_overlap_ratio(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0 = max(ax0, bx0)
+    iy0 = max(ay0, by0)
+    ix1 = min(ax1, bx1)
+    iy1 = min(ay1, by1)
+    if ix0 >= ix1 or iy0 >= iy1:
+        return 0.0
+    return ((ix1 - ix0) * (iy1 - iy0)) / max(_bbox_area(b), 1e-9)
+
+
+def _bbox_area(bbox: tuple[float, float, float, float]) -> float:
+    return max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
+
+
+def _bbox_center_distance(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    acx = (a[0] + a[2]) / 2.0
+    acy = (a[1] + a[3]) / 2.0
+    bcx = (b[0] + b[2]) / 2.0
+    bcy = (b[1] + b[3]) / 2.0
+    return ((acx - bcx) ** 2 + (acy - bcy) ** 2) ** 0.5
 
 
 def _evidence_scope(full_evidence: EvidenceEvent, answer_evidence: EvidenceEvent) -> str:
@@ -1394,6 +1531,14 @@ def _is_better_unsupported_answer(
     candidate_overlap = _answer_question_overlap(candidate.answer, question_text)
     incumbent_overlap = _answer_question_overlap(incumbent.answer, question_text)
     if (
+        _question_requests_single_entity(question_text)
+        and _answer_looks_list_like(incumbent.answer)
+        and not _answer_looks_list_like(candidate.answer)
+        and candidate_confidence + _entity_retry_selection_margin(question_text)
+        >= incumbent_confidence
+    ):
+        return True
+    if (
         candidate_overlap > incumbent_overlap
         and candidate_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= incumbent_confidence
     ):
@@ -1403,13 +1548,6 @@ def _is_better_unsupported_answer(
         and incumbent_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= candidate_confidence
     ):
         return False
-    if (
-        _question_requests_single_entity(question_text)
-        and _answer_looks_list_like(incumbent.answer)
-        and not _answer_looks_list_like(candidate.answer)
-        and candidate_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= incumbent_confidence
-    ):
-        return True
     return candidate_confidence > incumbent_confidence
 
 
@@ -1419,7 +1557,9 @@ def _question_requests_single_entity(question_text: str | None) -> bool:
     normalized = str(question_text).lower()
     return bool(
         re.search(
-            r"\bwhich\s+(?:country|company|entity|region|line|series|label|row|column|value)\b",
+            r"\bwhich\s+(?:[\w-]+\s+){0,3}"
+            r"(?:country|company|entity|parameter|region|line|series|label|row|column|"
+            r"value|variable)\b",
             normalized,
         )
         or re.search(
@@ -1427,6 +1567,13 @@ def _question_requests_single_entity(question_text: str | None) -> bool:
             normalized,
         )
     )
+
+
+def _entity_retry_selection_margin(question_text: str | None) -> float:
+    normalized = (question_text or "").lower()
+    if re.search(r"\b(?:variable|parameter|y[- ]axis|x[- ]axis)\b", normalized):
+        return 0.25
+    return _RETRY_SELECTION_CONFIDENCE_MARGIN
 
 
 def _answer_looks_list_like(answer: str | None) -> bool:
@@ -1499,6 +1646,11 @@ def _should_allow_reasoner_shape_retry(
         or "two " in reason
         or "multiple" in reason
         or "does not quantify" in reason
+        or "did not answer" in reason
+        or "actual question" in reason
+        or "which variable" in reason
+        or "y-axis variable" in reason
+        or "y axis variable" in reason
     )
 
 

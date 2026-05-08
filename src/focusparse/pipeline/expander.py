@@ -184,6 +184,28 @@ _RETRY_UNION_CONTEXT_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_RETRY_VISUAL_PANEL_RE = re.compile(
+    r"\b("
+    r"actual\s+visual|gridlines?|oscilloscope|panel|text\s+alone|"
+    r"timing|trace|transition|visual\s+content|waveforms?"
+    r")\b",
+    re.IGNORECASE,
+)
+_RETRY_VISUAL_PANEL_TYPES: frozenset[str] = frozenset(
+    {
+        "chart",
+        "curve",
+        "diagram",
+        "figure",
+        "image",
+        "line_chart",
+        "picture",
+        "plot",
+    }
+)
+_RETRY_VISUAL_PANEL_MIN_AREA = 0.20
+_RETRY_VISUAL_PANEL_ROWS = 3
+_RETRY_VISUAL_PANEL_COLS = 2
 
 
 async def expand_context(
@@ -386,6 +408,7 @@ async def expand_context(
         context_window_ref = None
         context_window_text = None
         context_window_bbox = None
+        visual_panel_refs: list[str] = []
         union_context = retry_union_context.get(packet.packet_id)
         if union_context is not None:
             context_window_ref = union_context.ref
@@ -413,8 +436,16 @@ async def expand_context(
                     text_layer_cache_dir=text_layer_cache_dir,
                     crop_cache_dir=crop_cache_dir,
                 )
+        visual_panel_refs = await _retry_visual_panel_crops(
+            packet,
+            verifier_reason=verifier_reason,
+            target_filter_active=target_filter_active,
+            pdf_path=pdf_path,
+            page_image=(images_by_page or {}).get(packet.page),
+            crop_cache_dir=crop_cache_dir,
+        )
 
-        if not neighbors_with_role and context_window_ref is None:
+        if not neighbors_with_role and context_window_ref is None and not visual_panel_refs:
             new_packets.append(packet)
             continue
 
@@ -430,6 +461,13 @@ async def expand_context(
             if context_window_text:
                 linked_texts.append(("context_window", context_window_text))
             seen_linked_refs.add(context_window_ref)
+            n_new_links += 1
+        for panel_ref in visual_panel_refs:
+            if panel_ref in seen_linked_refs:
+                continue
+            linked_refs.append(panel_ref)
+            linked_types.append("visual_panel")
+            seen_linked_refs.add(panel_ref)
             n_new_links += 1
         packet_figure_refs = _figure_refs_from_text(packet.text_layer_snippet, packet.ocr_snippet)
         for neighbor, role in neighbors_with_role:
@@ -742,6 +780,72 @@ def _should_attach_retry_context_window(
     return not region_type or region_type in _CONTEXT_WINDOW_REGION_TYPES
 
 
+async def _retry_visual_panel_crops(
+    packet: EvidencePacket,
+    *,
+    verifier_reason: str | None,
+    target_filter_active: bool,
+    pdf_path: Path | None,
+    page_image: Path | None,
+    crop_cache_dir: Path | None,
+) -> list[str]:
+    """Attach panel-scale crops for large timing/oscilloscope overview figures."""
+    if not _should_attach_retry_visual_panels(
+        packet,
+        verifier_reason=verifier_reason,
+        target_filter_active=target_filter_active,
+    ):
+        return []
+
+    refs: list[str] = []
+    for bbox in _visual_panel_bboxes(packet.bbox_norm):
+        ref = await _crop_context_window(
+            packet,
+            pdf_path=pdf_path,
+            page_image=page_image,
+            crop_cache_dir=crop_cache_dir,
+            bbox=bbox,
+            pad=0.0,
+        )
+        if ref:
+            refs.append(ref)
+    return refs
+
+
+def _should_attach_retry_visual_panels(
+    packet: EvidencePacket,
+    *,
+    verifier_reason: str | None,
+    target_filter_active: bool,
+) -> bool:
+    if not (target_filter_active and verifier_reason):
+        return False
+    if not _RETRY_VISUAL_PANEL_RE.search(verifier_reason):
+        return False
+    if (packet.region_type or "").strip().lower() not in _RETRY_VISUAL_PANEL_TYPES:
+        return False
+    return _bbox_area(packet.bbox_norm) >= _RETRY_VISUAL_PANEL_MIN_AREA
+
+
+def _visual_panel_bboxes(
+    bbox: tuple[float, float, float, float],
+) -> list[tuple[float, float, float, float]]:
+    x0, y0, x1, y1 = bbox
+    width = max(0.0, x1 - x0)
+    height = max(0.0, y1 - y0)
+    if width <= 0.0 or height <= 0.0:
+        return []
+    out: list[tuple[float, float, float, float]] = []
+    for row in range(_RETRY_VISUAL_PANEL_ROWS):
+        for col in range(_RETRY_VISUAL_PANEL_COLS):
+            px0 = x0 + width * col / _RETRY_VISUAL_PANEL_COLS
+            px1 = x0 + width * (col + 1) / _RETRY_VISUAL_PANEL_COLS
+            py0 = y0 + height * row / _RETRY_VISUAL_PANEL_ROWS
+            py1 = y0 + height * (row + 1) / _RETRY_VISUAL_PANEL_ROWS
+            out.append((px0, py0, px1, py1))
+    return out
+
+
 async def _expand_retry_visual_zoom(
     evidence: EvidenceEvent,
     *,
@@ -998,6 +1102,10 @@ def _bbox_equal(
     tol: float = 1e-6,
 ) -> bool:
     return all(abs(ai - bi) < tol for ai, bi in zip(a, b, strict=False))
+
+
+def _bbox_area(bbox: tuple[float, float, float, float]) -> float:
+    return max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
 
 
 def _match_primary_region(

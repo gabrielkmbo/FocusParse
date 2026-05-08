@@ -24,7 +24,7 @@ import pytest
 
 from focusparse.evidence.packet import EvidencePacket, PacketProvenance
 from focusparse.models.base import ModelResponse
-from focusparse.pipeline.events import AnswerEvent, EvidenceEvent
+from focusparse.pipeline.events import AnswerEvent, EvidenceEvent, QuestionEvent, VerdictEvent
 from focusparse.pipeline.workflow import (
     FocusWorkflow,
     SimpleBaselineAgent,
@@ -35,6 +35,7 @@ from focusparse.pipeline.workflow import (
     _infer_doc_id,
     _is_better_unsupported_answer,
     _page_number_from_filename,
+    _should_allow_reasoner_shape_retry,
     _verifier_requests_visual_readability_retry,
     _verifier_target_packet_ids,
 )
@@ -226,6 +227,59 @@ def test_focused_retry_keeps_same_page_cited_explanatory_context():
     assert [packet.packet_id for packet in out.packets] == ["pkt_000", "pkt_002"]
 
 
+def test_focused_retry_keeps_visual_subpanels_for_overview_retry():
+    overview = EvidencePacket(
+        packet_id="pkt_000",
+        page=19,
+        bbox_norm=(0.05, 0.10, 0.95, 0.90),
+        region_type="Picture",
+        page_thumbnail_ref="/tmp/page.png",
+        local_crop_ref="/tmp/overview.png",
+        provenance=PacketProvenance(tool="test", args_hash="overview"),
+    )
+    subpanel = EvidencePacket(
+        packet_id="pkt_007",
+        page=19,
+        bbox_norm=(0.50, 0.15, 0.90, 0.35),
+        region_type="Picture",
+        ocr_snippet="PGOOD CH1 Time (5us/Div)",
+        page_thumbnail_ref="/tmp/page.png",
+        local_crop_ref="/tmp/subpanel.png",
+        provenance=PacketProvenance(tool="test", args_hash="subpanel"),
+    )
+    far_visual = EvidencePacket(
+        packet_id="pkt_003",
+        page=20,
+        bbox_norm=(0.50, 0.15, 0.90, 0.35),
+        region_type="Picture",
+        page_thumbnail_ref="/tmp/page20.png",
+        local_crop_ref="/tmp/far.png",
+        provenance=PacketProvenance(tool="test", args_hash="far"),
+    )
+    text_packet = EvidencePacket(
+        packet_id="pkt_004",
+        page=19,
+        bbox_norm=(0.50, 0.15, 0.90, 0.35),
+        region_type="Text",
+        text_layer_snippet="not a visual subpanel",
+        page_thumbnail_ref="/tmp/page.png",
+        local_crop_ref="/tmp/text.png",
+        provenance=PacketProvenance(tool="test", args_hash="text"),
+    )
+
+    out = _focused_retry_evidence(
+        EvidenceEvent(packets=[overview, subpanel, far_visual, text_packet]),
+        ["pkt_000"],
+        cited_packet_ids=["pkt_000"],
+        verifier_reason=(
+            "Packet pkt_000 is a layout overview containing multiple waveforms, "
+            "not a clear oscilloscope trace with visible gridlines."
+        ),
+    )
+
+    assert [packet.packet_id for packet in out.packets] == ["pkt_000", "pkt_007"]
+
+
 def test_retry_answer_selector_allows_question_specific_fix_within_margin():
     incumbent = AnswerEvent(answer="G = 24", citations=["pkt_000"], confidence=0.87)
     candidate = AnswerEvent(answer="Gain = 24", citations=["pkt_000"], confidence=0.81)
@@ -259,6 +313,74 @@ def test_retry_answer_selector_prefers_single_entity_fix_within_margin():
             "Based on the charts and the footnote, which country's 10-year government "
             "bond yield showed the least change?"
         ),
+    )
+
+
+def test_retry_answer_selector_prefers_concise_variable_answer():
+    incumbent = AnswerEvent(
+        answer="P RX,AC = (V RECT x I OUT ) / Eff RECT + P res_loss + P offset",
+        citations=["pkt_003"],
+        confidence=0.96,
+    )
+    candidate = AnswerEvent(answer="I OUT", citations=["pkt_003"], confidence=0.80)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Which Y-axis variable, VRECT or IOUT, should be used to calculate output "
+            "power at OUT?"
+        ),
+    )
+
+
+def test_retry_answer_selector_prefers_variable_over_descriptive_fragment():
+    incumbent = AnswerEvent(
+        answer="IOUT is the output current from ADC",
+        citations=["pkt_003"],
+        confidence=0.85,
+    )
+    candidate = AnswerEvent(answer="IOUT", citations=["pkt_000", "pkt_003"], confidence=0.82)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Which Y-axis variable, VRECT or IOUT, should be used to calculate output "
+            "power at OUT?"
+        ),
+    )
+
+
+def test_variable_question_allows_reasoner_shape_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason=(
+            "The reasoner did not answer the actual question, which asks which "
+            "Y-axis variable should be used."
+        ),
+        next_action="escalate_reasoner",
+        confidence=0.75,
+    )
+    answer = AnswerEvent(
+        answer="P RX,AC = (V RECT x I OUT ) / Eff RECT + P res_loss + P offset",
+        citations=["pkt_003"],
+        confidence=0.95,
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="Which Y-axis variable, VRECT or IOUT, should be used?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
     )
 
 

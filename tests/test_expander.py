@@ -1484,6 +1484,44 @@ async def test_retry_expand_adds_context_window_for_target_packet(tmp_path, monk
     )
 
 
+async def test_retry_expand_adds_visual_panel_crops_for_large_timing_overview(
+    tmp_path, monkeypatch
+):
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    packet = _packet(
+        packet_id="p0",
+        page=19,
+        bbox_norm=(0.05, 0.10, 0.95, 0.90),
+        region_type="Picture",
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=19, bbox_norm=packet.bbox_norm, region_type="Picture"),
+        ]
+    )
+
+    out = await expand_context(
+        EvidenceEvent(packets=[packet]),
+        regions=regions,
+        pdf_path=tmp_path / "doc.pdf",
+        verifier_reason=(
+            "The cited oscilloscope image visual content cannot be verified from "
+            "text alone; the transition and gridlines need panel crops."
+        ),
+        target_packet_ids=["p0"],
+    )
+
+    out_packet = out.packets[0]
+    assert out_packet.linked_neighbor_types.count("visual_panel") == 6
+    assert "context_window" in out_packet.linked_neighbor_types
+    image_bboxes = [
+        tuple(round(v, 4) for v in call["bbox_norm"]) for call in calls if call["mode"] == "image"
+    ]
+    assert (0.05, 0.10, 0.5, 0.3667) in image_bboxes
+    assert (0.5, 0.6333, 0.95, 0.9) in image_bboxes
+
+
 async def test_retry_expand_adds_union_context_window_for_fragmented_targets(
     tmp_path, monkeypatch
 ):
