@@ -186,11 +186,12 @@ def _build_verifier_prompt(
     answer: AnswerEvent,
 ) -> str:
     cited_packet_ids = set(answer.citations)
+    focus_text = f"{question.question}\nProposed answer: {answer.answer}"
     packet_lines = [
         _summarize_packet(
             p,
             cited=p.packet_id in cited_packet_ids,
-            question_text=question.question,
+            question_text=focus_text,
         )
         for p in evidence.packets
     ]
