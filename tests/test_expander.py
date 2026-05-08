@@ -882,6 +882,29 @@ async def test_query_aware_filters_to_planner_evidence_types(tmp_path, monkeypat
     assert "footnote" not in types  # planner didn't ask for footnotes
 
 
+async def test_planner_hint_initial_expand_uses_conservative_cap(tmp_path, monkeypatch):
+    """Coarse planner hints should not attach every nearby context block before verification."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.30, 0.52, 0.70, 0.56), region_type="caption"),
+            _region(page=1, bbox_norm=(0.30, 0.34, 0.70, 0.38), region_type="footnote"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["caption", "footnote"]),
+        max_neighbors_per_packet=2,
+    )
+    assert len(out.packets[0].linked_neighbor_types) == 1
+
+
 async def test_retry_expand_looks_past_already_linked_neighbors(tmp_path, monkeypatch):
     """A verifier-triggered wider pass should not stop at duplicate neighbors."""
     calls: list = []
@@ -929,7 +952,7 @@ async def test_retry_expand_looks_past_already_linked_neighbors(tmp_path, monkey
     assert second.packets[0].linked_neighbor_types == ["caption", "footnote", "title"]
 
 
-async def test_planner_chart_hint_allows_legend_and_axis_labels(tmp_path, monkeypatch):
+async def test_verifier_directed_chart_retry_allows_legend_and_axis_labels(tmp_path, monkeypatch):
     calls: list = []
     _install_fake_inspect(monkeypatch, calls=calls)
     ev = EvidenceEvent(
@@ -947,6 +970,7 @@ async def test_planner_chart_hint_allows_legend_and_axis_labels(tmp_path, monkey
         regions=regions,
         pdf_path=Path("/fake.pdf"),
         plan=_plan(evidence_types=["chart"]),
+        verifier_reason="missing legend and axis labels",
         max_neighbors_per_packet=2,
     )
     assert set(out.packets[0].linked_neighbor_types) == {"axis_label", "legend"}

@@ -173,11 +173,11 @@ async def expand_context(
         verifier_reason: optional unsupported-verdict reason from a verifier
             retry. Mentions like "missing legend" or "needs footnote" add
             targeted neighbor types even if the original planner hint was
-            narrower. Without `plan`/`verifier_reason` and without reranker
-            relevance scores, the expander falls back to a tighter
-            spatial-only budget — the rebaseline-v2 finding (2026-05-05)
-            showed that query-blind expansion attached ~13 neighbors per
-            example and hurt 11 of 13 affected examples.
+            narrower. Without `verifier_reason` or reranker relevance scores,
+            the expander uses a tighter initial budget even when the planner
+            supplied coarse hints — the rebaseline-v2 finding (2026-05-05)
+            showed that broad expansion attached ~13 neighbors per example
+            and hurt 11 of 13 affected examples.
         relevance_threshold: when the reranker (Phase 2 item 4) scored
             candidates, neighbors below this threshold are filtered out
             even if they overlap spatially. Default 0.3.
@@ -201,7 +201,7 @@ async def expand_context(
     )
     effective_max = (
         max_neighbors_per_packet
-        if (has_planner_hint or has_rerank_signal)
+        if (verifier_reason or has_rerank_signal)
         else _FALLBACK_MAX_NEIGHBORS_PER_PACKET
     )
 
@@ -231,7 +231,7 @@ async def expand_context(
         )
         graph_matches: list[tuple[RegionCandidate, str]] = []
         existing_link_count = len([ref for ref in packet.linked_crop_refs if ref])
-        candidate_limit = effective_max + existing_link_count
+        candidate_limit = max_neighbors_per_packet + existing_link_count
         new_link_cap = effective_max
         if use_evidence_graph and has_graph_entry(packet.region_type, figure_class):
             hints = primary_region.expansion_hints if primary_region else None
