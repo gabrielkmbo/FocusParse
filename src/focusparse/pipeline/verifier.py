@@ -65,10 +65,17 @@ _SYSTEM_PROMPT = (
     "  * abstain: evidence is contradictory or absent — safer to decline.\n"
     "  * escalate_reasoner: evidence is sufficient but the answer mis-read "
     "it — a stronger reasoner should retry.\n"
+    "- Prefer `escalate_reasoner` over `expand_context` when the packet text "
+    "already contains the needed labels, rows, numbers, units, or formula "
+    "inputs, but the answer uses the wrong arithmetic or extracts the wrong "
+    "value. Use `expand_context` only when you can name a missing neighboring "
+    "caption, footnote, legend, header, or continuation that is not present in "
+    "any packet summary.\n"
     "- `confidence` is your confidence in the verdict, not the answer."
 )
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_MAX_VERIFIER_PACKET_TEXT_CHARS = 500
 
 
 async def verify_answer(
@@ -132,7 +139,10 @@ def _build_verifier_prompt(
     evidence: EvidenceEvent,
     answer: AnswerEvent,
 ) -> str:
-    packet_lines = [_summarize_packet(p) for p in evidence.packets]
+    cited_packet_ids = set(answer.citations)
+    packet_lines = [
+        _summarize_packet(p, cited=p.packet_id in cited_packet_ids) for p in evidence.packets
+    ]
     if not packet_lines:
         packet_block = "(no evidence packets were cited)"
     else:
@@ -151,7 +161,7 @@ def _build_verifier_prompt(
     )
 
 
-def _summarize_packet(packet: EvidencePacket) -> str:
+def _summarize_packet(packet: EvidencePacket, *, cited: bool = False) -> str:
     """One-line packet summary for the verifier prompt.
 
     Keep it compact — the verifier tier is cheap and long packets balloon the
@@ -159,15 +169,16 @@ def _summarize_packet(packet: EvidencePacket) -> str:
     """
     snippet = packet.text_layer_snippet or packet.ocr_snippet or ""
     snippet = snippet.strip().replace("\n", " ")
-    if len(snippet) > 180:
-        snippet = snippet[:177] + "..."
+    if len(snippet) > _MAX_VERIFIER_PACKET_TEXT_CHARS:
+        snippet = snippet[: _MAX_VERIFIER_PACKET_TEXT_CHARS - 3] + "..."
     region = packet.region_type or "region"
     scale_part = ""
     if packet.multi_scale_crops:
         scale_part = " scales=" + _fmt_scales(packet.multi_scale_crops)
+    cited_part = " cited_by_answer=yes" if cited else " cited_by_answer=no"
     return (
         f"- [{packet.packet_id}] page={packet.page} type={region} "
-        f"bbox={_fmt_bbox(packet.bbox_norm)}{scale_part} text={snippet!r}"
+        f"bbox={_fmt_bbox(packet.bbox_norm)}{scale_part}{cited_part} text={snippet!r}"
     )
 
 

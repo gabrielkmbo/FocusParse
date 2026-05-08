@@ -205,6 +205,32 @@ async def test_verify_prompt_includes_packet_summary_and_citations():
     # reasoner's answer + cited packet_ids are visible.
     assert "3.6 V" in prompt
     assert "pA" in prompt
+    assert "cited_by_answer=yes" in prompt
+    assert "cited_by_answer=no" in prompt
+
+
+async def test_verify_prompt_keeps_enough_table_text_for_math_verdict():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "math error", '
+        '"next_action": "escalate_reasoner", "confidence": 0.8}'
+    )
+    long_table = (
+        "Cash and equivalents $ 12,976 Goodwill 51,001 Intangible assets 21,969 "
+        "Other assets 2,503 Long-term debt (2,799) Long-term income taxes (1,946) "
+        "Deferred income taxes (4,676) Other liabilities (3,620) Total purchase "
+        "price $ 75,408 segment row More Personal Computing acquisitions 51,235"
+    )
+    await verify_answer(
+        _question(domain="finance"),
+        _evidence(_packet("pA", snippet=long_table)),
+        _answer(answer="84%", citations=["pA"]),
+        backend_client=client,
+    )
+
+    prompt = client.calls[0]["prompt"]
+    assert "Total purchase price $ 75,408" in prompt
+    assert "More Personal Computing acquisitions 51,235" in prompt
+    assert "Prefer `escalate_reasoner`" in client.calls[0]["system"]
 
 
 async def test_verify_prompt_summarizes_multi_scale_chart_context():

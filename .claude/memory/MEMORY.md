@@ -183,6 +183,18 @@ whenever present. Verification for the fallback + eval CLI slice:
 tests/test_diagnose_predictions.py`: **67 passed, 1 skipped**; ruff/format
 clean on the touched files.
 
+Verifier prompt follow-up: the `fin-10-K-0036` smoke showed the evidence
+packets already contained the needed values (`51,235` and `75,408`), but the
+verifier packet summaries were capped at 180 chars and could hide the decisive
+table rows. The verifier now keeps up to 500 chars per packet, marks
+`cited_by_answer=yes/no`, and explicitly tells the model to prefer
+`escalate_reasoner` over `expand_context` when the values are already present
+but the arithmetic/extraction is wrong. Local smoke at
+`results/hf/sprint-2026-05-08/verifier-richer-smoke-fin-10k-0036/` returned
+the correct **68%** with `retries_used=1`, `evidence_retries_used=1`, and
+`loop_retry_helped=true`; this is only a one-example mechanism check, not a
+ship gate.
+
 ### 2026-05-08 — inspect crop-level OCR fallback for empty element OCR
 
 Low-risk inspector hardening landed to reduce `cited_image_only` style misses
