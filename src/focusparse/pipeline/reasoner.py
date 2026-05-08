@@ -36,6 +36,31 @@ _SYSTEM_PROMPT = (
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _MAX_PACKET_TEXT_CHARS = 240
+_FOCUS_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "with",
+        "what",
+        "which",
+    }
+)
 
 
 def _format_hint(answer_type: str | None) -> str:
@@ -87,7 +112,9 @@ async def answer_from_evidence(
     the evidence packets. Pass it from the workflow's retry handler; pass
     None for first-attempt and routine answer calls.
     """
-    packet_list = "\n".join(_render_packet_line(p) for p in evidence.packets)
+    packet_list = "\n".join(
+        _render_packet_line(p, question_text=question.question) for p in evidence.packets
+    )
     hint_block = ""
     if escalation_hint:
         hint_block = (
@@ -127,7 +154,7 @@ async def answer_from_evidence(
     )
 
 
-def _render_packet_line(packet) -> str:
+def _render_packet_line(packet, *, question_text: str | None = None) -> str:
     """One descriptor line for a packet in the reasoner's prompt.
 
     Sprint Phase 2: multi_scale_crops annotation tells the reasoner how
@@ -155,7 +182,7 @@ def _render_packet_line(packet) -> str:
         types = ", ".join(packet.linked_neighbor_types)
         n_neighbors = len(packet.linked_neighbor_types)
         base += f"\n  Attached neighbors ({n_neighbors}): {types}"
-    text_snippet = _packet_text_snippet(packet)
+    text_snippet = _packet_text_snippet(packet, question_text=question_text)
     if text_snippet:
         base += f"\n  Extracted text: {text_snippet!r}"
     if packet.chart_csv:
@@ -178,13 +205,56 @@ def _format_bbox(bbox: tuple[float, float, float, float]) -> str:
     return "[" + ", ".join(f"{v:.3f}" for v in bbox) + "]"
 
 
-def _packet_text_snippet(packet) -> str:
+def _packet_text_snippet(packet, *, question_text: str | None = None) -> str:
     """Compact packet text/OCR for the reasoner descriptor line."""
     snippet = packet.text_layer_snippet or packet.ocr_snippet or ""
-    snippet = " ".join(str(snippet).split())
+    snippet = _question_focused_text(str(snippet), question_text=question_text)
+    snippet = " ".join(snippet.split())
     if len(snippet) > _MAX_PACKET_TEXT_CHARS:
         snippet = snippet[: _MAX_PACKET_TEXT_CHARS - 3] + "..."
     return snippet
+
+
+def _question_focused_text(text: str, *, question_text: str | None = None) -> str:
+    """Prefer question-matching table rows over the first rows of a long packet.
+
+    PDF text extraction for a large table can span thousands of characters. A
+    blind prefix truncation over-represents the first rows, which can lure the
+    VLM toward an answer that satisfies only a nearby-looking subset of the
+    question. Keep the legacy prefix when no question terms match; otherwise
+    surface the highest-overlap lines plus their immediate row continuations.
+    """
+    if not text or not question_text or len(text) <= _MAX_PACKET_TEXT_CHARS:
+        return text
+    q_tokens = _focus_tokens(question_text)
+    if not q_tokens:
+        return text
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    scored: list[tuple[int, int]] = []
+    for idx, line in enumerate(lines):
+        overlap = len(q_tokens & _focus_tokens(line))
+        if overlap:
+            scored.append((overlap, idx))
+    if not scored:
+        return text
+
+    max_score = max(score for score, _idx in scored)
+    score_floor = max(1, max_score - 1)
+    selected_indexes: set[int] = set()
+    for _score, idx in [
+        item
+        for item in sorted(scored, key=lambda item: (-item[0], item[1]))
+        if item[0] >= score_floor
+    ][:3]:
+        selected_indexes.update({idx - 1, idx, idx + 1})
+    selected = [lines[idx] for idx in sorted(selected_indexes) if 0 <= idx < len(lines)]
+    return " / ".join(selected)
+
+
+def _focus_tokens(text: str) -> set[str]:
+    tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+    return {tok for tok in tokens if len(tok) > 1 and tok not in _FOCUS_STOPWORDS}
 
 
 def _collect_packet_images(evidence: EvidenceEvent) -> list[Path]:

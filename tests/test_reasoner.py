@@ -315,6 +315,31 @@ def test_render_packet_line_truncates_long_text_snippet() -> None:
     assert "..." in line
 
 
+def test_render_packet_line_focuses_long_table_text_on_question_terms() -> None:
+    table_text = "\n".join(
+        [
+            "Part Number",
+            "RT9187C 2.5 5.5 600 300 Enable Input Ultra-Low Noise SOT-23-5",
+            "RT2519 2.2 6 1000 190 High PSRR Industrial Grade VDFN3x3-8A",
+            "RTQ2510-QA 2.2 6 1000 190",
+            "Enable Input Ultra-Low Noise High PSRR AEC-Q100",
+            "VDFN3x3-8",
+        ]
+    )
+    p = _packet(text_layer_snippet=table_text + "\n" + ("filler row\n" * 80))
+    line = _render_packet_line(
+        p,
+        question_text=(
+            "Which AEC-Q100 part with Enable Input, Ultra-Low Noise, "
+            "and High PSRR has the lowest Iq, and what package is it?"
+        ),
+    )
+    assert "RTQ2510-QA" in line
+    assert "AEC-Q100" in line
+    assert "VDFN3x3-8" in line
+    assert "RT9187C" not in line
+
+
 # ---------------------------------------------------------------------------
 # Sprint Phase 3: chart_csv rendering in the prompt
 # ---------------------------------------------------------------------------
