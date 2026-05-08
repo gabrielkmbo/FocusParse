@@ -767,6 +767,7 @@ async def test_loop_expand_context_reruns_only_expand_answer_verify(
     assert pads[0] < pads[1], f"adjacency_pad should grow on retry; got {pads}"
     assert expand_steps[1].args["verifier_missing_context"] == ["footnote"]
     assert expand_steps[1].args["verifier_reason"] == "missing footnote context"
+    assert expand_steps[1].args["target_packet_ids"] == ["pkt_000"]
 
 
 async def test_loop_expand_context_retries_once_by_default(

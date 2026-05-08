@@ -144,6 +144,7 @@ async def expand_context(
     use_evidence_graph: bool = False,
     plan: PlanEvent | None = None,
     verifier_reason: str | None = None,
+    target_packet_ids: list[str] | None = None,
     relevance_threshold: float = _DEFAULT_NEIGHBOR_RELEVANCE_THRESHOLD,
 ) -> EvidenceEvent:
     """Attach annotation neighbors to each packet, or pass through unchanged.
@@ -178,6 +179,9 @@ async def expand_context(
             supplied coarse hints — the rebaseline-v2 finding (2026-05-05)
             showed that broad expansion attached ~13 neighbors per example
             and hurt 11 of 13 affected examples.
+        target_packet_ids: optional packet ids to expand. Verifier-driven
+            retries use this to avoid adding fresh context to packets the
+            answer did not cite.
         relevance_threshold: when the reranker (Phase 2 item 4) scored
             candidates, neighbors below this threshold are filtered out
             even if they overlap spatially. Default 0.3.
@@ -212,7 +216,11 @@ async def expand_context(
         regions_by_page.setdefault(r.page, []).append(r)
 
     new_packets: list[EvidencePacket] = []
+    target_set = {pid for pid in (target_packet_ids or []) if pid}
     for packet in evidence.packets:
+        if target_set and packet.packet_id not in target_set:
+            new_packets.append(packet)
+            continue
         candidates_on_page = regions_by_page.get(packet.page, [])
         # Find the matching RegionCandidate so we can read figure_class +
         # expansion_hints (populated by item 4's reranker).

@@ -1000,6 +1000,32 @@ async def test_verifier_reason_can_expand_beyond_original_plan_hint(tmp_path, mo
     assert set(out.packets[0].linked_neighbor_types) == {"caption", "footnote"}
 
 
+async def test_target_packet_ids_limit_which_packets_expand(tmp_path, monkeypatch):
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(packet_id="p0", page=1, bbox_norm=(0.10, 0.20, 0.40, 0.40)),
+            _packet(packet_id="p1", page=1, bbox_norm=(0.60, 0.20, 0.90, 0.40)),
+        ]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.10, 0.42, 0.40, 0.46), region_type="caption"),
+            _region(page=1, bbox_norm=(0.60, 0.42, 0.90, 0.46), region_type="caption"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["caption"]),
+        target_packet_ids=["p1"],
+    )
+    assert out.packets[0].linked_neighbor_types == []
+    assert out.packets[1].linked_neighbor_types == ["caption"]
+
+
 async def test_query_aware_planner_no_hint_uses_fallback_max_1(tmp_path, monkeypatch):
     """Without planner hint AND without rerank scores, the spatial-only
     fallback is bounded to _FALLBACK_MAX_NEIGHBORS_PER_PACKET (= 1 as of
