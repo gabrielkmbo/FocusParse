@@ -234,6 +234,41 @@ def test_collect_packet_images_neighbors_follow_multi_scale() -> None:
     ]
 
 
+def test_collect_packet_images_skips_text_only_header_neighbors() -> None:
+    """Header-like neighbors with extracted text stay in prompt text, not images."""
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                local_crop_ref="/cache/primary.png",
+                linked_crop_refs=["/cache/header.png", "/cache/caption.png"],
+                linked_neighbor_types=["section-header", "caption"],
+                text_layer_snippet=(
+                    "Context [section-header]: Electrical Characteristics\n"
+                    "Context [caption]: Figure 4. Load transient response"
+                ),
+            )
+        ]
+    )
+    images = _collect_packet_images(ev)
+    assert images == [Path("/cache/primary.png"), Path("/cache/caption.png")]
+
+
+def test_collect_packet_images_keeps_header_neighbor_without_extracted_text() -> None:
+    """Do not hide a header crop unless expand actually recovered its text."""
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                local_crop_ref="/cache/primary.png",
+                linked_crop_refs=["/cache/header.png"],
+                linked_neighbor_types=["section-header"],
+                text_layer_snippet="Main packet text only",
+            )
+        ]
+    )
+    images = _collect_packet_images(ev)
+    assert images == [Path("/cache/primary.png"), Path("/cache/header.png")]
+
+
 # ---------------------------------------------------------------------------
 # _render_packet_line
 # ---------------------------------------------------------------------------
@@ -397,24 +432,24 @@ def test_render_packet_line_lists_neighbor_types() -> None:
         linked_neighbor_types=["caption", "footnote"],
     )
     line = _render_packet_line(p)
-    assert "Attached neighbors (2)" in line
+    assert "Attached neighbor images (2)" in line
     assert "caption, footnote" in line
 
 
 def test_render_packet_line_omits_neighbors_when_empty() -> None:
     p = _packet()  # no linked_neighbor_types
     line = _render_packet_line(p)
-    assert "Attached neighbors" not in line
+    assert "Attached neighbor" not in line
 
 
 def test_render_packet_line_neighbor_count_matches_types() -> None:
-    """Three neighbors → "Attached neighbors (3)"."""
+    """Three image neighbors -> "Attached neighbor images (3)"."""
     p = _packet(
         linked_crop_refs=["/a", "/b", "/c"],
         linked_neighbor_types=["caption", "footnote", "section_header"],
     )
     line = _render_packet_line(p)
-    assert "Attached neighbors (3)" in line
+    assert "Attached neighbor images (3)" in line
     assert "section_header" in line
 
 
@@ -425,9 +460,23 @@ def test_render_packet_line_explains_context_window() -> None:
         linked_neighbor_types=["context_window"],
     )
     line = _render_packet_line(p)
-    assert "Attached neighbors (1): context_window" in line
+    assert "Attached neighbor images (1): context_window" in line
     assert "wider crop around the same packet" in line
     assert "row/column headers" in line
+
+
+def test_render_packet_line_lists_text_only_neighbor_context() -> None:
+    p = _packet(
+        linked_crop_refs=["/cache/section.png", "/cache/caption.png"],
+        linked_neighbor_types=["section_header", "caption"],
+        text_layer_snippet=(
+            "Context [section_header]: Absolute Maximum Ratings\n"
+            "Context [caption]: Figure 7. Output ripple"
+        ),
+    )
+    line = _render_packet_line(p)
+    assert "Attached neighbor images (1): caption" in line
+    assert "Attached text-only context (1): section_header='Absolute Maximum Ratings'" in line
 
 
 # ---------------------------------------------------------------------------
@@ -436,11 +485,12 @@ def test_render_packet_line_explains_context_window() -> None:
 
 
 def test_system_prompt_explains_neighbor_layout() -> None:
-    """The reasoner's system prompt tells the LLM that 'Attached neighbors'
+    """The reasoner's system prompt tells the LLM that neighbor images
     means the images that follow are CONTEXT — not the primary focus."""
     from focusparse.pipeline.reasoner import _SYSTEM_PROMPT
 
-    assert "Attached neighbors" in _SYSTEM_PROMPT
+    assert "Attached neighbor images" in _SYSTEM_PROMPT
+    assert "Attached text-only context" in _SYSTEM_PROMPT
     assert "primary crop" in _SYSTEM_PROMPT
     assert "context_window" in _SYSTEM_PROMPT
     assert "context" in _SYSTEM_PROMPT.lower()
