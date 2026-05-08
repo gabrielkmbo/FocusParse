@@ -10,6 +10,7 @@ OSS-VLM endpoints exposing an OpenAI-compatible API (useful post-FocusTrain).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import time
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from focusparse.eval.pricing import compute_usd
+from focusparse.models._timeouts import model_timeout_s
 from focusparse.models.base import ModelResponse
 
 
@@ -67,11 +69,12 @@ class OpenAIClient:
         input_messages.append({"role": "user", "content": user_content})
 
         t0 = time.perf_counter()
-        resp = await client.responses.create(
-            model=self.model,
-            input=input_messages,
-            max_output_tokens=max_tokens or self.max_completion_tokens,
-        )
+        async with asyncio.timeout(model_timeout_s()):
+            resp = await client.responses.create(
+                model=self.model,
+                input=input_messages,
+                max_output_tokens=max_tokens or self.max_completion_tokens,
+            )
         latency_ms = int((time.perf_counter() - t0) * 1000)
 
         text = getattr(resp, "output_text", None) or ""

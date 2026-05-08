@@ -36,6 +36,9 @@ Optional:
 - `LLAMA_CLOUD_API_KEY` — LlamaParse/LlamaExtract baseline row (Phase 5).
 - `FOCUSPARSE_LAYOUT_ENDPOINT_URL` — override the default parser-bench endpoint.
 - `FOCUSPARSE_TIER_*` — override tier assignment per role at runtime.
+- `FOCUSPARSE_MODEL_TIMEOUT_S` — per-provider model call wall-clock timeout
+  (default 180s). Keeps long evals from hanging indefinitely on a stuck API
+  request; timed-out examples are recorded as failures by the harness.
 
 ## Model tiers
 

@@ -10,12 +10,14 @@ mode in v1 — one predict call == one API round-trip.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from pathlib import Path
 from typing import Any
 
 from focusparse.eval.pricing import compute_usd
+from focusparse.models._timeouts import model_timeout_s
 from focusparse.models.base import ModelResponse
 
 
@@ -62,11 +64,12 @@ class GeminiClient:
             gen_config_kwargs["system_instruction"] = system
 
         t0 = time.perf_counter()
-        response = await client.aio.models.generate_content(
-            model=self.model,
-            contents=[types.Content(parts=parts, role="user")],
-            config=types.GenerateContentConfig(**gen_config_kwargs),
-        )
+        async with asyncio.timeout(model_timeout_s()):
+            response = await client.aio.models.generate_content(
+                model=self.model,
+                contents=[types.Content(parts=parts, role="user")],
+                config=types.GenerateContentConfig(**gen_config_kwargs),
+            )
         latency_ms = int((time.perf_counter() - t0) * 1000)
 
         text = response.text or ""

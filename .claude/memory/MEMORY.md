@@ -181,6 +181,16 @@ supports the mechanism claim that extra context/tool access alone does not fix
 unsupported evidence; disciplined packet construction and verification are the
 actual product lever.
 
+Eval reproducibility guardrail: while trying latest-branch
+`results/hf/sprint-2026-05-08/line-aware-run1/`, the run had to be interrupted
+twice because provider network/model calls stopped making progress (first after
+42 prediction files, then after 61). `OpenAIClient`, `AnthropicClient`, and
+`GeminiClient` now wrap each provider request in an `asyncio.timeout` bounded
+by `FOCUSPARSE_MODEL_TIMEOUT_S` (default **180s**, minimum **1s**), and
+`AGENTS.md` documents the env var. Timed-out examples can still be recorded as
+failures by the harness, but a stuck API request should no longer hang the
+whole headline run.
+
 ### 2026-05-07 — Path A replicate hold + evidence text pathway
 
 Path A was run twice at n=148 on HF revision

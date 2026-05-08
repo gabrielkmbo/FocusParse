@@ -6,6 +6,7 @@ under `response.usage`. No prompt caching in v1.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import time
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from focusparse.eval.pricing import compute_usd
+from focusparse.models._timeouts import model_timeout_s
 from focusparse.models.base import ModelResponse
 
 
@@ -60,7 +62,8 @@ class AnthropicClient:
             kwargs["system"] = system
 
         t0 = time.perf_counter()
-        resp = await client.messages.create(**kwargs)
+        async with asyncio.timeout(model_timeout_s()):
+            resp = await client.messages.create(**kwargs)
         latency_ms = int((time.perf_counter() - t0) * 1000)
 
         text = ""
