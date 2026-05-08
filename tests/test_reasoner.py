@@ -296,6 +296,17 @@ def test_render_packet_line_multi_scale_packet() -> None:
     assert "context [0.000, 0.000, 1.000, 1.000]" in line
 
 
+def test_render_packet_line_names_zoomed_scale() -> None:
+    p = _packet(
+        multi_scale=[
+            CropRef(ref="/a.png", bbox_norm=(0.1, 0.2, 0.5, 0.6), scale="tight"),
+            CropRef(ref="/b.png", bbox_norm=(0.1, 0.2, 0.5, 0.6), scale="zoomed"),
+        ]
+    )
+    line = _render_packet_line(p)
+    assert "zoomed [0.100, 0.200, 0.500, 0.600]" in line
+
+
 def test_render_packet_line_names_chart_context_scale() -> None:
     """chart_context is a distinct wider crop, not a generic neighbor."""
     p = _packet(
@@ -493,4 +504,5 @@ def test_system_prompt_explains_neighbor_layout() -> None:
     assert "Attached text-only context" in _SYSTEM_PROMPT
     assert "primary crop" in _SYSTEM_PROMPT
     assert "context_window" in _SYSTEM_PROMPT
+    assert "zoomed" in _SYSTEM_PROMPT
     assert "context" in _SYSTEM_PROMPT.lower()

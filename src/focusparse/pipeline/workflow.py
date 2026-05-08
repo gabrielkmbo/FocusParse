@@ -75,6 +75,17 @@ _DEFAULT_ADJACENCY_PAD = 0.08
 _EXPAND_RETRY_FACTOR = 1.5  # multiplied each retry → wider neighbor net
 _MAX_ADJACENCY_PAD = 0.30  # cap so the pad stays meaningful
 _RETRY_SELECTION_CONFIDENCE_MARGIN = 0.15
+_VISUAL_READABILITY_RE = re.compile(
+    r"\b("
+    r"blur(?:ry|red)?|cannot\s+read|can't\s+read|garbled|illegible|low[- ]resolution|"
+    r"ocr[- ]?(?:damaged|garbled|poor)|pixelated|too\s+small|unreadable"
+    r")\b",
+    re.IGNORECASE,
+)
+_VISUAL_EVIDENCE_RE = re.compile(
+    r"\b(axis|chart|crop|figure|image|label|ocr|plot|visual)\b",
+    re.IGNORECASE,
+)
 _ANSWER_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _ANSWER_SELECTION_STOPWORDS = frozenset(
     {
@@ -527,6 +538,10 @@ class FocusWorkflow:
                     valid_packet_ids={packet.packet_id for packet in evidence.packets},
                 ) or list(answer_event.citations)
                 retry_plan = _plan_with_extra_evidence_types(plan, verifier_missing_context)
+                retry_visual_zoom = _verifier_requests_visual_readability_retry(
+                    verdict,
+                    target_packet_ids=target_packet_ids,
+                )
                 evidence = await self._run_expand(
                     evidence,
                     regions=regions,
@@ -540,6 +555,7 @@ class FocusWorkflow:
                     verifier_reason=verdict.reason,
                     verifier_missing_context=verifier_missing_context,
                     target_packet_ids=target_packet_ids,
+                    retry_visual_zoom=retry_visual_zoom,
                 )
                 # The retry answer should know what the verifier thought was
                 # missing. When there are no cited/target packets, the explicit
@@ -909,6 +925,7 @@ class FocusWorkflow:
         verifier_reason: str | None = None,
         verifier_missing_context: list[str] | None = None,
         target_packet_ids: list[str] | None = None,
+        retry_visual_zoom: bool = False,
     ) -> EvidenceEvent:
         # Tool-set ablation: when running with the +2-tools (minimal) belt
         # we skip expand_context entirely. The trace records a passthrough
@@ -951,19 +968,29 @@ class FocusWorkflow:
             plan=plan,
             verifier_reason=verifier_reason,
             target_packet_ids=target_packet_ids,
+            retry_visual_zoom=retry_visual_zoom,
         )
         before_neighbor_counts = {p.packet_id: len(p.linked_crop_refs) for p in evidence.packets}
+        before_zoom_counts = {
+            p.packet_id: _packet_scale_count(p, "zoomed") for p in evidence.packets
+        }
         n_with_neighbors = sum(1 for p in expanded.packets if p.linked_crop_refs)
         n_neighbors = sum(len(p.linked_crop_refs) for p in expanded.packets)
         n_neighbors_added = sum(
             max(0, len(p.linked_crop_refs) - before_neighbor_counts.get(p.packet_id, 0))
             for p in expanded.packets
         )
+        n_zoomed_added = sum(
+            max(0, _packet_scale_count(p, "zoomed") - before_zoom_counts.get(p.packet_id, 0))
+            for p in expanded.packets
+        )
         n_packets_with_new_neighbors = sum(
             len(p.linked_crop_refs) > before_neighbor_counts.get(p.packet_id, 0)
             for p in expanded.packets
         )
-        expand_tier = "deterministic" if n_with_neighbors > 0 else "skeleton"
+        expand_tier = (
+            "deterministic" if (n_with_neighbors > 0 or n_zoomed_added > 0) else "skeleton"
+        )
         recorder.record(
             TrajectoryStep(
                 step_index=step_counter.next(),
@@ -975,12 +1002,14 @@ class FocusWorkflow:
                     "n_with_neighbors": n_with_neighbors,
                     "n_neighbors_attached": n_neighbors,
                     "n_neighbors_added": n_neighbors_added,
+                    "n_zoomed_added": n_zoomed_added,
                     "n_packets_with_new_neighbors": n_packets_with_new_neighbors,
                     "adjacency_pad": adjacency_pad,
                     "retry_attempt": retry_attempt,
                     "verifier_reason": verifier_reason,
                     "verifier_missing_context": verifier_missing_context or [],
                     "target_packet_ids": target_packet_ids or [],
+                    "visual_readability_retry": retry_visual_zoom,
                 },
             )
         )
@@ -995,11 +1024,13 @@ class FocusWorkflow:
                 "n_with_neighbors": n_with_neighbors,
                 "n_neighbors_attached": n_neighbors,
                 "n_neighbors_added": n_neighbors_added,
+                "n_zoomed_added": n_zoomed_added,
                 "n_packets_with_new_neighbors": n_packets_with_new_neighbors,
                 "adjacency_pad": adjacency_pad,
                 "verifier_reason": verifier_reason,
                 "verifier_missing_context": verifier_missing_context or [],
                 "target_packet_ids": target_packet_ids or [],
+                "visual_readability_retry": retry_visual_zoom,
                 "packets": [_packet_to_debug(p) for p in expanded.packets],
             },
         )
@@ -1132,6 +1163,20 @@ def _verifier_missing_context(verdict: VerdictEvent) -> list[str]:
     return out
 
 
+def _verifier_requests_visual_readability_retry(
+    verdict: VerdictEvent,
+    *,
+    target_packet_ids: list[str],
+) -> bool:
+    """True when verifier wants the same visual evidence made more readable."""
+    if verdict.supported or verdict.next_action != "expand_context":
+        return False
+    if not target_packet_ids:
+        return False
+    reason = verdict.reason or ""
+    return bool(_VISUAL_READABILITY_RE.search(reason) and _VISUAL_EVIDENCE_RE.search(reason))
+
+
 def _verifier_target_packet_ids(
     verdict: VerdictEvent,
     *,
@@ -1158,6 +1203,10 @@ def _verifier_target_packet_ids(
         seen.add(value)
         out.append(value)
     return out
+
+
+def _packet_scale_count(packet: EvidencePacket, scale: str) -> int:
+    return sum(1 for crop in packet.multi_scale_crops if crop.scale == scale)
 
 
 def _packet_id_mentions(text: str | None) -> list[str]:

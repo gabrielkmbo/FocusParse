@@ -34,6 +34,7 @@ from focusparse.pipeline.workflow import (
     _infer_doc_id,
     _is_better_unsupported_answer,
     _page_number_from_filename,
+    _verifier_requests_visual_readability_retry,
     _verifier_target_packet_ids,
 )
 
@@ -140,6 +141,32 @@ def test_verifier_target_packet_ids_normalizes_diagnostics_and_prose():
         verdict,
         valid_packet_ids={"pkt_002", "pkt_003", "pkt_004"},
     ) == ["pkt_003", "pkt_002", "pkt_004"]
+
+
+def test_verifier_visual_readability_retry_requires_precise_signal():
+    from focusparse.pipeline.events import VerdictEvent
+
+    verdict = VerdictEvent(
+        supported=False,
+        reason="pkt_000 crop is blurry and the axis label is unreadable",
+        next_action="expand_context",
+        confidence=0.6,
+    )
+    assert _verifier_requests_visual_readability_retry(verdict, target_packet_ids=["pkt_000"])
+
+    missing_neighbor = verdict.model_copy(
+        update={
+            "reason": "pkt_000 needs the legend",
+            "diagnostics": {"missing_context": ["legend"]},
+        }
+    )
+    assert not _verifier_requests_visual_readability_retry(
+        missing_neighbor,
+        target_packet_ids=["pkt_000"],
+    )
+
+    vague = verdict.model_copy(update={"reason": "pkt_000 needs the legend"})
+    assert not _verifier_requests_visual_readability_retry(vague, target_packet_ids=["pkt_000"])
 
 
 def test_retry_answer_selector_allows_question_specific_fix_within_margin():
@@ -849,6 +876,49 @@ async def test_loop_expand_context_retries_once_by_default(
     assert stage_counts["expand_context"] == 2
     assert stage_counts["answer"] == 2
     assert stage_counts["verify"] == 2
+
+
+async def test_loop_expand_context_visual_readability_retry_zooms_target_crop(
+    tmp_path, monkeypatch, parser_bench_submodule_present
+):
+    """Unreadable visual evidence gets a zoom retry, not broader neighbors."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    async def _fake_zoom_crop(*, crop_ref, cache_dir, packet_id):
+        return str(tmp_path / f"{packet_id}_zoomed.png")
+
+    monkeypatch.setattr("focusparse.pipeline.expander._zoom_crop", _fake_zoom_crop)
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.4}',
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="expand_context",
+                reason="pkt_000 crop is blurry and the axis label is unreadable",
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    expand_steps = [s for s in result.trace.steps if s.stage == "expand_context"]
+    assert expand_steps[1].args["visual_readability_retry"] is True
+    assert expand_steps[1].args["n_zoomed_added"] == 1
+    assert expand_steps[1].args["n_neighbors_added"] == 0
+    assert reasoner.calls[1]["n_images"] > reasoner.calls[0]["n_images"]
 
 
 async def test_loop_exhausted_keeps_best_unsupported_answer(

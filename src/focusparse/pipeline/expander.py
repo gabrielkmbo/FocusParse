@@ -30,14 +30,14 @@ import logging
 import re
 from pathlib import Path
 
-from focusparse.evidence.packet import EvidencePacket, PacketProvenance
+from focusparse.evidence.packet import CropRef, EvidencePacket, PacketProvenance
 from focusparse.pipeline.events import EvidenceEvent, PlanEvent, RegionCandidate, RegionsEvent
 from focusparse.pipeline.evidence_graph import (
     extract_figure_class,
     find_graph_neighbors,
     has_graph_entry,
 )
-from focusparse.pipeline.inspector import _crop_page_image, _ocr_existing_crop
+from focusparse.pipeline.inspector import _crop_page_image, _ocr_existing_crop, _zoom_crop
 from focusparse.tools.get_text_layer import GetTextLayerInput, get_text_layer
 from focusparse.tools.inspect_region import InspectRegionInput, inspect_region
 
@@ -144,6 +144,7 @@ _INITIAL_CAP_EXEMPT_QUESTION_FAMILIES = frozenset(
 # DPI — enough to catch a caption a few text lines away.
 _DEFAULT_ADJACENCY_PAD = 0.08
 _RETRY_CONTEXT_WINDOW_PAD = 0.24
+_MAX_VISUAL_ZOOM_RETRY_PACKETS = 2
 _MAX_LINKED_CONTEXT_TEXT_CHARS = 240
 _FIGURE_REF_RE = re.compile(r"\b(?:fig(?:ure)?\.?)\s*(?P<num>\d+[A-Za-z]?)\b", re.IGNORECASE)
 _CONTEXT_LINE_RE = re.compile(r"^Context\s+\[[^\]]+\]:\s*(?P<text>.*)$", re.IGNORECASE)
@@ -187,6 +188,7 @@ async def expand_context(
     verifier_reason: str | None = None,
     target_packet_ids: list[str] | None = None,
     relevance_threshold: float = _DEFAULT_NEIGHBOR_RELEVANCE_THRESHOLD,
+    retry_visual_zoom: bool = False,
 ) -> EvidenceEvent:
     """Attach annotation neighbors to each packet, or pass through unchanged.
 
@@ -234,6 +236,13 @@ async def expand_context(
     """
     if regions is None or (pdf_path is None and not images_by_page):
         return evidence
+
+    if retry_visual_zoom:
+        return await _expand_retry_visual_zoom(
+            evidence,
+            crop_cache_dir=crop_cache_dir,
+            target_packet_ids=target_packet_ids,
+        )
 
     # Resolve which neighbor region_types the planner permits. Empty set
     # means "no planner hint" → fall back to the conservative budget.
@@ -596,6 +605,77 @@ def _should_attach_retry_context_window(
         return False
     region_type = (packet.region_type or "").strip().lower()
     return not region_type or region_type in _CONTEXT_WINDOW_REGION_TYPES
+
+
+async def _expand_retry_visual_zoom(
+    evidence: EvidenceEvent,
+    *,
+    crop_cache_dir: Path | None,
+    target_packet_ids: list[str] | None,
+) -> EvidenceEvent:
+    """Add a zoomed copy of cited visual crops without adding new context.
+
+    This path is intentionally narrower than normal `expand_context`: it only
+    sharpens already-selected evidence after a verifier explicitly complained
+    about readability. No neighbor crops, context windows, or native text are
+    added, keeping the retry's action space small.
+    """
+    target_set = {pid for pid in (target_packet_ids or []) if pid}
+    if not target_set:
+        return evidence
+
+    zoomed = 0
+    new_packets: list[EvidencePacket] = []
+    for packet in evidence.packets:
+        if packet.packet_id not in target_set or zoomed >= _MAX_VISUAL_ZOOM_RETRY_PACKETS:
+            new_packets.append(packet)
+            continue
+        if _packet_has_scale(packet, "zoomed"):
+            new_packets.append(packet)
+            continue
+        crop_ref, bbox = _tight_crop_for_zoom(packet)
+        if not crop_ref:
+            new_packets.append(packet)
+            continue
+        zoom_ref = await _zoom_crop(
+            crop_ref=crop_ref,
+            cache_dir=crop_cache_dir,
+            packet_id=packet.packet_id,
+        )
+        if not zoom_ref:
+            new_packets.append(packet)
+            continue
+        multi_scale = list(packet.multi_scale_crops)
+        if not multi_scale:
+            multi_scale.append(CropRef(ref=crop_ref, bbox_norm=bbox, scale="tight"))
+        multi_scale.append(CropRef(ref=zoom_ref, bbox_norm=bbox, scale="zoomed"))
+        new_packets.append(
+            packet.model_copy(
+                update={
+                    "multi_scale_crops": multi_scale,
+                    "provenance": _updated_provenance(
+                        packet.provenance,
+                        0,
+                        tag="expand_context:visual_zoom1",
+                    ),
+                }
+            )
+        )
+        zoomed += 1
+    return EvidenceEvent(packets=new_packets)
+
+
+def _tight_crop_for_zoom(
+    packet: EvidencePacket,
+) -> tuple[str | None, tuple[float, float, float, float]]:
+    for crop in packet.multi_scale_crops:
+        if crop.scale == "tight" and crop.ref:
+            return crop.ref, crop.bbox_norm
+    return packet.local_crop_ref or None, packet.bbox_norm
+
+
+def _packet_has_scale(packet: EvidencePacket, scale: str) -> bool:
+    return any(c.scale == scale for c in packet.multi_scale_crops)
 
 
 def _resolve_permitted_neighbor_types(
@@ -1022,14 +1102,19 @@ def _neighbor_text_mismatches_packet_figure(
 # ---------------------------------------------------------------------------
 
 
-def _updated_provenance(prev: PacketProvenance, n_neighbors: int) -> PacketProvenance:
+def _updated_provenance(
+    prev: PacketProvenance,
+    n_neighbors: int,
+    *,
+    tag: str | None = None,
+) -> PacketProvenance:
     """Stamp that expand_context contributed N neighbors to this packet.
 
     We keep the original `tool` + `mode` (the inspector owns those) and
     encode the expansion as a suffix in `args_hash` so trace readers can
     tell whether a packet was expanded without a dedicated field.
     """
-    expand_tag = f"expand_context:n{n_neighbors}"
+    expand_tag = tag or f"expand_context:n{n_neighbors}"
     merged = (prev.args_hash + "|" + expand_tag) if prev.args_hash else expand_tag
     return PacketProvenance(
         tool=prev.tool,

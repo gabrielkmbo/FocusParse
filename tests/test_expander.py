@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from focusparse.evidence.packet import EvidencePacket, PacketProvenance
+from focusparse.evidence.packet import CropRef, EvidencePacket, PacketProvenance
 from focusparse.pipeline.events import EvidenceEvent, RegionCandidate, RegionsEvent
 from focusparse.pipeline.expander import _neighbor_types_from_verifier_reason, expand_context
 
@@ -1519,3 +1519,101 @@ async def test_retry_expand_context_window_does_not_consume_neighbor_cap(tmp_pat
         max_neighbors_per_packet=2,
     )
     assert out.packets[0].linked_neighbor_types == ["context_window", "table", "text"]
+
+
+async def test_retry_visual_zoom_adds_zoomed_crop_for_target_packet(tmp_path, monkeypatch):
+    calls: list[dict] = []
+
+    async def _fake_zoom_crop(*, crop_ref, cache_dir, packet_id):
+        calls.append({"crop_ref": crop_ref, "cache_dir": cache_dir, "packet_id": packet_id})
+        return "/crops/p0_zoomed.png"
+
+    monkeypatch.setattr("focusparse.pipeline.expander._zoom_crop", _fake_zoom_crop)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                packet_id="p0",
+                page=7,
+                bbox_norm=(0.20, 0.30, 0.40, 0.50),
+                region_type="Picture",
+            ),
+            _packet(
+                packet_id="p1",
+                page=8,
+                bbox_norm=(0.50, 0.30, 0.70, 0.50),
+                region_type="Picture",
+            ),
+        ]
+    )
+
+    out = await expand_context(
+        ev,
+        regions=RegionsEvent(candidates=[]),
+        images_by_page={7: tmp_path / "unused.png", 8: tmp_path / "unused2.png"},
+        crop_cache_dir=tmp_path / "crops",
+        target_packet_ids=["p0"],
+        retry_visual_zoom=True,
+    )
+
+    assert calls == [
+        {
+            "crop_ref": "/tmp/p7_crop.png",
+            "cache_dir": tmp_path / "crops",
+            "packet_id": "p0",
+        }
+    ]
+    assert [crop.scale for crop in out.packets[0].multi_scale_crops] == ["tight", "zoomed"]
+    assert out.packets[0].multi_scale_crops[1].ref == "/crops/p0_zoomed.png"
+    assert out.packets[0].linked_crop_refs == []
+    assert "expand_context:visual_zoom1" in out.packets[0].provenance.args_hash
+    assert out.packets[1].multi_scale_crops == []
+
+
+async def test_retry_visual_zoom_uses_existing_tight_scale_without_neighbors(tmp_path, monkeypatch):
+    async def _fake_zoom_crop(*, crop_ref, cache_dir, packet_id):
+        return "/crops/p0_zoomed.png"
+
+    async def _fail_inspect_region(*args, **kwargs):
+        raise AssertionError("visual zoom retry should not crop neighbors")
+
+    async def _fail_get_text_layer(*args, **kwargs):
+        raise AssertionError("visual zoom retry should not extract text")
+
+    monkeypatch.setattr("focusparse.pipeline.expander._zoom_crop", _fake_zoom_crop)
+    monkeypatch.setattr("focusparse.pipeline.expander.inspect_region", _fail_inspect_region)
+    monkeypatch.setattr("focusparse.pipeline.expander.get_text_layer", _fail_get_text_layer)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                packet_id="p0",
+                page=1,
+                bbox_norm=(0.20, 0.30, 0.40, 0.50),
+                region_type="Picture",
+            ).model_copy(
+                update={
+                    "multi_scale_crops": [
+                        CropRef(
+                            ref="/crops/p0_tight.png",
+                            bbox_norm=(0.20, 0.30, 0.40, 0.50),
+                            scale="tight",
+                        )
+                    ],
+                    "linked_crop_refs": ["/crops/existing_caption.png"],
+                    "linked_neighbor_types": ["caption"],
+                }
+            ),
+        ]
+    )
+
+    out = await expand_context(
+        ev,
+        regions=RegionsEvent(candidates=[]),
+        images_by_page={1: tmp_path / "unused.png"},
+        target_packet_ids=["p0"],
+        retry_visual_zoom=True,
+    )
+
+    packet = out.packets[0]
+    assert [crop.scale for crop in packet.multi_scale_crops] == ["tight", "zoomed"]
+    assert packet.multi_scale_crops[0].ref == "/crops/p0_tight.png"
+    assert packet.linked_crop_refs == ["/crops/existing_caption.png"]
