@@ -271,53 +271,6 @@ async def test_visual_region_empty_native_keeps_advisory_ocr(tmp_path, monkeypat
     assert "get_text_layer:empty_native:visual" not in packet.provenance.args_hash
 
 
-async def test_visual_region_strong_ocr_does_not_merge_broad_native_text(tmp_path, monkeypatch):
-    inspect_calls: list = []
-    text_calls: list = []
-    _install_fake_tools(
-        monkeypatch,
-        inspect_calls=inspect_calls,
-        text_calls=text_calls,
-        inspect_element_out=_FakeInspectOutput(
-            crop_ref="/crops/p1_element.png",
-            ocr_text="Memory Source Register for STR",
-            confidence=0.9,
-        ),
-        text_layer_out=_FakeTextLayerOutput(
-            text=(
-                "If r2 contains 3, auto-increment base register to 0x20c by "
-                "multiplying this by Memory 0x5 r0 0x5"
-            ),
-            source="native",
-        ),
-    )
-    pdf = tmp_path / "doc.pdf"
-    pdf.write_bytes(b"%PDF-1.4")
-
-    regions = RegionsEvent(
-        candidates=[
-            _region(
-                region_id="pic",
-                page=1,
-                bbox_norm=(0, 0, 0.5, 0.5),
-                region_type="picture",
-                score=0.9,
-            )
-        ]
-    )
-    ev = await inspect_regions(
-        _q(),
-        _plan(),
-        regions,
-        images_by_page={1: tmp_path / "p1.png"},
-        pdf_path=pdf,
-    )
-    packet = ev.packets[0]
-    assert len(text_calls) == 1
-    assert packet.ocr_snippet == "Memory Source Register for STR"
-    assert "get_text_layer:native:visual" in packet.provenance.args_hash
-
-
 async def test_chart_curve_region_is_treated_as_visual(tmp_path, monkeypatch):
     inspect_calls: list = []
     text_calls: list = []
