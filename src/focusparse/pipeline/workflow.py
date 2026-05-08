@@ -83,7 +83,7 @@ _VISUAL_READABILITY_RE = re.compile(
     re.IGNORECASE,
 )
 _VISUAL_EVIDENCE_RE = re.compile(
-    r"\b(axis|chart|crop|diagram|figure|image|label|ocr|plot|visual)\b",
+    r"\b(axis|chart|crop|figure|image|label|ocr|plot|visual)\b",
     re.IGNORECASE,
 )
 _ANSWER_TOKEN_RE = re.compile(r"[a-z0-9]+")

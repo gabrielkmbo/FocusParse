@@ -155,7 +155,7 @@ def test_verifier_visual_readability_retry_requires_precise_signal():
     assert _verifier_requests_visual_readability_retry(verdict, target_packet_ids=["pkt_000"])
 
     diagram = verdict.model_copy(update={"reason": "pkt_000 diagram text is garbled/unreadable"})
-    assert _verifier_requests_visual_readability_retry(diagram, target_packet_ids=["pkt_000"])
+    assert not _verifier_requests_visual_readability_retry(diagram, target_packet_ids=["pkt_000"])
 
     missing_neighbor = verdict.model_copy(
         update={
