@@ -238,11 +238,13 @@ async def expand_context(
         return evidence
 
     if retry_visual_zoom:
-        return await _expand_retry_visual_zoom(
+        zoomed = await _expand_retry_visual_zoom(
             evidence,
             crop_cache_dir=crop_cache_dir,
             target_packet_ids=target_packet_ids,
         )
+        if _zoom_added(evidence, zoomed):
+            return zoomed
 
     # Resolve which neighbor region_types the planner permits. Empty set
     # means "no planner hint" → fall back to the conservative budget.
@@ -676,6 +678,18 @@ def _tight_crop_for_zoom(
 
 def _packet_has_scale(packet: EvidencePacket, scale: str) -> bool:
     return any(c.scale == scale for c in packet.multi_scale_crops)
+
+
+def _zoom_added(before: EvidenceEvent, after: EvidenceEvent) -> bool:
+    before_counts = {p.packet_id: _packet_scale_count(p, "zoomed") for p in before.packets}
+    return any(
+        _packet_scale_count(packet, "zoomed") > before_counts.get(packet.packet_id, 0)
+        for packet in after.packets
+    )
+
+
+def _packet_scale_count(packet: EvidencePacket, scale: str) -> int:
+    return sum(1 for crop in packet.multi_scale_crops if crop.scale == scale)
 
 
 def _resolve_permitted_neighbor_types(

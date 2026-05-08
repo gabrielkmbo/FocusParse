@@ -1569,6 +1569,54 @@ async def test_retry_visual_zoom_adds_zoomed_crop_for_target_packet(tmp_path, mo
     assert out.packets[1].multi_scale_crops == []
 
 
+async def test_retry_visual_zoom_falls_back_to_context_when_zoom_fails(monkeypatch):
+    zoom_calls: list[dict] = []
+    inspect_calls: list[dict] = []
+
+    async def _fake_zoom_crop(*, crop_ref, cache_dir, packet_id):
+        zoom_calls.append({"crop_ref": crop_ref, "cache_dir": cache_dir, "packet_id": packet_id})
+        return None
+
+    monkeypatch.setattr("focusparse.pipeline.expander._zoom_crop", _fake_zoom_crop)
+    _install_fake_inspect(monkeypatch, calls=inspect_calls)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                packet_id="p0",
+                page=7,
+                bbox_norm=(0.20, 0.30, 0.40, 0.50),
+                region_type="Picture",
+            ),
+            _packet(
+                packet_id="p1",
+                page=7,
+                bbox_norm=(0.60, 0.30, 0.80, 0.50),
+                region_type="Picture",
+            ),
+        ]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=7, bbox_norm=(0.22, 0.51, 0.38, 0.56), region_type="caption"),
+        ]
+    )
+
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        verifier_reason="p0 crop is unreadable and needs the caption",
+        target_packet_ids=["p0"],
+        retry_visual_zoom=True,
+    )
+
+    assert zoom_calls == [{"crop_ref": "/tmp/p7_crop.png", "cache_dir": None, "packet_id": "p0"}]
+    assert out.packets[0].multi_scale_crops == []
+    assert out.packets[0].linked_neighbor_types == ["context_window", "caption"]
+    assert out.packets[1].linked_neighbor_types == []
+    assert inspect_calls
+
+
 async def test_retry_visual_zoom_uses_existing_tight_scale_without_neighbors(tmp_path, monkeypatch):
     async def _fake_zoom_crop(*, crop_ref, cache_dir, packet_id):
         return "/crops/p0_zoomed.png"
