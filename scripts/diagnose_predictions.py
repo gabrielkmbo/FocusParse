@@ -69,6 +69,7 @@ class SpecDiagnosis:
     incorrect_verifier_next_actions: Counter[str] = field(default_factory=Counter)
     expand_context_called_rate: float = 0.0
     mean_neighbors_attached: float = 0.0
+    mean_neighbors_added: float = 0.0
     tool_sequence_top: list[tuple[str, int]] = field(default_factory=list)
     total_evidence_packets: int = 0
     packet_text_coverage_rate: float = 0.0
@@ -114,6 +115,7 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
     verifier_unsupported_flags: list[bool] = []
     expand_context_called_flags: list[bool] = []
     neighbors_attached_values: list[int] = []
+    neighbors_added_values: list[int] = []
     tool_sequence_counter: Counter[str] = Counter()
     packet_has_text_flags: list[bool] = []
     packet_has_context_flags: list[bool] = []
@@ -157,6 +159,7 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
         verifier_next_action: str | None = None
         expand_context_called = False
         neighbors_attached = 0
+        neighbors_added = 0
         evidence_snapshot = _debug_evidence_snapshot(record) or _evidence_snapshot(record)
         packet_by_id = {
             str(pkt.get("packet_id")): pkt
@@ -203,6 +206,8 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
                 expand_context_called = True
                 with suppress(TypeError, ValueError):
                     neighbors_attached += int(step_args.get("n_neighbors_attached") or 0)
+                with suppress(TypeError, ValueError):
+                    neighbors_added += int(step_args.get("n_neighbors_added") or 0)
 
         diag.n_tool_calls += per_example_tool_calls
         tool_call_counts.append(per_example_tool_calls)
@@ -210,6 +215,7 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
         diag.iterations_used_hist[per_example_iterations] += 1
         expand_context_called_flags.append(expand_context_called)
         neighbors_attached_values.append(neighbors_attached)
+        neighbors_added_values.append(neighbors_added)
         if verifier_supported is not None:
             verifier_unsupported_flags.append(verifier_supported is False)
         if verifier_next_action:
@@ -301,6 +307,9 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
     diag.mean_neighbors_attached = (
         statistics.mean(neighbors_attached_values) if neighbors_attached_values else 0.0
     )
+    diag.mean_neighbors_added = (
+        statistics.mean(neighbors_added_values) if neighbors_added_values else 0.0
+    )
     diag.tool_sequence_top = tool_sequence_counter.most_common(5)
     diag.packet_text_coverage_rate = (
         statistics.mean(packet_has_text_flags) if packet_has_text_flags else 0.0
@@ -365,12 +374,12 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
     lines.append(
         "| Spec | n | accuracy | lazy_rate | empty_cite_rate "
         "| premature_final | verifier_unsupported | expand_called "
-        "| mean_neighbors | tool_err_rate | mean_tool_calls | mean_usd "
+        "| mean_neighbors | mean_new_neighbors | tool_err_rate | mean_tool_calls | mean_usd "
         "| retry_rate | evidence_retry_rate | top_loop | top_failure "
         "| top_verifier_action | top_wrong_action |"
     )
     lines.append(
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
     )
     for d in diags:
         tool_err_rate = d.n_tool_errors / max(d.n_steps, 1)
@@ -387,7 +396,7 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
             f"| {d.lazy_answer_rate:.1%} | {d.empty_citation_rate:.1%} "
             f"| {prem} | {verifier_unsupported} "
             f"| {d.expand_context_called_rate:.1%} | {d.mean_neighbors_attached:.2f} "
-            f"| {tool_err_rate:.1%} | {d.mean_tool_calls:.2f} "
+            f"| {d.mean_neighbors_added:.2f} | {tool_err_rate:.1%} | {d.mean_tool_calls:.2f} "
             f"| ${d.mean_usd:.4f} | {d.retry_used_rate:.1%} "
             f"| {d.evidence_retry_used_rate:.1%} | {top_loop} | {top_failure} "
             f"| {top_verifier_action} | {top_wrong_action} |"
@@ -491,7 +500,8 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
         )
         lines.append(
             f"- expand_context called: **{d.expand_context_called_rate:.1%}**, "
-            f"mean neighbors attached: **{d.mean_neighbors_attached:.2f}**"
+            f"mean neighbors attached: **{d.mean_neighbors_attached:.2f}**, "
+            f"mean new neighbors: **{d.mean_neighbors_added:.2f}**"
         )
         if d.failure_reasons:
             lines.append("- incorrect-example failure reasons:")
@@ -558,6 +568,7 @@ def to_json(diags: list[SpecDiagnosis]) -> dict[str, Any]:
                 "incorrect_verifier_next_actions": dict(d.incorrect_verifier_next_actions),
                 "expand_context_called_rate": d.expand_context_called_rate,
                 "mean_neighbors_attached": d.mean_neighbors_attached,
+                "mean_neighbors_added": d.mean_neighbors_added,
                 "tool_sequence_top": d.tool_sequence_top,
                 "total_evidence_packets": d.total_evidence_packets,
                 "packet_text_coverage_rate": d.packet_text_coverage_rate,

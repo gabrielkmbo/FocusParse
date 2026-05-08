@@ -424,7 +424,7 @@ def test_focus_stage_diagnostics_capture_verifier_and_expand_context(tmp_path: P
                 "stage": "expand_context",
                 "action": "deterministic",
                 "tool": None,
-                "args": {"n_neighbors_attached": 3},
+                "args": {"n_neighbors_attached": 3, "n_neighbors_added": 2},
             },
             {
                 "stage": "verify",
@@ -462,6 +462,7 @@ def test_focus_stage_diagnostics_capture_verifier_and_expand_context(tmp_path: P
     assert diag.incorrect_verifier_next_actions == {"expand_context": 1}
     assert diag.expand_context_called_rate == 0.5
     assert diag.mean_neighbors_attached == 1.5
+    assert diag.mean_neighbors_added == 1.0
     assert diag.tool_sequence_top == [("deterministic_inspector", 2)]
 
 
@@ -519,6 +520,7 @@ def test_render_markdown_smoke(tmp_path: Path) -> None:
     assert "Predictions diagnostics" in md
     assert "focusparse_simple" in md
     assert "expand_called" in md
+    assert "mean_new_neighbors" in md
 
 
 def test_verifier_next_actions_render_and_export(tmp_path: Path) -> None:
