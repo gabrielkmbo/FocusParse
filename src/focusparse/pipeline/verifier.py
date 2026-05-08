@@ -86,6 +86,7 @@ _SYSTEM_PROMPT = (
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _MAX_VERIFIER_PACKET_TEXT_CHARS = 500
+_MAX_VERIFIER_CITED_PACKET_TEXT_CHARS = 900
 _VERIFIER_FOCUS_STOPWORDS = frozenset(
     {
         "a",
@@ -192,6 +193,7 @@ def _build_verifier_prompt(
             p,
             cited=p.packet_id in cited_packet_ids,
             question_text=focus_text,
+            answer_text=answer.answer,
         )
         for p in evidence.packets
     ]
@@ -218,6 +220,7 @@ def _summarize_packet(
     *,
     cited: bool = False,
     question_text: str | None = None,
+    answer_text: str | None = None,
 ) -> str:
     """One-line packet summary for the verifier prompt.
 
@@ -225,10 +228,15 @@ def _summarize_packet(
     prompt cost without helping binary support decisions.
     """
     snippet = packet.text_layer_snippet or packet.ocr_snippet or ""
-    snippet = _question_focused_text(snippet, question_text=question_text)
+    snippet = _focused_packet_text(
+        snippet,
+        question_text=question_text,
+        answer_text=answer_text if cited else None,
+    )
     snippet = snippet.strip().replace("\n", " ")
-    if len(snippet) > _MAX_VERIFIER_PACKET_TEXT_CHARS:
-        snippet = snippet[: _MAX_VERIFIER_PACKET_TEXT_CHARS - 3] + "..."
+    max_chars = _MAX_VERIFIER_CITED_PACKET_TEXT_CHARS if cited else _MAX_VERIFIER_PACKET_TEXT_CHARS
+    if len(snippet) > max_chars:
+        snippet = snippet[: max_chars - 3] + "..."
     region = packet.region_type or "region"
     scale_part = ""
     if packet.multi_scale_crops:
@@ -238,6 +246,53 @@ def _summarize_packet(
         f"- [{packet.packet_id}] page={packet.page} type={region} "
         f"bbox={_fmt_bbox(packet.bbox_norm)}{scale_part}{cited_part} text={snippet!r}"
     )
+
+
+def _focused_packet_text(
+    text: str,
+    *,
+    question_text: str | None = None,
+    answer_text: str | None = None,
+) -> str:
+    """Put exact answer rows before broader question-matching context."""
+    answer_focused = _answer_focused_text(text, answer_text=answer_text)
+    question_focused = _question_focused_text(text, question_text=question_text)
+    if not answer_focused:
+        return question_focused
+    if not question_focused or question_focused == text or question_focused in answer_focused:
+        return answer_focused
+    return f"{answer_focused} / {question_focused}"
+
+
+def _answer_focused_text(text: str, *, answer_text: str | None = None) -> str:
+    """Surface rows that literally contain the proposed answer.
+
+    Question overlap alone can prefer nearby distractor rows (for example a
+    linked context-ID row) over the exact row cited by the answer. The verifier
+    needs the answer-bearing row first so support checks are about the proposed
+    answer, not just the most lexical-overlap-heavy row.
+    """
+    if not text or not answer_text:
+        return ""
+    answer = answer_text.strip()
+    if not answer or answer.lower() == "unanswerable":
+        return ""
+    answer_tokens = _focus_tokens(answer)
+    if not answer_tokens:
+        return ""
+
+    normalized_answer = _normalize_match_text(answer)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    selected_indexes: set[int] = set()
+    for idx, line in enumerate(lines):
+        line_tokens = _focus_tokens(line)
+        if normalized_answer in _normalize_match_text(line) or answer_tokens <= line_tokens:
+            selected_indexes.update({idx - 1, idx, idx + 1, idx + 2})
+        if len(selected_indexes) >= 12:
+            break
+    if not selected_indexes:
+        return ""
+    return " / ".join(lines[idx] for idx in sorted(selected_indexes) if 0 <= idx < len(lines))
 
 
 def _question_focused_text(text: str, *, question_text: str | None = None) -> str:
@@ -273,6 +328,10 @@ def _question_focused_text(text: str, *, question_text: str | None = None) -> st
 def _focus_tokens(text: str) -> set[str]:
     tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
     return {tok for tok in tokens if len(tok) > 1 and tok not in _VERIFIER_FOCUS_STOPWORDS}
+
+
+def _normalize_match_text(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
 
 
 def _fmt_scales(crops: list) -> str:

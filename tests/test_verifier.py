@@ -267,6 +267,41 @@ async def test_verify_prompt_focuses_long_packet_text_on_question_terms():
     assert "b101 joint IMVA mismatch" in prompt
 
 
+async def test_verify_prompt_anchors_cited_packet_on_proposed_answer_row():
+    client = _FakeVerifierClient(
+        '{"supported": true, "reason": "ok", "next_action": "accept", "confidence": 0.9}'
+    )
+    long_table = "\n".join(
+        [
+            "BCR[22:20] Meaning",
+            "b000 The corresponding BVR is compared against the IMVA bus.",
+            "b001 They generate a breakpoint debug event on a joint IMVA and context ID match.",
+            "b010 It generates a breakpoint debug event on a context ID match.",
+            "b011 They generate a joint IMVA or DMVA and context ID match.",
+            "b100 The corresponding BVR is compared against the IMVA bus.",
+            "It generates a breakpoint debug event on an IMVA mismatch.",
+            "b101 They generate a breakpoint debug event on a joint IMVA mismatch and context ID match.",
+        ]
+        + ["filler row"] * 120
+    )
+    question = _question()
+    question.question = (
+        "Which BCR[22:20] value corresponds to an IMVA mismatch when the BRP is not "
+        "linked with context ID linked codes?"
+    )
+    await verify_answer(
+        question,
+        _evidence(_packet("pA", snippet=long_table)),
+        _answer(answer="b100", citations=["pA"]),
+        backend_client=client,
+    )
+
+    prompt = client.calls[0]["prompt"]
+    assert "b100 The corresponding BVR is compared against the IMVA bus." in prompt
+    assert "It generates a breakpoint debug event on an IMVA mismatch." in prompt
+    assert prompt.index("b100 The corresponding BVR") < prompt.index("b010 It generates")
+
+
 async def test_verify_prompt_summarizes_multi_scale_chart_context():
     client = _FakeVerifierClient(
         '{"supported": true, "reason": "ok", "next_action": "accept", "confidence": 0.9}'
