@@ -78,8 +78,9 @@ _RETRY_SELECTION_CONFIDENCE_MARGIN = 0.15
 _ABSTAIN_OVERRIDE_MIN_CONFIDENCE = 0.45
 _VISUAL_READABILITY_RE = re.compile(
     r"\b("
-    r"blur(?:ry|red)?|cannot\s+read|can't\s+read|garbled|illegible|low[- ]resolution|"
-    r"ocr[- ]?(?:damaged|garbled|poor)|pixelated|too\s+small|unreadable"
+    r"blur(?:ry|red)?|cannot\s+read|can't\s+read|difficult\s+to\s+read|"
+    r"fragmented|garbled|illegible|incomplete|low[- ]resolution|not\s+fully\s+readable|"
+    r"ocr[- ]?(?:damaged|garbled|poor)|pixelated|too\s+small|unclear|unreadable"
     r")\b",
     re.IGNORECASE,
 )

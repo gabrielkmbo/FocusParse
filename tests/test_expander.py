@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PIL import Image
+
 from focusparse.evidence.packet import CropRef, EvidencePacket, PacketProvenance
 from focusparse.pipeline.events import EvidenceEvent, RegionCandidate, RegionsEvent
 from focusparse.pipeline.expander import _neighbor_types_from_verifier_reason, expand_context
@@ -1665,3 +1667,43 @@ async def test_retry_visual_zoom_uses_existing_tight_scale_without_neighbors(tmp
     assert [crop.scale for crop in packet.multi_scale_crops] == ["tight", "zoomed"]
     assert packet.multi_scale_crops[0].ref == "/crops/p0_tight.png"
     assert packet.linked_crop_refs == ["/crops/existing_caption.png"]
+
+
+async def test_retry_visual_zoom_direct_resize_fallback_when_sandbox_returns_none(
+    tmp_path,
+    monkeypatch,
+):
+    async def _fake_zoom_crop(*, crop_ref, cache_dir, packet_id):
+        return None
+
+    crop_path = tmp_path / "target.png"
+    Image.new("RGB", (24, 12), color=(255, 255, 255)).save(crop_path)
+    monkeypatch.setattr("focusparse.pipeline.expander._zoom_crop", _fake_zoom_crop)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                packet_id="p0",
+                page=1,
+                bbox_norm=(0.20, 0.30, 0.40, 0.50),
+                region_type="Picture",
+            ).model_copy(update={"local_crop_ref": str(crop_path)}),
+        ]
+    )
+
+    out = await expand_context(
+        ev,
+        regions=RegionsEvent(candidates=[]),
+        images_by_page={1: tmp_path / "unused.png"},
+        crop_cache_dir=tmp_path / "crops",
+        target_packet_ids=["p0"],
+        retry_visual_zoom=True,
+    )
+
+    packet = out.packets[0]
+    assert [crop.scale for crop in packet.multi_scale_crops] == ["tight", "zoomed"]
+    assert packet.multi_scale_crops[0].ref == str(crop_path)
+    zoom_ref = Path(packet.multi_scale_crops[1].ref)
+    assert zoom_ref.exists()
+    with Image.open(zoom_ref) as zoomed:
+        assert zoomed.size == (48, 24)
+    assert "expand_context:visual_zoom1_direct" in packet.provenance.args_hash

@@ -154,6 +154,19 @@ def test_verifier_visual_readability_retry_requires_precise_signal():
     )
     assert _verifier_requests_visual_readability_retry(verdict, target_packet_ids=["pkt_000"])
 
+    fragmented_chart = verdict.model_copy(
+        update={
+            "reason": (
+                "The OCR text from pkt_001 is too fragmented and unclear to reliably "
+                "read the chart structure."
+            )
+        }
+    )
+    assert _verifier_requests_visual_readability_retry(
+        fragmented_chart,
+        target_packet_ids=["pkt_001"],
+    )
+
     diagram = verdict.model_copy(update={"reason": "pkt_000 diagram text is garbled/unreadable"})
     assert not _verifier_requests_visual_readability_retry(diagram, target_packet_ids=["pkt_000"])
 

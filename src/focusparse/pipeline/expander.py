@@ -26,8 +26,10 @@ the pre-2h passthrough behavior, preserving every existing caller.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
+from io import BytesIO
 from pathlib import Path
 
 from focusparse.evidence.packet import CropRef, EvidencePacket, PacketProvenance
@@ -145,6 +147,7 @@ _INITIAL_CAP_EXEMPT_QUESTION_FAMILIES = frozenset(
 _DEFAULT_ADJACENCY_PAD = 0.08
 _RETRY_CONTEXT_WINDOW_PAD = 0.24
 _MAX_VISUAL_ZOOM_RETRY_PACKETS = 2
+_RETRY_VISUAL_ZOOM_MAX_DIM = 2048
 _MAX_LINKED_CONTEXT_TEXT_CHARS = 240
 _FIGURE_REF_RE = re.compile(r"\b(?:fig(?:ure)?\.?)\s*(?P<num>\d+[A-Za-z]?)\b", re.IGNORECASE)
 _CONTEXT_LINE_RE = re.compile(r"^Context\s+\[[^\]]+\]:\s*(?P<text>.*)$", re.IGNORECASE)
@@ -639,11 +642,18 @@ async def _expand_retry_visual_zoom(
         if not crop_ref:
             new_packets.append(packet)
             continue
+        zoom_tag = "expand_context:visual_zoom1"
         zoom_ref = await _zoom_crop(
             crop_ref=crop_ref,
             cache_dir=crop_cache_dir,
             packet_id=packet.packet_id,
         )
+        if not zoom_ref:
+            zoom_ref = _direct_zoom_crop(
+                crop_ref=crop_ref,
+                cache_dir=crop_cache_dir,
+            )
+            zoom_tag = "expand_context:visual_zoom1_direct"
         if not zoom_ref:
             new_packets.append(packet)
             continue
@@ -658,7 +668,7 @@ async def _expand_retry_visual_zoom(
                     "provenance": _updated_provenance(
                         packet.provenance,
                         0,
-                        tag="expand_context:visual_zoom1",
+                        tag=zoom_tag,
                     ),
                 }
             )
@@ -674,6 +684,51 @@ def _tight_crop_for_zoom(
         if crop.scale == "tight" and crop.ref:
             return crop.ref, crop.bbox_norm
     return packet.local_crop_ref or None, packet.bbox_norm
+
+
+def _direct_zoom_crop(
+    *,
+    crop_ref: str,
+    cache_dir: Path | None,
+) -> str | None:
+    """Deterministically upsample a crop when the sandboxed zoom path fails.
+
+    Verifier-directed visual retries are only useful if the next reasoner call
+    actually receives sharper evidence. `run_python` is still the first path,
+    but transient sandbox/process failures should not collapse a readability
+    retry back into ordinary neighbor expansion.
+    """
+    crop_path = Path(crop_ref)
+    if not crop_path.exists():
+        return None
+
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+
+    try:
+        with Image.open(crop_path) as img:
+            img = img.convert("RGB")
+            target_w, target_h = img.width * 2, img.height * 2
+            if max(target_w, target_h) > _RETRY_VISUAL_ZOOM_MAX_DIM:
+                scale = _RETRY_VISUAL_ZOOM_MAX_DIM / max(target_w, target_h)
+                target_w = max(1, int(round(target_w * scale)))
+                target_h = max(1, int(round(target_h * scale)))
+            out = img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+            buf = BytesIO()
+            out.save(buf, format="PNG")
+            png_bytes = buf.getvalue()
+    except (OSError, ValueError):
+        return None
+
+    out_dir = Path(cache_dir) if cache_dir is not None else crop_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ref = hashlib.sha256(png_bytes).hexdigest()[:16]
+    out_path = out_dir / f"{ref}.png"
+    if not out_path.exists():
+        out_path.write_bytes(png_bytes)
+    return str(out_path)
 
 
 def _packet_has_scale(packet: EvidencePacket, scale: str) -> bool:
