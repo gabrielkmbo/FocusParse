@@ -329,10 +329,15 @@ async def inspect_regions(
     wants_chart = (
         plan.question_family or ""
     ) in _CHART_QUESTION_FAMILIES or "chart" in evidence_keys
-    ranked = sorted(
+    ranked_all = sorted(
         regions.candidates,
         key=lambda r: -_rank_score(r, boosted_types, wants_chart=wants_chart),
-    )[:max_crops]
+    )
+    ranked = _select_regions_for_inspection(
+        ranked_all,
+        max_crops=max_crops,
+        plan=plan,
+    )
 
     chart_extraction_active = chart_to_table_enabled and wants_chart
 
@@ -1178,3 +1183,53 @@ def _rank_score(
     if region.needed_for == "primary":
         boosted *= 1.3
     return boosted
+
+
+def _select_regions_for_inspection(
+    ranked_regions: list[RegionCandidate],
+    *,
+    max_crops: int,
+    plan: PlanEvent,
+) -> list[RegionCandidate]:
+    """Pick inspector regions while preserving multi-page evidence coverage.
+
+    The upstream router can intentionally surface multiple pages for questions
+    that need a table plus a schematic, or a caption plus a chart. A pure
+    global top-N can spend all slots on one high-confidence text-heavy page.
+    For multi-region plans, reserve the best region from each routed page
+    before filling remaining slots by the existing score order.
+    """
+    if max_crops <= 0:
+        return []
+    if len(ranked_regions) <= max_crops:
+        return list(ranked_regions)
+    if not _plan_needs_page_diversity(plan):
+        return ranked_regions[:max_crops]
+
+    selected: list[RegionCandidate] = []
+    selected_ids: set[str] = set()
+    seen_pages: set[int] = set()
+    for region in ranked_regions:
+        if region.page in seen_pages:
+            continue
+        seen_pages.add(region.page)
+        selected.append(region)
+        selected_ids.add(region.region_id)
+        if len(selected) >= max_crops:
+            return selected
+
+    for region in ranked_regions:
+        if region.region_id in selected_ids:
+            continue
+        selected.append(region)
+        if len(selected) >= max_crops:
+            break
+    return selected
+
+
+def _plan_needs_page_diversity(plan: PlanEvent) -> bool:
+    budget_class = (plan.budget_class or "").lower()
+    if budget_class in {"multi_region", "multi-page", "multi_page"}:
+        return True
+    evidence_types = {(item or "").strip().lower() for item in plan.evidence_types}
+    return len(evidence_types & {"diagram", "figure", "table", "text", "caption", "footnote"}) >= 2

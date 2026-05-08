@@ -195,6 +195,35 @@ async def test_inspect_regions_ranks_by_score_desc(tmp_path, monkeypatch):
     assert ev.packets[0].packet_id == "pkt_000"
 
 
+async def test_multi_region_inspection_preserves_page_coverage(tmp_path, monkeypatch):
+    """Multi-region plans reserve room for each routed page before filling top-N."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    regions = RegionsEvent(
+        candidates=[
+            _region(region_id="p1_a", page=1, bbox_norm=(0, 0, 0.1, 0.1), score=0.99),
+            _region(region_id="p1_b", page=1, bbox_norm=(0, 0, 0.2, 0.2), score=0.98),
+            _region(region_id="p1_c", page=1, bbox_norm=(0, 0, 0.3, 0.3), score=0.97),
+            _region(region_id="p2_a", page=2, bbox_norm=(0, 0, 0.4, 0.4), score=0.50),
+        ]
+    )
+    plan = _plan(max_crops=3).model_copy(update={"budget_class": "multi_region"})
+
+    ev = await inspect_regions(
+        _q(),
+        plan,
+        regions,
+        images_by_page={1: tmp_path / "p1.png", 2: tmp_path / "p2.png"},
+        pdf_path=pdf,
+    )
+
+    assert [p.page for p in ev.packets] == [1, 2, 1]
+
+
 # ---------------------------------------------------------------------------
 # Per-region-type routing
 # ---------------------------------------------------------------------------
