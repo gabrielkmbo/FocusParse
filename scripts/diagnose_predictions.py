@@ -56,6 +56,13 @@ class SpecDiagnosis:
     mean_usd: float = 0.0
     accuracy: float = 0.0
     answers_correct: int = 0
+    retry_used_rate: float = 0.0
+    evidence_retry_used_rate: float = 0.0
+    mean_retries_used: float = 0.0
+    mean_evidence_retries_used: float = 0.0
+    loop_terminated: Counter[str] = field(default_factory=Counter)
+    incorrect_loop_terminated: Counter[str] = field(default_factory=Counter)
+    loop_retry_helped: Counter[str] = field(default_factory=Counter)
     verifier_unsupported_rate: float | None = None
     verifier_next_actions: Counter[str] = field(default_factory=Counter)
     verifier_unsupported_next_actions: Counter[str] = field(default_factory=Counter)
@@ -102,6 +109,8 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
     tool_call_counts: list[int] = []
     iteration_counts: list[int] = []
     usd_values: list[float] = []
+    retries_used_values: list[int] = []
+    evidence_retries_used_values: list[int] = []
     verifier_unsupported_flags: list[bool] = []
     expand_context_called_flags: list[bool] = []
     neighbors_attached_values: list[int] = []
@@ -127,6 +136,18 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
         if answer_correct:
             diag.answers_correct += 1
         usd_values.append(float(record.get("usd") or 0.0))
+        telemetry = record.get("telemetry") or {}
+        retries_used = _as_int(telemetry.get("retries_used"), default=0)
+        evidence_retries_used = _as_int(telemetry.get("evidence_retries_used"), default=0)
+        retries_used_values.append(retries_used)
+        evidence_retries_used_values.append(evidence_retries_used)
+        loop_terminated = telemetry.get("loop_terminated")
+        if loop_terminated:
+            diag.loop_terminated[str(loop_terminated)] += 1
+            if not answer_correct:
+                diag.incorrect_loop_terminated[str(loop_terminated)] += 1
+        if telemetry.get("loop_retry_helped") is not None:
+            diag.loop_retry_helped[str(bool(telemetry["loop_retry_helped"])).lower()] += 1
 
         per_example_tool_calls = 0
         per_example_iterations = 0
@@ -259,6 +280,18 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
     diag.mean_iterations = statistics.mean(iteration_counts) if iteration_counts else 0.0
     diag.mean_usd = statistics.mean(usd_values) if usd_values else 0.0
     diag.accuracy = diag.answers_correct / n
+    diag.mean_retries_used = statistics.mean(retries_used_values) if retries_used_values else 0.0
+    diag.mean_evidence_retries_used = (
+        statistics.mean(evidence_retries_used_values) if evidence_retries_used_values else 0.0
+    )
+    diag.retry_used_rate = (
+        statistics.mean(value > 0 for value in retries_used_values) if retries_used_values else 0.0
+    )
+    diag.evidence_retry_used_rate = (
+        statistics.mean(value > 0 for value in evidence_retries_used_values)
+        if evidence_retries_used_values
+        else 0.0
+    )
     diag.verifier_unsupported_rate = (
         statistics.mean(verifier_unsupported_flags) if verifier_unsupported_flags else None
     )
@@ -333,10 +366,11 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
         "| Spec | n | accuracy | lazy_rate | empty_cite_rate "
         "| premature_final | verifier_unsupported | expand_called "
         "| mean_neighbors | tool_err_rate | mean_tool_calls | mean_usd "
-        "| top_failure | top_verifier_action | top_wrong_action |"
+        "| retry_rate | evidence_retry_rate | top_loop | top_failure "
+        "| top_verifier_action | top_wrong_action |"
     )
     lines.append(
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
     )
     for d in diags:
         tool_err_rate = d.n_tool_errors / max(d.n_steps, 1)
@@ -344,6 +378,7 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
         verifier_unsupported = (
             f"{d.verifier_unsupported_rate:.1%}" if d.verifier_unsupported_rate is not None else "—"
         )
+        top_loop = _fmt_top_counter(d.loop_terminated)
         top_failure = _fmt_top_counter(d.failure_reasons)
         top_verifier_action = _fmt_top_counter(d.verifier_next_actions)
         top_wrong_action = _fmt_top_counter(d.incorrect_verifier_next_actions)
@@ -353,7 +388,8 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
             f"| {prem} | {verifier_unsupported} "
             f"| {d.expand_context_called_rate:.1%} | {d.mean_neighbors_attached:.2f} "
             f"| {tool_err_rate:.1%} | {d.mean_tool_calls:.2f} "
-            f"| ${d.mean_usd:.4f} | {top_failure} "
+            f"| ${d.mean_usd:.4f} | {d.retry_used_rate:.1%} "
+            f"| {d.evidence_retry_used_rate:.1%} | {top_loop} | {top_failure} "
             f"| {top_verifier_action} | {top_wrong_action} |"
         )
     lines.append("")
@@ -400,6 +436,26 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
         lines.append(f"- lazy_answer_rate (no tool calls): **{d.lazy_answer_rate:.1%}**")
         lines.append(f"- empty_citation_rate (citations == []): **{d.empty_citation_rate:.1%}**")
         lines.append(f"- correct but no citations: **{d.correct_but_no_citations_rate:.1%}**")
+        lines.append(
+            f"- retry_used_rate: **{d.retry_used_rate:.1%}**, "
+            f"mean retries: **{d.mean_retries_used:.2f}**"
+        )
+        lines.append(
+            f"- evidence_retry_used_rate: **{d.evidence_retry_used_rate:.1%}**, "
+            f"mean evidence retries: **{d.mean_evidence_retries_used:.2f}**"
+        )
+        if d.loop_terminated:
+            lines.append("- loop_terminated counts:")
+            for status, count in d.loop_terminated.most_common():
+                lines.append(f"  - `{status}`: {count}")
+        if d.incorrect_loop_terminated:
+            lines.append("- incorrect-example loop_terminated counts:")
+            for status, count in d.incorrect_loop_terminated.most_common():
+                lines.append(f"  - `{status}`: {count}")
+        if d.loop_retry_helped:
+            lines.append("- loop_retry_helped counts:")
+            for status, count in d.loop_retry_helped.most_common():
+                lines.append(f"  - `{status}`: {count}")
         if d.verifier_unsupported_rate is not None:
             lines.append(f"- verifier unsupported rate: **{d.verifier_unsupported_rate:.1%}**")
         if d.verifier_next_actions:
@@ -489,6 +545,13 @@ def to_json(diags: list[SpecDiagnosis]) -> dict[str, Any]:
                 "mean_iterations": d.mean_iterations,
                 "mean_usd": d.mean_usd,
                 "accuracy": d.accuracy,
+                "retry_used_rate": d.retry_used_rate,
+                "evidence_retry_used_rate": d.evidence_retry_used_rate,
+                "mean_retries_used": d.mean_retries_used,
+                "mean_evidence_retries_used": d.mean_evidence_retries_used,
+                "loop_terminated": dict(d.loop_terminated),
+                "incorrect_loop_terminated": dict(d.incorrect_loop_terminated),
+                "loop_retry_helped": dict(d.loop_retry_helped),
                 "verifier_unsupported_rate": d.verifier_unsupported_rate,
                 "verifier_next_actions": dict(d.verifier_next_actions),
                 "verifier_unsupported_next_actions": dict(d.verifier_unsupported_next_actions),
@@ -694,6 +757,13 @@ def _as_float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _as_int(value: Any, *, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _fmt_optional_pct(value: float | None) -> str:

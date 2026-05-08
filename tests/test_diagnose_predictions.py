@@ -24,6 +24,7 @@ def _write_record(
     tool_calls: int = 0,
     usd: float = 0.0,
     steps: list[dict] | None = None,
+    telemetry: dict | None = None,
 ) -> None:
     pred_dir.mkdir(parents=True, exist_ok=True)
     (pred_dir / f"{example_id}.json").write_text(
@@ -35,6 +36,7 @@ def _write_record(
                 "citations": citations or [],
                 "tool_calls": tool_calls,
                 "usd": usd,
+                "telemetry": telemetry or {},
                 "trace": {"steps": steps or []},
             }
         )
@@ -611,3 +613,63 @@ def test_verifier_next_actions_render_and_export(tmp_path: Path) -> None:
     assert "top_verifier_action" in md
     assert "unsupported verifier next_action counts" in md
     assert exported["incorrect_verifier_next_actions"]["accept"] == 1
+
+
+def test_retry_telemetry_render_and_export(tmp_path: Path) -> None:
+    spec = tmp_path / "focusparse_focus_x"
+    _write_per_example(
+        spec,
+        [
+            {
+                "example_id": "helped",
+                "answer_correct": 1.0,
+                "is_lazy": 0,
+                "telemetry": {
+                    "retries_used": 1,
+                    "evidence_retries_used": 1,
+                    "loop_terminated": "accepted",
+                    "loop_retry_helped": True,
+                },
+                "trace": {"steps": []},
+            },
+            {
+                "example_id": "not_helped",
+                "answer_correct": 0.0,
+                "is_lazy": 0,
+                "telemetry": {
+                    "retries_used": 1,
+                    "evidence_retries_used": 0,
+                    "loop_terminated": "exhausted",
+                    "loop_retry_helped": False,
+                },
+                "trace": {"steps": []},
+            },
+            {
+                "example_id": "no_retry",
+                "answer_correct": 0.0,
+                "is_lazy": 0,
+                "telemetry": {
+                    "retries_used": 0,
+                    "evidence_retries_used": 0,
+                    "loop_terminated": "accepted",
+                    "loop_retry_helped": None,
+                },
+                "trace": {"steps": []},
+            },
+        ],
+    )
+
+    diag = dp.diagnose_spec(spec)
+    md = dp.render_markdown([diag])
+    exported = dp.to_json([diag])["specs"][0]
+
+    assert diag.retry_used_rate == 2 / 3
+    assert diag.evidence_retry_used_rate == 1 / 3
+    assert diag.mean_retries_used == 2 / 3
+    assert diag.mean_evidence_retries_used == 1 / 3
+    assert diag.loop_terminated == {"accepted": 2, "exhausted": 1}
+    assert diag.incorrect_loop_terminated == {"exhausted": 1, "accepted": 1}
+    assert diag.loop_retry_helped == {"true": 1, "false": 1}
+    assert "retry_used_rate" in md
+    assert "loop_terminated counts" in md
+    assert exported["loop_retry_helped"]["true"] == 1

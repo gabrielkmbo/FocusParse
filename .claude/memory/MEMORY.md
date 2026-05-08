@@ -151,6 +151,10 @@ examples. On `crop-fallback-run1`, wrong examples were dominated by
 verifier. Evidence quality was already strong (`cited_image_only=0.0%`,
 `cited_text=100.0%`, expand called 100%, mean neighbors 11.54), which suggests
 the next accuracy lever is not blindly attaching more neighbor context.
+Follow-up diagnostics also summarize `retries_used`,
+`evidence_retries_used`, `loop_terminated`, and `loop_retry_helped`; the
+pre-retry crop-fallback run correctly shows **0.0%** retry and evidence-retry
+rates.
 
 Pipeline default changed accordingly: localization retries remain opt-in
 (`max_retries=0`), but FocusWorkflow now allows one bounded evidence-only retry
