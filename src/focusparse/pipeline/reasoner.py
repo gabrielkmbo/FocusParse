@@ -42,6 +42,8 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _CONTEXT_LINE_RE = re.compile(r"^Context\s+\[(?P<role>[^\]]+)\]:\s*(?P<text>.+)$")
 _MAX_PACKET_TEXT_CHARS = 240
 _MAX_TEXT_ONLY_CONTEXT_CHARS = 120
+_TABLE_HEADER_SCAN_LINES = 8
+_TABLE_HEADER_MAX_LINES = 3
 _TEXT_ONLY_NEIGHBOR_TYPES = frozenset(
     {
         "header-disambiguation",
@@ -49,6 +51,14 @@ _TEXT_ONLY_NEIGHBOR_TYPES = frozenset(
         "page-header",
         "section-header",
         "title",
+    }
+)
+_TABLE_LIKE_REGION_TYPES = frozenset(
+    {
+        "form",
+        "key-value region",
+        "key_value_region",
+        "table",
     }
 )
 _FOCUS_STOPWORDS = frozenset(
@@ -239,21 +249,33 @@ def _format_bbox(bbox: tuple[float, float, float, float]) -> str:
 def _packet_text_snippet(packet, *, question_text: str | None = None) -> str:
     """Compact packet text/OCR for the reasoner descriptor line."""
     snippet = packet.text_layer_snippet or packet.ocr_snippet or ""
-    snippet = _question_focused_text(str(snippet), question_text=question_text)
+    snippet = _question_focused_text(
+        str(snippet),
+        question_text=question_text,
+        region_type=packet.region_type,
+    )
     snippet = " ".join(snippet.split())
     if len(snippet) > _MAX_PACKET_TEXT_CHARS:
         snippet = snippet[: _MAX_PACKET_TEXT_CHARS - 3] + "..."
     return snippet
 
 
-def _question_focused_text(text: str, *, question_text: str | None = None) -> str:
+def _question_focused_text(
+    text: str,
+    *,
+    question_text: str | None = None,
+    region_type: str | None = None,
+) -> str:
     """Prefer question-matching table rows over the first rows of a long packet.
 
     PDF text extraction for a large table can span thousands of characters. A
     blind prefix truncation over-represents the first rows, which can lure the
-    VLM toward an answer that satisfies only a nearby-looking subset of the
-    question. Keep the legacy prefix when no question terms match; otherwise
-    surface the highest-overlap lines plus their immediate row continuations.
+    VLM toward an answer that satisfies only a nearby-looking subset of the question.
+    Keep the legacy prefix when no question terms match; otherwise surface the
+    highest-overlap lines plus their row continuations. For table-like packets,
+    preserve a few compact header/unit lines before the matched row window so the
+    reasoner can bind values to the right row/column labels inside the 240-char
+    descriptor budget.
     """
     if not text or not question_text or len(text) <= _MAX_PACKET_TEXT_CHARS:
         return text
@@ -262,25 +284,94 @@ def _question_focused_text(text: str, *, question_text: str | None = None) -> st
         return text
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
+    primary_line_indexes = [
+        idx for idx, line in enumerate(lines) if not _CONTEXT_LINE_RE.match(line.strip())
+    ]
+    scoreable_indexes = primary_line_indexes or list(range(len(lines)))
     scored: list[tuple[int, int]] = []
-    for idx, line in enumerate(lines):
+    for idx in scoreable_indexes:
+        line = lines[idx]
         overlap = len(q_tokens & _focus_tokens(line))
         if overlap:
             scored.append((overlap, idx))
     if not scored:
         return text
 
+    table_like = _is_table_like_region(region_type)
     max_score = max(score for score, _idx in scored)
     score_floor = max(1, max_score - 1)
     selected_indexes: set[int] = set()
+    row_window_offsets = (-1, 0, 1, 2) if table_like else (-1, 0, 1)
     for _score, idx in [
         item
         for item in sorted(scored, key=lambda item: (-item[0], item[1]))
         if item[0] >= score_floor
     ][:3]:
-        selected_indexes.update({idx - 1, idx, idx + 1})
-    selected = [lines[idx] for idx in sorted(selected_indexes) if 0 <= idx < len(lines)]
+        selected_indexes.update(idx + offset for offset in row_window_offsets)
+    selected_indexes = {idx for idx in selected_indexes if 0 <= idx < len(lines)}
+    header_indexes = (
+        _table_header_indexes(lines, selected_indexes, q_tokens=q_tokens) if table_like else set()
+    )
+    if table_like and header_indexes:
+        return _render_table_focus(lines, header_indexes, selected_indexes)
+    selected = [lines[idx] for idx in sorted(selected_indexes)]
     return " / ".join(selected)
+
+
+def _is_table_like_region(region_type: str | None) -> bool:
+    return (region_type or "").strip().lower() in _TABLE_LIKE_REGION_TYPES
+
+
+def _table_header_indexes(
+    lines: list[str],
+    selected_indexes: set[int],
+    *,
+    q_tokens: set[str],
+) -> set[int]:
+    """Pick compact leading table header/unit lines without pulling in row noise."""
+    if not selected_indexes:
+        return set()
+    first_selected = min(selected_indexes)
+    scan_stop = min(max(first_selected, 1), _TABLE_HEADER_SCAN_LINES, len(lines))
+    header_indexes: list[int] = []
+    for idx in range(scan_stop):
+        line = lines[idx]
+        if _looks_like_table_header_line(line, q_tokens=q_tokens):
+            header_indexes.append(idx)
+        if len(header_indexes) >= _TABLE_HEADER_MAX_LINES:
+            break
+    return set(header_indexes)
+
+
+def _looks_like_table_header_line(line: str, *, q_tokens: set[str]) -> bool:
+    tokens = _focus_tokens(line)
+    if not tokens:
+        return False
+    if len(tokens) > 10:
+        return False
+    numeric_tokens = re.findall(r"\b\d+(?:\.\d+)?\b", line)
+    if len(numeric_tokens) > max(3, len(tokens) // 2):
+        return False
+    # A compact line with units/column names is useful even when it does not
+    # overlap the question. If it does overlap, keep it only when it is header
+    # sized rather than a likely data row.
+    return not q_tokens or len(tokens & q_tokens) <= max(2, len(tokens) // 2)
+
+
+def _render_table_focus(
+    lines: list[str],
+    header_indexes: set[int],
+    selected_indexes: set[int],
+) -> str:
+    """Budget-aware table snippet: headers first, then matched row context."""
+    parts: list[str] = []
+    header_lines = [lines[idx] for idx in sorted(header_indexes)]
+    row_lines = [lines[idx] for idx in sorted(selected_indexes) if idx not in header_indexes]
+    if header_lines:
+        parts.append("Headers: " + " / ".join(header_lines))
+    if row_lines:
+        parts.append("Matches: " + " / ".join(row_lines))
+    return " | ".join(parts)
 
 
 def _focus_tokens(text: str) -> set[str]:
