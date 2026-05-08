@@ -489,9 +489,10 @@ class FocusWorkflow:
             elif action == "expand_context":
                 adjacency_pad = min(adjacency_pad * _EXPAND_RETRY_FACTOR, _MAX_ADJACENCY_PAD)
                 verifier_missing_context = _verifier_missing_context(verdict)
-                target_packet_ids = _verifier_target_packet_ids(verdict) or list(
-                    answer_event.citations
-                )
+                target_packet_ids = _verifier_target_packet_ids(
+                    verdict,
+                    valid_packet_ids={packet.packet_id for packet in evidence.packets},
+                ) or list(answer_event.citations)
                 retry_plan = _plan_with_extra_evidence_types(plan, verifier_missing_context)
                 evidence = await self._run_expand(
                     evidence,
@@ -1067,21 +1068,64 @@ def _verifier_missing_context(verdict: VerdictEvent) -> list[str]:
     return out
 
 
-def _verifier_target_packet_ids(verdict: VerdictEvent) -> list[str]:
+def _verifier_target_packet_ids(
+    verdict: VerdictEvent,
+    *,
+    valid_packet_ids: set[str] | None = None,
+) -> list[str]:
     raw = verdict.diagnostics.get("target_packet_ids")
-    if not isinstance(raw, list):
-        return []
+    raw_values: list[str] = []
+    if isinstance(raw, str):
+        raw_values.append(raw)
+    elif isinstance(raw, list):
+        raw_values.extend(item for item in raw if isinstance(item, str))
+    raw_values.extend(_packet_id_mentions(verdict.reason))
+
     out: list[str] = []
     seen: set[str] = set()
-    for item in raw:
-        if not isinstance(item, str) or not item.strip():
+    for item in raw_values:
+        value = _normalize_packet_id_mention(item)
+        if value is None:
             continue
-        value = item.strip()
+        if valid_packet_ids is not None and value not in valid_packet_ids:
+            continue
         if value in seen:
             continue
         seen.add(value)
         out.append(value)
     return out
+
+
+def _packet_id_mentions(text: str | None) -> list[str]:
+    """Extract packet-id-like mentions from verifier prose."""
+    if not text:
+        return []
+    mentions: list[str] = []
+    patterns = (
+        r"\bpkt[_-]?\d{1,4}\b",
+        r"\bpacket\s+(?:pkt[_-]?)?\d{1,4}\b",
+    )
+    for pattern in patterns:
+        mentions.extend(match.group(0) for match in re.finditer(pattern, text, re.IGNORECASE))
+    return mentions
+
+
+def _normalize_packet_id_mention(value: str) -> str | None:
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    match = re.fullmatch(r"pkt[_-]?(\d{1,4})", normalized)
+    if match:
+        return f"pkt_{int(match.group(1)):03d}"
+    match = re.fullmatch(r"packet\s+(?:pkt[_-]?)?(\d{1,4})", normalized)
+    if match:
+        return f"pkt_{int(match.group(1)):03d}"
+    match = re.fullmatch(r"\d{1,4}", normalized)
+    if match:
+        return f"pkt_{int(match.group(0)):03d}"
+    if re.fullmatch(r"[a-z][a-z0-9_-]{0,79}", normalized):
+        return normalized
+    return None
 
 
 def _plan_with_extra_evidence_types(plan: PlanEvent, extra_types: list[str]) -> PlanEvent:

@@ -32,6 +32,7 @@ from focusparse.pipeline.workflow import (
     _images_by_page,
     _infer_doc_id,
     _page_number_from_filename,
+    _verifier_target_packet_ids,
 )
 
 # ---------------------------------------------------------------------------
@@ -120,6 +121,23 @@ def test_citations_from_packets_silently_drops_unknown_refs():
 
 def test_citations_from_packets_empty_list_yields_empty():
     assert _citations_from_packets([], []) == []
+
+
+def test_verifier_target_packet_ids_normalizes_diagnostics_and_prose():
+    from focusparse.pipeline.events import VerdictEvent
+
+    verdict = VerdictEvent(
+        supported=False,
+        reason="Packet 003 still needs the legend; pkt-004 has the table header.",
+        next_action="expand_context",
+        confidence=0.6,
+        diagnostics={"target_packet_ids": ["003", "Packet pkt_002", "pkt_999"]},
+    )
+
+    assert _verifier_target_packet_ids(
+        verdict,
+        valid_packet_ids={"pkt_002", "pkt_003", "pkt_004"},
+    ) == ["pkt_003", "pkt_002", "pkt_004"]
 
 
 # ---------------------------------------------------------------------------
