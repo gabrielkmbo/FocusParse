@@ -57,6 +57,9 @@ class SpecDiagnosis:
     accuracy: float = 0.0
     answers_correct: int = 0
     verifier_unsupported_rate: float | None = None
+    verifier_next_actions: Counter[str] = field(default_factory=Counter)
+    verifier_unsupported_next_actions: Counter[str] = field(default_factory=Counter)
+    incorrect_verifier_next_actions: Counter[str] = field(default_factory=Counter)
     expand_context_called_rate: float = 0.0
     mean_neighbors_attached: float = 0.0
     tool_sequence_top: list[tuple[str, int]] = field(default_factory=list)
@@ -130,6 +133,7 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
         first_step_was_final = False
         per_example_tool_sequence: list[str] = []
         verifier_supported: bool | None = None
+        verifier_next_action: str | None = None
         expand_context_called = False
         neighbors_attached = 0
         evidence_snapshot = _debug_evidence_snapshot(record) or _evidence_snapshot(record)
@@ -172,6 +176,8 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
                 first_step_was_final = True
             if stage == "verify" and "supported" in step_args:
                 verifier_supported = bool(step_args.get("supported"))
+            if stage == "verify" and step_args.get("next_action"):
+                verifier_next_action = str(step_args["next_action"])
             if stage == "expand_context":
                 expand_context_called = True
                 with suppress(TypeError, ValueError):
@@ -185,6 +191,12 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
         neighbors_attached_values.append(neighbors_attached)
         if verifier_supported is not None:
             verifier_unsupported_flags.append(verifier_supported is False)
+        if verifier_next_action:
+            diag.verifier_next_actions[verifier_next_action] += 1
+            if verifier_supported is False:
+                diag.verifier_unsupported_next_actions[verifier_next_action] += 1
+            if not answer_correct:
+                diag.incorrect_verifier_next_actions[verifier_next_action] += 1
         if per_example_tool_sequence:
             tool_sequence_counter[" -> ".join(per_example_tool_sequence)] += 1
         else:
@@ -320,9 +332,12 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
     lines.append(
         "| Spec | n | accuracy | lazy_rate | empty_cite_rate "
         "| premature_final | verifier_unsupported | expand_called "
-        "| mean_neighbors | tool_err_rate | mean_tool_calls | mean_usd | top_failure |"
+        "| mean_neighbors | tool_err_rate | mean_tool_calls | mean_usd "
+        "| top_failure | top_verifier_action | top_wrong_action |"
     )
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append(
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+    )
     for d in diags:
         tool_err_rate = d.n_tool_errors / max(d.n_steps, 1)
         prem = f"{d.premature_final_rate:.1%}" if d.premature_final_rate is not None else "—"
@@ -330,13 +345,16 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
             f"{d.verifier_unsupported_rate:.1%}" if d.verifier_unsupported_rate is not None else "—"
         )
         top_failure = _fmt_top_counter(d.failure_reasons)
+        top_verifier_action = _fmt_top_counter(d.verifier_next_actions)
+        top_wrong_action = _fmt_top_counter(d.incorrect_verifier_next_actions)
         lines.append(
             f"| {d.spec_name} | {d.n_examples} | {d.accuracy:.1%} "
             f"| {d.lazy_answer_rate:.1%} | {d.empty_citation_rate:.1%} "
             f"| {prem} | {verifier_unsupported} "
             f"| {d.expand_context_called_rate:.1%} | {d.mean_neighbors_attached:.2f} "
             f"| {tool_err_rate:.1%} | {d.mean_tool_calls:.2f} "
-            f"| ${d.mean_usd:.4f} | {top_failure} |"
+            f"| ${d.mean_usd:.4f} | {top_failure} "
+            f"| {top_verifier_action} | {top_wrong_action} |"
         )
     lines.append("")
 
@@ -384,6 +402,18 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
         lines.append(f"- correct but no citations: **{d.correct_but_no_citations_rate:.1%}**")
         if d.verifier_unsupported_rate is not None:
             lines.append(f"- verifier unsupported rate: **{d.verifier_unsupported_rate:.1%}**")
+        if d.verifier_next_actions:
+            lines.append("- verifier next_action counts:")
+            for action, count in d.verifier_next_actions.most_common():
+                lines.append(f"  - `{action}`: {count}")
+        if d.verifier_unsupported_next_actions:
+            lines.append("- unsupported verifier next_action counts:")
+            for action, count in d.verifier_unsupported_next_actions.most_common():
+                lines.append(f"  - `{action}`: {count}")
+        if d.incorrect_verifier_next_actions:
+            lines.append("- incorrect-example verifier next_action counts:")
+            for action, count in d.incorrect_verifier_next_actions.most_common():
+                lines.append(f"  - `{action}`: {count}")
         lines.append(
             f"- evidence packet text / context / chart coverage: "
             f"**{d.packet_text_coverage_rate:.1%}** / "
@@ -460,6 +490,9 @@ def to_json(diags: list[SpecDiagnosis]) -> dict[str, Any]:
                 "mean_usd": d.mean_usd,
                 "accuracy": d.accuracy,
                 "verifier_unsupported_rate": d.verifier_unsupported_rate,
+                "verifier_next_actions": dict(d.verifier_next_actions),
+                "verifier_unsupported_next_actions": dict(d.verifier_unsupported_next_actions),
+                "incorrect_verifier_next_actions": dict(d.incorrect_verifier_next_actions),
                 "expand_context_called_rate": d.expand_context_called_rate,
                 "mean_neighbors_attached": d.mean_neighbors_attached,
                 "tool_sequence_top": d.tool_sequence_top,

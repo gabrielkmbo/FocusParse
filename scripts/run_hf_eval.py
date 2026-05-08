@@ -175,6 +175,9 @@ def main() -> int:
             return 2
 
     if args.agent == "focus":
+        max_evidence_retries = args.max_evidence_retries
+        if max_evidence_retries is None and args.max_retries is not None:
+            max_evidence_retries = args.max_retries
         result = asyncio.run(
             run_focus_eval(
                 examples,
@@ -190,6 +193,7 @@ def main() -> int:
                 tier_router=tier_router,
                 pdfs_root=args.pdfs_root,
                 max_retries=args.max_retries,
+                max_evidence_retries=max_evidence_retries,
                 use_evidence_graph=args.use_evidence_graph,
                 auto_zoom=args.auto_zoom,
                 tool_set=args.tool_set,
@@ -355,8 +359,20 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Override the focus workflow's verifier→retry loop budget. "
-        "0 disables the loop (baseline). None (default) uses FocusWorkflow's "
-        "built-in default. Used to A/B item 3 against the pre-loop baseline.",
+        "0 disables the loop unless --max-evidence-retries is also provided. "
+        "None (default) uses FocusWorkflow's built-in full-loop default.",
+    )
+    parser.add_argument(
+        "--max-evidence-retries",
+        type=int,
+        default=None,
+        help=(
+            "Override the focus workflow's evidence-only retry budget for "
+            "expand_context/escalate_reasoner. None (default) uses the "
+            "workflow default unless --max-retries is provided; then it "
+            "inherits --max-retries so --max-retries 0 remains a true "
+            "pre-loop baseline."
+        ),
     )
     parser.add_argument(
         "--use-evidence-graph",

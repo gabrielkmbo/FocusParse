@@ -318,6 +318,7 @@ async def run_focus_eval(
     tier_router: Any = None,
     pdfs_root: Path | None = None,
     max_retries: int | None = None,
+    max_evidence_retries: int | None = None,
     use_evidence_graph: bool = False,
     auto_zoom: bool = False,
     tool_set: str = "full",
@@ -378,6 +379,12 @@ async def run_focus_eval(
         # verifier→retry loop. None falls through to FocusWorkflow's built-
         # in default.
         workflow_kwargs["max_retries"] = max_retries
+    if max_evidence_retries is not None:
+        # Separate budget for evidence-only controller actions
+        # (`expand_context` / `escalate_reasoner`). This lets the default
+        # workflow try one low-risk repair while keeping localization retries
+        # opt-in.
+        workflow_kwargs["max_evidence_retries"] = max_evidence_retries
     if use_evidence_graph:
         # Item-5 toggle: typed graph expansion in expand_context. Off by
         # default pending a fresh A/B under the post-2026-04-27 scorer.

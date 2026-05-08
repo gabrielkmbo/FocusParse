@@ -428,13 +428,14 @@ def test_focus_stage_diagnostics_capture_verifier_and_expand_context(tmp_path: P
                 "stage": "verify",
                 "action": "llm_call",
                 "tool": None,
-                "args": {"supported": False},
+                "args": {"supported": False, "next_action": "expand_context"},
             },
         ],
     )
     _write_record(
         pred,
         example_id="b",
+        correct=1.0,
         steps=[
             {
                 "stage": "inspect",
@@ -446,7 +447,7 @@ def test_focus_stage_diagnostics_capture_verifier_and_expand_context(tmp_path: P
                 "stage": "verify",
                 "action": "llm_call",
                 "tool": None,
-                "args": {"supported": True},
+                "args": {"supported": True, "next_action": "accept"},
             },
         ],
     )
@@ -454,6 +455,9 @@ def test_focus_stage_diagnostics_capture_verifier_and_expand_context(tmp_path: P
     diag = dp.diagnose_spec(spec)
 
     assert diag.verifier_unsupported_rate == 0.5
+    assert diag.verifier_next_actions == {"expand_context": 1, "accept": 1}
+    assert diag.verifier_unsupported_next_actions == {"expand_context": 1}
+    assert diag.incorrect_verifier_next_actions == {"expand_context": 1}
     assert diag.expand_context_called_rate == 0.5
     assert diag.mean_neighbors_attached == 1.5
     assert diag.tool_sequence_top == [("deterministic_inspector", 2)]
@@ -513,3 +517,97 @@ def test_render_markdown_smoke(tmp_path: Path) -> None:
     assert "Predictions diagnostics" in md
     assert "focusparse_simple" in md
     assert "expand_called" in md
+
+
+def test_verifier_next_actions_render_and_export(tmp_path: Path) -> None:
+    spec = tmp_path / "focusparse_focus_x"
+    _write_per_example(
+        spec,
+        [
+            {
+                "example_id": "correct_accept",
+                "answer_correct": 1.0,
+                "is_lazy": 0,
+                "citations": [],
+                "trace": {
+                    "steps": [
+                        {
+                            "stage": "verify",
+                            "action": "llm_call",
+                            "args": {"supported": True, "next_action": "accept"},
+                        }
+                    ]
+                },
+            },
+            {
+                "example_id": "wrong_expand",
+                "answer_correct": 0.0,
+                "is_lazy": 0,
+                "citations": [{"page": 1}],
+                "trace": {
+                    "steps": [
+                        {
+                            "stage": "verify",
+                            "action": "llm_call",
+                            "args": {"supported": False, "next_action": "expand_context"},
+                        }
+                    ]
+                },
+            },
+            {
+                "example_id": "wrong_retry",
+                "answer_correct": 0.0,
+                "is_lazy": 0,
+                "citations": [{"page": 2}],
+                "trace": {
+                    "steps": [
+                        {
+                            "stage": "verify",
+                            "action": "llm_call",
+                            "args": {
+                                "supported": False,
+                                "next_action": "retry_localization",
+                            },
+                        }
+                    ]
+                },
+            },
+            {
+                "example_id": "wrong_accept",
+                "answer_correct": 0.0,
+                "is_lazy": 0,
+                "citations": [{"page": 3}],
+                "trace": {
+                    "steps": [
+                        {
+                            "stage": "verify",
+                            "action": "llm_call",
+                            "args": {"supported": True, "next_action": "accept"},
+                        }
+                    ]
+                },
+            },
+        ],
+    )
+
+    diag = dp.diagnose_spec(spec)
+    md = dp.render_markdown([diag])
+    exported = dp.to_json([diag])["specs"][0]
+
+    assert diag.verifier_next_actions == {
+        "accept": 2,
+        "expand_context": 1,
+        "retry_localization": 1,
+    }
+    assert diag.verifier_unsupported_next_actions == {
+        "expand_context": 1,
+        "retry_localization": 1,
+    }
+    assert diag.incorrect_verifier_next_actions == {
+        "accept": 1,
+        "expand_context": 1,
+        "retry_localization": 1,
+    }
+    assert "top_verifier_action" in md
+    assert "unsupported verifier next_action counts" in md
+    assert exported["incorrect_verifier_next_actions"]["accept"] == 1

@@ -47,16 +47,20 @@ if TYPE_CHECKING:
     from focusparse._parser_bench import BenchmarkExample
 
 
-# Default retry budget. The verifier loop is **opt-in by default** as of
-# the 2026-04-27 n=30 A/B (see MEMORY.md). With `max_retries=2` the loop
-# fired on 67% of examples but only 9% of retries flipped the verdict,
-# while diluting region_recall (-0.08), region_precision (-0.16), and
-# bbox_iou_mean (-0.08) — the `retry_localization` action lowers the
-# confidence threshold which surfaces noisier boxes. Items 4 (region
-# reranker) and 5 (evidence-graph expansion) attack the same problem
-# more surgically; flip the default back to a positive integer after
-# one of them shows a measurable improvement on a real validation slice.
+# Default full retry budget. Localization retries stay opt-in after the
+# 2026-04-27 n=30 A/B: `max_retries=2` fired on 67% of examples but only
+# 9% of retries flipped the verdict, while diluting region_recall (-0.08),
+# region_precision (-0.16), and bbox_iou_mean (-0.08). The culprit was the
+# `retry_localization` action lowering the confidence threshold and surfacing
+# noisier boxes.
 _DEFAULT_MAX_RETRIES = 0
+# Evidence-only retries are safer: they do not re-run localization, and the
+# 2026-05-08 n=148 crop-fallback diagnostic showed 45 wrong examples where the
+# verifier asked for `expand_context` after the initial pass. Let the controller
+# try one bounded evidence repair by default while keeping localization retries
+# behind `max_retries`.
+_DEFAULT_MAX_EVIDENCE_RETRIES = 1
+_EVIDENCE_RETRY_ACTIONS = frozenset({"expand_context", "escalate_reasoner"})
 
 # Knobs the retry loop tweaks per action. Values match (and float as)
 # the localizer's / expander's defaults — initial passes use these,
@@ -94,6 +98,7 @@ class FocusWorkflow:
         cache: Any = None,
         tools: Any = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
+        max_evidence_retries: int = _DEFAULT_MAX_EVIDENCE_RETRIES,
         use_evidence_graph: bool = False,
         auto_zoom: bool = False,
         tool_set: str = "full",
@@ -109,10 +114,12 @@ class FocusWorkflow:
         self.tier_router = tier_router
         self.cache = cache
         self.tools = tools
-        # `max_retries` caps the verifier→retry loop. 0 reverts the workflow
-        # to the pre-2026-04-27 cascade (no loops); the default lets the
-        # verifier act as a controller, not just a judge.
+        # `max_retries` caps the full verifier→retry loop, including
+        # localization. `max_evidence_retries` gives evidence/reasoning
+        # repairs a separate small budget so verifier control is not all-or-
+        # nothing.
         self.max_retries = max_retries
+        self.max_evidence_retries = max_evidence_retries
         # Item 5: typed evidence-graph expansion. Default off pending a fresh
         # A/B under the post-2026-04-27 scorer (the n=30 regression that
         # gated this off was measured under the pre-fix scorer).
@@ -400,6 +407,7 @@ class FocusWorkflow:
         # without a smarter retry mutation).
         initial_supported = verdict.supported
         retries_used = 0
+        evidence_retries_used = 0
         loop_terminated = ""  # set in the loop body before break
         escalation_hint: str | None = None
 
@@ -425,11 +433,14 @@ class FocusWorkflow:
             # Verdict wants a retry of some kind. Honor the budget: when we
             # can't retry, surface the current answer + flag exhaustion so
             # the trace shows the verifier wasn't satisfied.
-            if retries_used >= self.max_retries:
+            retry_budget = self._retry_budget_for_action(action)
+            if retries_used >= retry_budget:
                 loop_terminated = "exhausted"
                 break
 
             retries_used += 1
+            if action in _EVIDENCE_RETRY_ACTIONS:
+                evidence_retries_used += 1
 
             if action == "retry_localization":
                 confidence_threshold *= _LOCALIZATION_RETRY_FACTOR
@@ -536,6 +547,7 @@ class FocusWorkflow:
 
         telemetry = _make_telemetry(reasoner_response)
         telemetry["retries_used"] = retries_used
+        telemetry["evidence_retries_used"] = evidence_retries_used
         telemetry["loop_terminated"] = loop_terminated
         telemetry["loop_retry_helped"] = loop_retry_helped
         return WorkflowResult(
@@ -546,6 +558,20 @@ class FocusWorkflow:
         )
 
     # -- per-stage runners (used by both initial cascade and retry loop) --
+
+    def _retry_budget_for_action(self, action: str) -> int:
+        """Return the retry budget for a verifier action.
+
+        `max_retries` remains the full-loop budget. Evidence-only actions get
+        a bounded default budget because they only re-run expand/answer/verify
+        or answer/verify; localization retries still require an explicit
+        `max_retries` override.
+        """
+        if action not in _EVIDENCE_RETRY_ACTIONS:
+            return self.max_retries
+        if action == "expand_context" and self.tool_set != "full":
+            return self.max_retries
+        return max(self.max_retries, self.max_evidence_retries)
 
     async def _run_localize(
         self,

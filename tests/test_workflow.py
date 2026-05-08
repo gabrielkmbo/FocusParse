@@ -763,6 +763,70 @@ async def test_loop_expand_context_reruns_only_expand_answer_verify(
     assert pads[0] < pads[1], f"adjacency_pad should grow on retry; got {pads}"
 
 
+async def test_loop_expand_context_retries_once_by_default(
+    tmp_path, parser_bench_submodule_present
+):
+    """Evidence-only retries have one default budget even when localization
+    retries are disabled. This lets verifier feedback repair inspect/expand
+    evidence without re-opening the noisy localization retry path."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(supported=False, next_action="expand_context"),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["evidence_retries_used"] == 1
+    assert result.telemetry["loop_terminated"] == "accepted"
+    stage_counts = _stage_counts(result)
+    assert stage_counts["localize"] == 1
+    assert stage_counts["inspect"] == 1
+    assert stage_counts["expand_context"] == 2
+    assert stage_counts["answer"] == 2
+    assert stage_counts["verify"] == 2
+
+
+async def test_loop_evidence_retry_can_be_explicitly_disabled(
+    tmp_path, parser_bench_submodule_present
+):
+    """max_evidence_retries=0 preserves a strict pre-loop baseline for
+    evaluator A/Bs that need no controller actions at all."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    verifier = _FakeClient(_verdict_json(supported=False, next_action="expand_context"))
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        max_retries=0,
+        max_evidence_retries=0,
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.telemetry["retries_used"] == 0
+    assert result.telemetry["evidence_retries_used"] == 0
+    assert result.telemetry["loop_terminated"] == "exhausted"
+    stage_counts = _stage_counts(result)
+    assert stage_counts["expand_context"] == 1
+    assert stage_counts["answer"] == 1
+    assert stage_counts["verify"] == 1
+
+
 async def test_loop_escalate_reasoner_reruns_only_answer_verify(
     tmp_path, parser_bench_submodule_present
 ):

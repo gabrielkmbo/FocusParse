@@ -131,6 +131,44 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-08 — verifier-action diagnostics + evidence-only retry default
+
+The crop-fallback n=148 follow-up completed at
+`results/hf/sprint-2026-05-08/crop-fallback-run1/`:
+
+- Overall **44.6%** vs rebaseline-v2 focus +4 **43.9%** (+0.7pp hold/noise).
+- Datasheet **46.5%** vs **49.5%** (-3.0pp noise-).
+- Finance **40.4%** vs **31.9%** (+8.5pp hold).
+- Overall bbox IoU **86.4%** vs **66.1%** (+20.3pp hold).
+- Cost/correct regressed to **$0.0263** vs **$0.0176**.
+
+`inspect_region:crop_fallback_ocr` did **not** fire in the full run, so the
+accuracy movement should not be attributed to the crop OCR fallback. The
+important new signal is controller behavior: diagnostics now summarize verifier
+`next_action` counters overall, for unsupported verdicts, and for incorrect
+examples. On `crop-fallback-run1`, wrong examples were dominated by
+`expand_context` (**45**), with 17 wrong examples still accepted by the
+verifier. Evidence quality was already strong (`cited_image_only=0.0%`,
+`cited_text=100.0%`, expand called 100%, mean neighbors 11.54), which suggests
+the next accuracy lever is not blindly attaching more neighbor context.
+
+Pipeline default changed accordingly: localization retries remain opt-in
+(`max_retries=0`), but FocusWorkflow now allows one bounded evidence-only retry
+by default for `expand_context` and `escalate_reasoner`. This reruns only
+expand/answer/verify or answer/verify, avoiding the noisy-box localization path
+that regressed in the 2026-04-27 n=30 A/B. HF CLI gained
+`--max-evidence-retries`; when `--max-retries` is explicitly provided, the
+evidence retry budget inherits it unless overridden, so `--max-retries 0`
+remains a true pre-loop baseline.
+
+Focused verification:
+
+- `tests/test_workflow.py tests/test_focus_harness.py tests/test_hf_eval_cli.py
+  tests/test_stage_metrics.py tests/test_diagnose_predictions.py`: **150
+  passed**, 5 warnings.
+- Ruff check and format-check were clean on touched workflow/harness/CLI/
+  diagnostics files.
+
 ### 2026-05-08 — inspect crop-level OCR fallback for empty element OCR
 
 Low-risk inspector hardening landed to reduce `cited_image_only` style misses
