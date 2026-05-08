@@ -194,6 +194,20 @@ def test_retry_answer_selector_keeps_higher_confidence_when_overlap_ties():
     )
 
 
+def test_retry_answer_selector_prefers_single_entity_fix_within_margin():
+    incumbent = AnswerEvent(answer="UK and US", citations=["pkt_000"], confidence=0.89)
+    candidate = AnswerEvent(answer="Germany", citations=["pkt_003"], confidence=0.75)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Based on the charts and the footnote, which country's 10-year government "
+            "bond yield showed the least change?"
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # FocusWorkflow.run end-to-end (requires parser-bench submodule)
 # ---------------------------------------------------------------------------
@@ -1011,6 +1025,47 @@ async def test_loop_exhausted_keeps_best_unsupported_answer(
     assert selection_events[-1].payload["selected"] == "best_unsupported"
 
 
+async def test_retry_abstain_keeps_cited_unsupported_answer(
+    tmp_path, parser_bench_submodule_present
+):
+    """A late abstain after evidence repair should not erase a cited answer.
+
+    This pins the ADS1299 regression where the first answer was the scorer-
+    correct `10 mA`, the verifier requested more context, and the post-retry
+    verdict abstained even though the best answer still had citations.
+    """
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "10 mA", "citations": ["pkt_000"], "confidence": 0.91}',
+            '{"answer": "10 mA", "citations": ["pkt_000"], "confidence": 0.42}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(supported=False, next_action="expand_context"),
+            _verdict_json(supported=False, next_action="abstain"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "10 mA"
+    assert result.citations
+    assert result.telemetry["loop_terminated"] == "exhausted"
+    selection_events = [
+        e for e in result.trace.debug_events if e.stage == "answer" and e.event_type == "selection"
+    ]
+    assert selection_events[-1].payload["reason"] == "retry_abstain_after_evidence_repair"
+
+
 async def test_loop_expand_context_with_no_citations_targets_no_packets(
     tmp_path, parser_bench_submodule_present
 ):
@@ -1049,6 +1104,7 @@ async def test_loop_expand_context_with_no_citations_targets_no_packets(
     answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
     assert answer_steps[1].args.get("had_escalation_hint") is True
     assert "missing caption context" in reasoner.calls[1]["prompt"]
+    assert "Keep the answer field concise" in reasoner.calls[1]["prompt"]
 
 
 async def test_loop_evidence_retry_can_be_explicitly_disabled(
@@ -1163,6 +1219,55 @@ async def test_loop_escalate_reasoner_is_not_default_evidence_retry(
     assert stage_counts["answer"] == 1
     assert stage_counts["verify"] == 1
     assert stage_counts["expand_context"] == 1
+
+
+async def test_loop_allows_single_entity_shape_retry(
+    tmp_path, parser_bench_submodule_present
+):
+    """A list-like answer to a singular entity question gets one hinted retry."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "UK and US", "citations": ["pkt_000"], "confidence": 0.89}',
+            '{"answer": "Germany", "citations": ["pkt_000"], "confidence": 0.75}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="escalate_reasoner",
+                reason="The answer identifies two countries but the question asks for a single country.",
+            ),
+            _verdict_json(
+                supported=False,
+                next_action="expand_context",
+                reason="The answer is plausible but still unsupported.",
+            ),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+    example = _make_example().model_copy(
+        update={
+            "question": "Which country's 10-year government bond yield changed least?",
+            "answer_type": "exact_match",
+        }
+    )
+
+    result = await workflow.run(
+        example, [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "Germany"
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["evidence_retries_used"] == 0
+    answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
+    assert len(answer_steps) == 2
+    assert "Keep the answer field concise" in reasoner.calls[1]["prompt"]
 
 
 async def test_loop_abstain_terminates_with_unanswerable(tmp_path, parser_bench_submodule_present):

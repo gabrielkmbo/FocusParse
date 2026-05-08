@@ -75,6 +75,7 @@ _DEFAULT_ADJACENCY_PAD = 0.08
 _EXPAND_RETRY_FACTOR = 1.5  # multiplied each retry → wider neighbor net
 _MAX_ADJACENCY_PAD = 0.30  # cap so the pad stays meaningful
 _RETRY_SELECTION_CONFIDENCE_MARGIN = 0.15
+_ABSTAIN_OVERRIDE_MIN_CONFIDENCE = 0.45
 _VISUAL_READABILITY_RE = re.compile(
     r"\b("
     r"blur(?:ry|red)?|cannot\s+read|can't\s+read|garbled|illegible|low[- ]resolution|"
@@ -462,6 +463,30 @@ class FocusWorkflow:
                 loop_terminated = "accepted"
                 break
             if action == "abstain":
+                if _should_keep_best_unsupported_on_retry_abstain(
+                    best_unsupported_answer,
+                    question_event=question_event,
+                    retries_used=retries_used,
+                ):
+                    _add_debug_event(
+                        recorder,
+                        stage="answer",
+                        event_type="selection",
+                        retry_attempt=retries_used,
+                        payload={
+                            "selected": "best_unsupported",
+                            "reason": "retry_abstain_after_evidence_repair",
+                            "selected_answer": best_unsupported_answer.answer,
+                            "selected_confidence": best_unsupported_answer.confidence,
+                            "discarded_answer": answer_event.answer,
+                            "discarded_confidence": answer_event.confidence,
+                        },
+                    )
+                    answer_event = best_unsupported_answer
+                    if best_unsupported_evidence is not None:
+                        answer_evidence = best_unsupported_evidence
+                    loop_terminated = "exhausted"
+                    break
                 # Replace the answer with a typed abstention so downstream
                 # scoring (which checks for abstention keywords) can match.
                 from focusparse.pipeline.events import AnswerEvent as _AnswerEvent
@@ -479,6 +504,14 @@ class FocusWorkflow:
             # can't retry, surface the current answer + flag exhaustion so
             # the trace shows the verifier wasn't satisfied.
             retry_budget = self._retry_budget_for_action(action)
+            if _should_allow_reasoner_shape_retry(
+                action=action,
+                answer=answer_event,
+                verdict=verdict,
+                question_event=question_event,
+                max_evidence_retries=self.max_evidence_retries,
+            ):
+                retry_budget = max(retry_budget, self.max_evidence_retries)
             if retries_used >= retry_budget:
                 loop_terminated = "exhausted"
                 break
@@ -1290,7 +1323,117 @@ def _is_better_unsupported_answer(
         and incumbent_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= candidate_confidence
     ):
         return False
+    if (
+        _question_requests_single_entity(question_text)
+        and _answer_looks_list_like(incumbent.answer)
+        and not _answer_looks_list_like(candidate.answer)
+        and candidate_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= incumbent_confidence
+    ):
+        return True
     return candidate_confidence > incumbent_confidence
+
+
+def _question_requests_single_entity(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    normalized = str(question_text).lower()
+    return bool(
+        re.search(
+            r"\bwhich\s+(?:country|company|entity|region|line|series|label|row|column|value)\b",
+            normalized,
+        )
+        or re.search(
+            r"\bwhich\s+\w+'s\s+",
+            normalized,
+        )
+    )
+
+
+def _answer_looks_list_like(answer: str | None) -> bool:
+    if not answer:
+        return False
+    normalized = str(answer).strip().lower()
+    if ";" in normalized or "," in normalized:
+        return True
+    if re.search(r"\b(?:and|or)\b", normalized):
+        return True
+    return len(_answer_selection_tokens(normalized)) > 3
+
+
+def _should_keep_best_unsupported_on_retry_abstain(
+    answer: AnswerEvent | None,
+    *,
+    question_event: QuestionEvent,
+    retries_used: int,
+) -> bool:
+    """Avoid erasing a cited candidate when an evidence retry gets timid.
+
+    The verifier's first-pass `abstain` remains authoritative. This guard only
+    applies after the controller already spent an evidence retry; empirically,
+    those late abstentions often mean "still unsupported" rather than "the
+    document proves this is unanswerable". Keep a non-abstention candidate so
+    the final trace preserves the best cited answer instead of replacing it
+    with an empty-citation abstention.
+    """
+    if retries_used <= 0 or answer is None:
+        return False
+    if _answer_type_is_unanswerable(question_event.answer_type):
+        return False
+    if not answer.citations:
+        return False
+    if _answer_looks_unanswerable(answer.answer):
+        return False
+    return float(answer.confidence or 0.0) >= _ABSTAIN_OVERRIDE_MIN_CONFIDENCE
+
+
+def _should_allow_reasoner_shape_retry(
+    *,
+    action: str,
+    answer: AnswerEvent,
+    verdict: VerdictEvent,
+    question_event: QuestionEvent,
+    max_evidence_retries: int,
+) -> bool:
+    """Allow a narrow default reasoner retry for verifier-detected answer shape.
+
+    Generic `escalate_reasoner` stays behind `max_retries`: it spends another
+    frontier call without improving evidence packets. This exception is scoped
+    to the common chart/table failure where the evidence is present, the
+    question asks for one entity, and the answer is list-like; the verifier
+    hint usually fixes that without another inspect/expand mutation.
+    """
+    if max_evidence_retries <= 0 or action != "escalate_reasoner":
+        return False
+    if verdict.supported:
+        return False
+    if not answer.citations:
+        return False
+    if not _question_requests_single_entity(question_event.question):
+        return False
+    if not _answer_looks_list_like(answer.answer):
+        return False
+    reason = verdict.reason.lower()
+    return bool(
+        "single" in reason
+        or "one " in reason
+        or "two " in reason
+        or "multiple" in reason
+        or "does not quantify" in reason
+    )
+
+
+def _answer_type_is_unanswerable(answer_type: str | None) -> bool:
+    if not answer_type:
+        return False
+    stem = str(answer_type).split(".")[-1].lower()
+    return stem == "unanswerable"
+
+
+def _answer_looks_unanswerable(answer: str | None) -> bool:
+    if not answer:
+        return True
+    normalized = str(answer).strip().lower()
+    return normalized in {"unanswerable", "unknown", "cannot determine", "can't determine"}
 
 
 def _answer_question_overlap(answer: str | None, question_text: str | None) -> int:

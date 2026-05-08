@@ -137,7 +137,10 @@ async def answer_from_evidence(
             "Your previous answer was rejected by the verifier with this reason:\n"
             f"{escalation_hint}\n\n"
             "Re-read the evidence packets carefully and produce an answer that "
-            "addresses the verifier's concern.\n\n"
+            "addresses the verifier's concern. Keep the answer field concise "
+            "and scorer-compliant: do not add explanations, qualifiers, or "
+            "copied verifier language unless the question explicitly asks for "
+            "a justification.\n\n"
         )
     format_hint = _format_hint(question.answer_type)
     format_block = f"\n{format_hint}\n" if format_hint else ""
