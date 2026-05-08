@@ -20,6 +20,7 @@ from focusparse.pipeline.reasoner import (
     _MAX_PACKET_TEXT_CHARS,
     _collect_packet_images,
     _format_hint,
+    _parse_reasoner_response,
     _render_packet_line,
 )
 
@@ -429,6 +430,39 @@ def test_numeric_format_hint_preserves_requested_units() -> None:
     assert "single number" in hint
     assert "requested unit" in hint
     assert "% sign" in hint
+
+
+def test_exact_match_format_hint_overrides_explain_wording() -> None:
+    hint = _format_hint("exact_match")
+    assert "only the final exact answer" in hint
+    assert "Even if the question asks for an explanation" in hint
+    assert "omit spaces around '='" in hint
+
+
+def test_parse_reasoner_response_canonicalizes_bit_assignments() -> None:
+    answer, citations, confidence = _parse_reasoner_response(
+        (
+            '{"answer":"[15:14] = b00; [8:5] = b1111; [4:3] = b11",'
+            '"citations":["pkt_000"],"confidence":0.98}'
+        ),
+        valid_packet_ids={"pkt_000"},
+    )
+
+    assert answer == "[15:14]=b00, [8:5]=b1111, [4:3]=b11"
+    assert citations == ["pkt_000"]
+    assert confidence == 0.98
+
+
+def test_parse_reasoner_response_keeps_verbose_bit_prose_unchanged() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"[15:14] = b00 because the table says secure or non-secure; '
+            '[8:5] = b1111","citations":[],"confidence":0.5}'
+        ),
+        valid_packet_ids=set(),
+    )
+
+    assert "because" in answer
 
 
 # ---------------------------------------------------------------------------

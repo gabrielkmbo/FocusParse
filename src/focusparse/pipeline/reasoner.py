@@ -41,6 +41,7 @@ _SYSTEM_PROMPT = (
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _CONTEXT_LINE_RE = re.compile(r"^Context\s+\[(?P<role>[^\]]+)\]:\s*(?P<text>.+)$")
+_BIT_ASSIGNMENT_RE = re.compile(r"\[\s*(?P<bits>\d+(?::\d+)?)\s*\]\s*=\s*(?P<value>b[01xX]+)")
 _MAX_PACKET_TEXT_CHARS = 240
 _MAX_TEXT_ONLY_CONTEXT_CHARS = 120
 _TEXT_ONLY_NEIGHBOR_TYPES = frozenset(
@@ -98,7 +99,10 @@ def _format_hint(answer_type: str | None) -> str:
             "Answer with the exact label, identifier, or phrase from the document. "
             "Quote the document verbatim — do not paraphrase, abbreviate, or add "
             "explanation text that isn't present in the document. Match the "
-            "document's exact punctuation."
+            "document's exact punctuation. Even if the question asks for an "
+            "explanation, put only the final exact answer in the `answer` field. "
+            "For register bit-field assignments, omit spaces around '=' and "
+            "separate assignments with comma+space, e.g. [15:14]=b00, [8:5]=b1111."
         )
     if stem == "boolean":
         return "Answer 'yes' or 'no'."
@@ -139,8 +143,7 @@ async def answer_from_evidence(
             "Re-read the evidence packets carefully and produce an answer that "
             "addresses the verifier's concern. Keep the answer field concise "
             "and scorer-compliant: do not add explanations, qualifiers, or "
-            "copied verifier language unless the question explicitly asks for "
-            "a justification.\n\n"
+            "copied verifier language.\n\n"
         )
     format_hint = _format_hint(question.answer_type)
     format_block = f"\n{format_hint}\n" if format_hint else ""
@@ -457,6 +460,7 @@ def _parse_reasoner_response(
     answer = obj.get("answer", "")
     if not isinstance(answer, str):
         answer = str(answer)
+    answer = _canonicalize_bit_field_assignments(answer)
 
     raw_citations = obj.get("citations", []) or []
     citations = [c for c in raw_citations if isinstance(c, str) and c in valid_packet_ids]
@@ -469,3 +473,17 @@ def _parse_reasoner_response(
     confidence = max(0.0, min(1.0, confidence))
 
     return answer, citations, confidence
+
+
+def _canonicalize_bit_field_assignments(answer: str) -> str:
+    """Normalize terse register bit-field answers without touching prose."""
+    matches = list(_BIT_ASSIGNMENT_RE.finditer(answer))
+    if len(matches) < 2:
+        return answer
+    residual = _BIT_ASSIGNMENT_RE.sub("", answer)
+    residual = re.sub(r"[\s,;]+", "", residual)
+    if residual:
+        return answer
+    return ", ".join(
+        f"[{match.group('bits')}]={match.group('value').lower()}" for match in matches
+    )

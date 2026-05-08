@@ -1604,6 +1604,7 @@ async def test_simple_agent_prompt_includes_exact_match_hint(
 
     prompt = client.calls[0]["prompt"]
     assert "exact label" in prompt.lower()
+    assert "only the final exact answer" in prompt.lower()
 
 
 async def test_simple_agent_prompt_includes_boolean_hint(tmp_path, parser_bench_submodule_present):

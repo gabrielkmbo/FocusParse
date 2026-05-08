@@ -1854,7 +1854,10 @@ def _format_hint(answer_type: object) -> str:
             "Answer with the exact label, identifier, or phrase from the document. "
             "Quote the document verbatim — do not paraphrase, abbreviate, or add "
             "explanation text that isn't present in the document. Match the "
-            "document's exact punctuation."
+            "document's exact punctuation. Even if the question asks for an "
+            "explanation, put only the final exact answer in the answer field. "
+            "For register bit-field assignments, omit spaces around '=' and "
+            "separate assignments with comma+space, e.g. [15:14]=b00, [8:5]=b1111."
         )
     if stem == "boolean":
         return "Answer 'yes' or 'no'."
