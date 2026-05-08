@@ -20,6 +20,7 @@ from typing import Any
 from focusparse.eval.pricing import compute_usd
 from focusparse.models._timeouts import model_timeout_s
 from focusparse.models.base import ModelResponse
+from focusparse.models.images import read_model_image_bytes
 
 
 class OpenAIClient:
@@ -55,7 +56,7 @@ class OpenAIClient:
 
         user_content: list[dict[str, Any]] = []
         for img_path in images or []:
-            data = Path(img_path).read_bytes()
+            data = read_model_image_bytes(Path(img_path))
             b64 = base64.b64encode(data).decode("ascii")
             user_content.append(
                 {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"}

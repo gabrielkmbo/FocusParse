@@ -19,6 +19,7 @@ from typing import Any
 from focusparse.eval.pricing import compute_usd
 from focusparse.models._timeouts import model_timeout_s
 from focusparse.models.base import ModelResponse
+from focusparse.models.images import read_model_image_bytes
 
 
 class GeminiClient:
@@ -52,7 +53,7 @@ class GeminiClient:
 
         parts: list[Any] = []
         for img_path in images or []:
-            data = Path(img_path).read_bytes()
+            data = read_model_image_bytes(Path(img_path))
             parts.append(types.Part.from_bytes(data=data, mime_type="image/png"))
         parts.append(types.Part.from_text(text=prompt))
 
