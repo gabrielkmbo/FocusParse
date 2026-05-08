@@ -379,7 +379,7 @@ def _pick_neighbors(
     for cand in candidates:
         ctype = (cand.region_type or "").lower()
         has_context_role = cand.needed_for in _RERANK_CONTEXT_ROLES
-        if ctype not in _NEIGHBOR_TYPES and not has_context_role:
+        if ctype not in _NEIGHBOR_TYPES and ctype not in permitted and not has_context_role:
             continue
         if _bbox_equal(cand.bbox_norm, packet.bbox_norm):
             continue
@@ -472,6 +472,31 @@ def _neighbor_types_from_verifier_reason(reason: str | None) -> frozenset[str]:
         (
             ("header", "headers", "row label", "column label"),
             frozenset({"page-header", "section_header", "section-header", "title"}),
+        ),
+        (
+            (
+                "cell",
+                "cells",
+                "column",
+                "columns",
+                "row",
+                "rows",
+                "table",
+                "tables",
+                "value",
+                "values",
+            ),
+            frozenset(
+                {
+                    "code",
+                    "key-value region",
+                    "key_value_region",
+                    "list-item",
+                    "list_item",
+                    "table",
+                    "text",
+                }
+            ),
         ),
         (("legend", "legends"), frozenset({"legend"})),
         (("title", "section title"), frozenset({"title", "section_header", "section-header"})),

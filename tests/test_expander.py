@@ -22,7 +22,7 @@ from pathlib import Path
 
 from focusparse.evidence.packet import EvidencePacket, PacketProvenance
 from focusparse.pipeline.events import EvidenceEvent, RegionCandidate, RegionsEvent
-from focusparse.pipeline.expander import expand_context
+from focusparse.pipeline.expander import _neighbor_types_from_verifier_reason, expand_context
 
 
 def _packet(
@@ -998,6 +998,45 @@ async def test_verifier_reason_can_expand_beyond_original_plan_hint(tmp_path, mo
         max_neighbors_per_packet=2,
     )
     assert set(out.packets[0].linked_neighbor_types) == {"caption", "footnote"}
+
+
+def test_verifier_reason_allows_table_cell_context_types():
+    allowed = _neighbor_types_from_verifier_reason("missing row and column cell value")
+    assert {"table", "text", "list-item", "key-value region"} <= allowed
+
+
+async def test_verifier_directed_table_retry_allows_nearby_text_regions(tmp_path, monkeypatch):
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.30, 0.52, 0.70, 0.56), region_type="text"),
+            _region(page=1, bbox_norm=(0.30, 0.34, 0.70, 0.38), region_type="table"),
+            _region(page=1, bbox_norm=(0.30, 0.58, 0.70, 0.62), region_type="picture"),
+        ]
+    )
+
+    initial = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["caption"]),
+        max_neighbors_per_packet=2,
+    )
+    assert initial.packets[0].linked_neighbor_types == []
+
+    retry = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["caption"]),
+        verifier_reason="missing row/column cell value from the table",
+        max_neighbors_per_packet=2,
+    )
+    assert set(retry.packets[0].linked_neighbor_types) == {"table", "text"}
 
 
 async def test_target_packet_ids_limit_which_packets_expand(tmp_path, monkeypatch):
