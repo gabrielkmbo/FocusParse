@@ -70,16 +70,24 @@ _EVIDENCE_TYPE_TO_NEIGHBOR_TYPES: dict[str, frozenset[str]] = {
     "axis_label": frozenset({"axis-label", "axis_label"}),
     "axis-label": frozenset({"axis-label", "axis_label"}),
     "caption": frozenset({"caption"}),
+    "column_header": frozenset({"page-header", "section_header", "section-header", "title"}),
+    "continuation": frozenset(
+        {"page-header", "page-footer", "section_header", "section-header", "title"}
+    ),
     "footnote": frozenset({"footnote"}),
     "header": frozenset({"page-header", "section_header", "section-header", "title"}),
     "footer": frozenset({"page-footer"}),
     "chart": frozenset({"axis-label", "axis_label", "caption", "legend", "title"}),
     "legend": frozenset({"legend"}),
+    "row_header": frozenset({"page-header", "section_header", "section-header", "title"}),
     "table": frozenset(
         {"caption", "footnote", "page-header", "section_header", "section-header", "title"}
     ),
     "title": frozenset({"title", "section_header", "section-header"}),
     "section_header": frozenset({"section_header", "section-header", "title"}),
+    "unit": frozenset({"axis-label", "axis_label", "caption", "legend"}),
+    "x_axis": frozenset({"axis-label", "axis_label"}),
+    "y_axis": frozenset({"axis-label", "axis_label"}),
 }
 
 # Reranker `needed_for` roles that indicate "this region is a context
@@ -135,6 +143,7 @@ async def expand_context(
     adjacency_pad: float = _DEFAULT_ADJACENCY_PAD,
     use_evidence_graph: bool = False,
     plan: PlanEvent | None = None,
+    verifier_reason: str | None = None,
     relevance_threshold: float = _DEFAULT_NEIGHBOR_RELEVANCE_THRESHOLD,
 ) -> EvidenceEvent:
     """Attach annotation neighbors to each packet, or pass through unchanged.
@@ -160,11 +169,15 @@ async def expand_context(
         adjacency_pad: fractional bbox expansion for the overlap test.
         plan: optional `PlanEvent`. When provided, `plan.evidence_types`
             filters neighbor candidates to types the planner asked for
-            (e.g. "caption" → only attach captions). Without `plan` and
-            without reranker relevance scores, the expander falls back
-            to a tighter spatial-only budget — the rebaseline-v2 finding
-            (2026-05-05) showed that query-blind expansion attached ~13
-            neighbors per example and hurt 11 of 13 affected examples.
+            (e.g. "caption" → only attach captions).
+        verifier_reason: optional unsupported-verdict reason from a verifier
+            retry. Mentions like "missing legend" or "needs footnote" add
+            targeted neighbor types even if the original planner hint was
+            narrower. Without `plan`/`verifier_reason` and without reranker
+            relevance scores, the expander falls back to a tighter
+            spatial-only budget — the rebaseline-v2 finding (2026-05-05)
+            showed that query-blind expansion attached ~13 neighbors per
+            example and hurt 11 of 13 affected examples.
         relevance_threshold: when the reranker (Phase 2 item 4) scored
             candidates, neighbors below this threshold are filtered out
             even if they overlap spatially. Default 0.3.
@@ -178,7 +191,10 @@ async def expand_context(
 
     # Resolve which neighbor region_types the planner permits. Empty set
     # means "no planner hint" → fall back to the conservative budget.
-    permitted_neighbor_types = _resolve_permitted_neighbor_types(plan)
+    permitted_neighbor_types = _resolve_permitted_neighbor_types(
+        plan,
+        verifier_reason=verifier_reason,
+    )
     has_planner_hint = bool(permitted_neighbor_types)
     has_rerank_signal = any(
         c.relevance is not None or c.needed_for is not None for c in regions.candidates
@@ -404,7 +420,11 @@ def _neighbor_role(cand: RegionCandidate) -> str:
     return ctype or "unknown"
 
 
-def _resolve_permitted_neighbor_types(plan: PlanEvent | None) -> frozenset[str]:
+def _resolve_permitted_neighbor_types(
+    plan: PlanEvent | None,
+    *,
+    verifier_reason: str | None = None,
+) -> frozenset[str]:
     """Map `plan.evidence_types` (planner vocab) to the set of detector-vocab
     region_types the expander is allowed to attach as neighbors.
 
@@ -412,17 +432,48 @@ def _resolve_permitted_neighbor_types(plan: PlanEvent | None) -> frozenset[str]:
     callers fall back to the legacy spatial heuristic in that case (with a
     tighter neighbor cap to bound noise).
     """
-    if plan is None or not plan.evidence_types:
-        return frozenset()
     permitted: set[str] = set()
-    for raw in plan.evidence_types:
-        key = (raw or "").strip().lower()
-        if not key:
-            continue
-        aliases = _EVIDENCE_TYPE_TO_NEIGHBOR_TYPES.get(key)
-        if aliases:
-            permitted |= aliases
+    if plan is not None:
+        for raw in plan.evidence_types:
+            key = (raw or "").strip().lower()
+            if not key:
+                continue
+            aliases = _EVIDENCE_TYPE_TO_NEIGHBOR_TYPES.get(key)
+            if aliases:
+                permitted |= aliases
+    permitted |= _neighbor_types_from_verifier_reason(verifier_reason)
     return frozenset(permitted)
+
+
+def _neighbor_types_from_verifier_reason(reason: str | None) -> frozenset[str]:
+    """Infer targeted context-neighbor types from verifier failure text."""
+    if not reason:
+        return frozenset()
+    normalized = reason.lower()
+    normalized = re.sub(r"[^a-z0-9_ -]+", " ", normalized)
+    wanted: set[str] = set()
+    token_checks: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
+        (
+            ("axis label", "axis labels", "tick label", "tick labels"),
+            frozenset({"axis-label", "axis_label"}),
+        ),
+        (("caption", "captions"), frozenset({"caption"})),
+        (("footnote", "footnotes", "note", "notes"), frozenset({"footnote"})),
+        (
+            ("header", "headers", "row label", "column label"),
+            frozenset({"page-header", "section_header", "section-header", "title"}),
+        ),
+        (("legend", "legends"), frozenset({"legend"})),
+        (("title", "section title"), frozenset({"title", "section_header", "section-header"})),
+        (
+            ("continuation", "continued", "previous page", "next page"),
+            frozenset({"page-header", "page-footer", "section_header", "section-header", "title"}),
+        ),
+    )
+    for needles, aliases in token_checks:
+        if any(needle in normalized for needle in needles):
+            wanted |= aliases
+    return frozenset(wanted)
 
 
 def _pad_bbox(

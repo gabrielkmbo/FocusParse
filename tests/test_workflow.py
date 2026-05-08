@@ -734,7 +734,11 @@ async def test_loop_expand_context_reruns_only_expand_answer_verify(
     reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
     verifier = _ScriptedClient(
         [
-            _verdict_json(supported=False, next_action="expand_context"),
+            _verdict_json(
+                supported=False,
+                next_action="expand_context",
+                reason="missing footnote context",
+            ),
             _verdict_json(supported=True, next_action="accept"),
         ]
     )
@@ -761,6 +765,8 @@ async def test_loop_expand_context_reruns_only_expand_answer_verify(
     expand_steps = [s for s in result.trace.steps if s.stage == "expand_context"]
     pads = [s.args.get("adjacency_pad") for s in expand_steps]
     assert pads[0] < pads[1], f"adjacency_pad should grow on retry; got {pads}"
+    assert expand_steps[1].args["verifier_missing_context"] == ["footnote"]
+    assert expand_steps[1].args["verifier_reason"] == "missing footnote context"
 
 
 async def test_loop_expand_context_retries_once_by_default(

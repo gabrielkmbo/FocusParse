@@ -65,6 +65,10 @@ _SYSTEM_PROMPT = (
     "  * abstain: evidence is contradictory or absent — safer to decline.\n"
     "  * escalate_reasoner: evidence is sufficient but the answer mis-read "
     "it — a stronger reasoner should retry.\n"
+    "- When `next_action` is expand_context, include optional "
+    "`diagnostics.missing_context` with any of: caption, legend, footnote, "
+    "header, continuation, axis_label, row_header, column_header, unit, "
+    "x_axis, y_axis.\n"
     "- Prefer `escalate_reasoner` over `expand_context` when the packet text "
     "already contains the needed labels, rows, numbers, units, or formula "
     "inputs, but the answer uses the wrong arithmetic or extracts the wrong "
@@ -116,6 +120,7 @@ async def verify_answer(
         reason=parsed.get("reason") or fallback.reason,
         next_action=parsed.get("next_action") or fallback.next_action,
         confidence=parsed.get("confidence", fallback.confidence),
+        diagnostics=parsed.get("diagnostics", fallback.diagnostics),
     )
     return verdict, response
 
@@ -238,6 +243,13 @@ def _parse_verifier_response(text: str | None) -> dict[str, Any]:
         if 0.0 <= c <= 1.0:
             out["confidence"] = c
 
+    diagnostics = _parse_diagnostics(
+        obj.get("diagnostics"),
+        reason=out.get("reason"),
+    )
+    if diagnostics:
+        out["diagnostics"] = diagnostics
+
     return out
 
 
@@ -250,3 +262,128 @@ def _normalize_next_action(value: str) -> str | None:
     if normalized in _VALID_NEXT_ACTIONS:
         return normalized
     return None
+
+
+def _parse_diagnostics(raw: Any, *, reason: str | None = None) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {}
+    missing_context: list[str] = []
+    target_packet_ids: list[str] = []
+
+    if isinstance(raw, dict):
+        missing_context.extend(_normalize_missing_context_values(raw.get("missing_context")))
+        packet_ids = raw.get("target_packet_ids")
+        if isinstance(packet_ids, str):
+            packet_ids = [packet_ids]
+        if isinstance(packet_ids, list):
+            for packet_id in packet_ids:
+                if isinstance(packet_id, str) and packet_id.strip():
+                    target_packet_ids.append(packet_id.strip()[:80])
+
+    missing_context.extend(_missing_context_from_text(reason))
+    missing_context = _dedupe_preserve_order(missing_context)
+    target_packet_ids = _dedupe_preserve_order(target_packet_ids)
+
+    if missing_context:
+        diagnostics["missing_context"] = missing_context
+    if target_packet_ids:
+        diagnostics["target_packet_ids"] = target_packet_ids
+    return diagnostics
+
+
+def _normalize_missing_context_values(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    normalized: list[str] = []
+    for value in raw:
+        if not isinstance(value, str):
+            continue
+        context = _normalize_missing_context_value(value)
+        if context is not None:
+            normalized.append(context)
+    return normalized
+
+
+def _normalize_missing_context_value(value: str) -> str | None:
+    key = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+    aliases = {
+        "axis": "axis_label",
+        "axis_label": "axis_label",
+        "axis_labels": "axis_label",
+        "tick_label": "axis_label",
+        "tick_labels": "axis_label",
+        "caption": "caption",
+        "captions": "caption",
+        "column_header": "column_header",
+        "column_headers": "column_header",
+        "column_label": "column_header",
+        "column_labels": "column_header",
+        "continued": "continuation",
+        "continued_table": "continuation",
+        "continuation": "continuation",
+        "footer": "header",
+        "footnote": "footnote",
+        "footnotes": "footnote",
+        "header": "header",
+        "headers": "header",
+        "legend": "legend",
+        "legends": "legend",
+        "next_page": "continuation",
+        "note": "footnote",
+        "notes": "footnote",
+        "page_footer": "header",
+        "page_header": "header",
+        "previous_page": "continuation",
+        "row_header": "row_header",
+        "row_headers": "row_header",
+        "row_label": "row_header",
+        "row_labels": "row_header",
+        "section_header": "header",
+        "title": "header",
+        "unit": "unit",
+        "units": "unit",
+        "x_axis": "x_axis",
+        "x_axis_label": "x_axis",
+        "y_axis": "y_axis",
+        "y_axis_label": "y_axis",
+    }
+    return aliases.get(key)
+
+
+def _missing_context_from_text(reason: str | None) -> list[str]:
+    if not reason:
+        return []
+    normalized = reason.lower()
+    phrase_checks: tuple[tuple[tuple[str, ...], str], ...] = (
+        (("x axis", "x-axis"), "x_axis"),
+        (("y axis", "y-axis"), "y_axis"),
+        (("axis label", "axis labels", "tick label", "tick labels"), "axis_label"),
+        (("caption", "captions"), "caption"),
+        (("column header", "column label"), "column_header"),
+        (("row header", "row label"), "row_header"),
+        (("footnote", "footnotes", "note", "notes"), "footnote"),
+        (("legend", "legends"), "legend"),
+        (
+            ("continued table", "continuation", "continued on", "next page", "previous page"),
+            "continuation",
+        ),
+        (("section header", "header", "headers", "title"), "header"),
+        (("unit", "units"), "unit"),
+    )
+    found: list[str] = []
+    for needles, context in phrase_checks:
+        if any(needle in normalized for needle in needles):
+            found.append(context)
+    return found
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped

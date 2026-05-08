@@ -316,6 +316,39 @@ async def test_verify_llm_normalizes_common_next_action_variants(raw_action, exp
     assert verdict.next_action == expected
 
 
+async def test_verify_llm_populates_missing_context_diagnostics():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "missing legend", '
+        '"next_action": "expand_context", "confidence": 0.7, '
+        '"diagnostics": {"missing_context": ["footnote", "bogus", "column header"], '
+        '"target_packet_ids": ["pkt_000"]}}'
+    )
+    verdict, _ = await verify_answer(
+        _question(),
+        _evidence(_packet()),
+        _answer(confidence=0.42),
+        backend_client=client,
+    )
+    assert verdict.diagnostics == {
+        "missing_context": ["footnote", "column_header", "legend"],
+        "target_packet_ids": ["pkt_000"],
+    }
+
+
+async def test_verify_llm_infers_missing_context_from_reason():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "missing legend and footnote; continued table '
+        'on next page", "next_action": "expand_context", "confidence": 0.7}'
+    )
+    verdict, _ = await verify_answer(
+        _question(),
+        _evidence(_packet()),
+        _answer(confidence=0.42),
+        backend_client=client,
+    )
+    assert verdict.diagnostics["missing_context"] == ["footnote", "legend", "continuation"]
+
+
 async def test_verify_llm_rejects_non_bool_supported():
     client = _FakeVerifierClient(
         '{"supported": "yes", "reason": "ok", "next_action": "accept", "confidence": 0.9}'

@@ -488,6 +488,8 @@ class FocusWorkflow:
                 )
             elif action == "expand_context":
                 adjacency_pad = min(adjacency_pad * _EXPAND_RETRY_FACTOR, _MAX_ADJACENCY_PAD)
+                verifier_missing_context = _verifier_missing_context(verdict)
+                retry_plan = _plan_with_extra_evidence_types(plan, verifier_missing_context)
                 evidence = await self._run_expand(
                     evidence,
                     regions=regions,
@@ -497,7 +499,9 @@ class FocusWorkflow:
                     recorder=recorder,
                     step_counter=step_counter,
                     retry_attempt=retries_used,
-                    plan=plan,
+                    plan=retry_plan,
+                    verifier_reason=verdict.reason,
+                    verifier_missing_context=verifier_missing_context,
                 )
             elif action == "escalate_reasoner":
                 # No state change — just feed the verifier's reason into the
@@ -828,6 +832,8 @@ class FocusWorkflow:
         step_counter: _StepCounter,
         retry_attempt: int = 0,
         plan: PlanEvent | None = None,
+        verifier_reason: str | None = None,
+        verifier_missing_context: list[str] | None = None,
     ) -> EvidenceEvent:
         # Tool-set ablation: when running with the +2-tools (minimal) belt
         # we skip expand_context entirely. The trace records a passthrough
@@ -868,6 +874,7 @@ class FocusWorkflow:
             adjacency_pad=adjacency_pad,
             use_evidence_graph=self.use_evidence_graph,
             plan=plan,
+            verifier_reason=verifier_reason,
         )
         n_with_neighbors = sum(1 for p in expanded.packets if p.linked_crop_refs)
         n_neighbors = sum(len(p.linked_crop_refs) for p in expanded.packets)
@@ -884,6 +891,8 @@ class FocusWorkflow:
                     "n_neighbors_attached": n_neighbors,
                     "adjacency_pad": adjacency_pad,
                     "retry_attempt": retry_attempt,
+                    "verifier_reason": verifier_reason,
+                    "verifier_missing_context": verifier_missing_context or [],
                 },
             )
         )
@@ -898,6 +907,8 @@ class FocusWorkflow:
                 "n_with_neighbors": n_with_neighbors,
                 "n_neighbors_attached": n_neighbors,
                 "adjacency_pad": adjacency_pad,
+                "verifier_reason": verifier_reason,
+                "verifier_missing_context": verifier_missing_context or [],
                 "packets": [_packet_to_debug(p) for p in expanded.packets],
             },
         )
@@ -1011,6 +1022,39 @@ class FocusWorkflow:
 # ---------------------------------------------------------------------------
 # Helpers (pure, unit-testable)
 # ---------------------------------------------------------------------------
+
+
+def _verifier_missing_context(verdict: VerdictEvent) -> list[str]:
+    raw = verdict.diagnostics.get("missing_context")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        value = item.strip()
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _plan_with_extra_evidence_types(plan: PlanEvent, extra_types: list[str]) -> PlanEvent:
+    if not extra_types:
+        return plan
+    evidence_types: list[str] = []
+    seen: set[str] = set()
+    for raw in [*plan.evidence_types, *extra_types]:
+        value = (raw or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        evidence_types.append(value)
+    if evidence_types == plan.evidence_types:
+        return plan
+    return plan.model_copy(update={"evidence_types": evidence_types})
 
 
 def _add_debug_event(

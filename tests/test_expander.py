@@ -952,6 +952,30 @@ async def test_planner_chart_hint_allows_legend_and_axis_labels(tmp_path, monkey
     assert set(out.packets[0].linked_neighbor_types) == {"axis_label", "legend"}
 
 
+async def test_verifier_reason_can_expand_beyond_original_plan_hint(tmp_path, monkeypatch):
+    """Verifier feedback should steer retries toward the missing context type."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.30, 0.52, 0.70, 0.56), region_type="caption"),
+            _region(page=1, bbox_norm=(0.30, 0.34, 0.70, 0.38), region_type="footnote"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["caption"]),
+        verifier_reason="unsupported: cited table row is missing the footnote note",
+        max_neighbors_per_packet=2,
+    )
+    assert set(out.packets[0].linked_neighbor_types) == {"caption", "footnote"}
+
+
 async def test_query_aware_planner_no_hint_uses_fallback_max_1(tmp_path, monkeypatch):
     """Without planner hint AND without rerank scores, the spatial-only
     fallback is bounded to _FALLBACK_MAX_NEIGHBORS_PER_PACKET (= 1 as of
