@@ -1484,6 +1484,63 @@ async def test_retry_expand_adds_context_window_for_target_packet(tmp_path, monk
     )
 
 
+async def test_retry_expand_adds_union_context_window_for_fragmented_targets(
+    tmp_path, monkeypatch
+):
+    """Verifier retries over same-page fragments get one crop spanning them."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+
+    class _TextOut:
+        text = "full diagram context"
+        source = "native"
+
+    async def _fake_get_text_layer(inp, *, cache_dir=None):
+        return _TextOut()
+
+    monkeypatch.setattr("focusparse.pipeline.expander.get_text_layer", _fake_get_text_layer)
+
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                packet_id="p0",
+                page=1,
+                bbox_norm=(0.20, 0.30, 0.30, 0.36),
+                region_type="text",
+            ),
+            _packet(
+                packet_id="p1",
+                page=1,
+                bbox_norm=(0.58, 0.62, 0.68, 0.68),
+                region_type="text",
+            ),
+            _packet(
+                packet_id="p2",
+                page=2,
+                bbox_norm=(0.20, 0.30, 0.30, 0.36),
+                region_type="text",
+            ),
+        ]
+    )
+
+    out = await expand_context(
+        ev,
+        regions=RegionsEvent(candidates=[]),
+        pdf_path=Path("/fake.pdf"),
+        verifier_reason="pkt_000 and pkt_001 are disconnected fragments of the full diagram",
+        target_packet_ids=["p0", "p1"],
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["page"] == 1
+    assert tuple(round(v, 2) for v in calls[0]["bbox_norm"]) == (0.06, 0.16, 0.82, 0.82)
+    assert out.packets[0].linked_neighbor_types == ["context_window"]
+    assert out.packets[1].linked_neighbor_types == ["context_window"]
+    assert out.packets[0].linked_crop_refs == out.packets[1].linked_crop_refs
+    assert out.packets[2].linked_neighbor_types == []
+    assert out.packets[0].text_layer_snippet == "Context [context_window]: full diagram context"
+
+
 async def test_retry_expand_context_window_does_not_consume_neighbor_cap(tmp_path, monkeypatch):
     """The wider retry crop is extra evidence; table/text neighbors still get
     their normal cap."""
@@ -1569,6 +1626,47 @@ async def test_retry_visual_zoom_adds_zoomed_crop_for_target_packet(tmp_path, mo
     assert out.packets[0].linked_crop_refs == []
     assert "expand_context:visual_zoom1" in out.packets[0].provenance.args_hash
     assert out.packets[1].multi_scale_crops == []
+
+
+async def test_retry_visual_zoom_with_missing_context_continues_to_neighbors(
+    tmp_path, monkeypatch
+):
+    async def _fake_zoom_crop(*, crop_ref, cache_dir, packet_id):
+        return "/crops/p0_zoomed.png"
+
+    monkeypatch.setattr("focusparse.pipeline.expander._zoom_crop", _fake_zoom_crop)
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(
+                packet_id="p0",
+                page=7,
+                bbox_norm=(0.20, 0.30, 0.40, 0.50),
+                region_type="Picture",
+            ),
+        ]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=7, bbox_norm=(0.22, 0.51, 0.38, 0.56), region_type="caption"),
+        ]
+    )
+
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        verifier_reason="p0 crop is unreadable and needs the caption",
+        verifier_missing_context=["caption"],
+        target_packet_ids=["p0"],
+        retry_visual_zoom=True,
+    )
+
+    packet = out.packets[0]
+    assert [crop.scale for crop in packet.multi_scale_crops] == ["tight", "zoomed"]
+    assert packet.linked_neighbor_types == ["context_window", "caption"]
+    assert calls
 
 
 async def test_retry_visual_zoom_falls_back_to_context_when_zoom_fails(monkeypatch):

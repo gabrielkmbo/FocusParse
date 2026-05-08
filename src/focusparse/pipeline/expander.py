@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 
@@ -174,6 +175,15 @@ _CONTEXT_WINDOW_REGION_TYPES: frozenset[str] = frozenset(
         "text",
     }
 )
+_RETRY_UNION_CONTEXT_PAD = 0.14
+_RETRY_UNION_CONTEXT_RE = re.compile(
+    r"\b("
+    r"disconnect(?:ed)?|fragment(?:ed|s)?|full\s+(?:diagram|figure|context)|"
+    r"larger\s+(?:crop|context|view)|surrounding\s+(?:context|diagram|figure)|"
+    r"too\s+small|unclear|garbled|illegible|not\s+enough\s+context"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 async def expand_context(
@@ -189,6 +199,7 @@ async def expand_context(
     use_evidence_graph: bool = False,
     plan: PlanEvent | None = None,
     verifier_reason: str | None = None,
+    verifier_missing_context: list[str] | None = None,
     target_packet_ids: list[str] | None = None,
     relevance_threshold: float = _DEFAULT_NEIGHBOR_RELEVANCE_THRESHOLD,
     retry_visual_zoom: bool = False,
@@ -225,6 +236,10 @@ async def expand_context(
             supplied coarse hints — the rebaseline-v2 finding (2026-05-05)
             showed that broad expansion attached ~13 neighbors per example
             and hurt 11 of 13 affected examples.
+        verifier_missing_context: structured verifier hints such as
+            ``["caption", "legend"]``. Pure visual-readability retries remain
+            zoom-only, but these hints allow the retry to add the requested
+            context after the zoom succeeds.
         target_packet_ids: optional packet ids to expand. Verifier-driven
             retries use this to avoid adding fresh context to packets the
             answer did not cite. ``None`` means expand all eligible packets
@@ -247,7 +262,12 @@ async def expand_context(
             target_packet_ids=target_packet_ids,
         )
         if _zoom_added(evidence, zoomed):
-            return zoomed
+            evidence = zoomed
+            if _visual_zoom_retry_should_stay_narrow(
+                verifier_missing_context=verifier_missing_context,
+                verifier_reason=verifier_reason,
+            ):
+                return evidence
 
     # Resolve which neighbor region_types the planner permits. Empty set
     # means "no planner hint" → fall back to the conservative budget.
@@ -285,6 +305,16 @@ async def expand_context(
         else None
     )
     total_new_neighbor_links = 0
+    retry_union_context = await _retry_union_context_windows(
+        evidence,
+        target_set=target_set,
+        target_filter_active=target_filter_active,
+        verifier_reason=verifier_reason,
+        pdf_path=pdf_path,
+        images_by_page=images_by_page,
+        crop_cache_dir=crop_cache_dir,
+        text_layer_cache_dir=text_layer_cache_dir,
+    )
     for packet in evidence.packets:
         if target_filter_active and packet.packet_id not in target_set:
             new_packets.append(packet)
@@ -356,7 +386,12 @@ async def expand_context(
         context_window_ref = None
         context_window_text = None
         context_window_bbox = None
-        if _should_attach_retry_context_window(
+        union_context = retry_union_context.get(packet.packet_id)
+        if union_context is not None:
+            context_window_ref = union_context.ref
+            context_window_text = union_context.text
+            context_window_bbox = union_context.bbox
+        elif _should_attach_retry_context_window(
             packet,
             verifier_reason=verifier_reason,
             target_filter_active=target_filter_active,
@@ -448,6 +483,101 @@ async def expand_context(
         updates.update(_context_text_updates(packet, linked_texts))
         new_packets.append(packet.model_copy(update=updates))
     return EvidenceEvent(packets=new_packets)
+
+
+@dataclass(frozen=True)
+class _RetryContextWindow:
+    ref: str
+    bbox: tuple[float, float, float, float]
+    text: str | None = None
+
+
+async def _retry_union_context_windows(
+    evidence: EvidenceEvent,
+    *,
+    target_set: set[str],
+    target_filter_active: bool,
+    verifier_reason: str | None,
+    pdf_path: Path | None,
+    images_by_page: dict[int, Path] | None,
+    crop_cache_dir: Path | None,
+    text_layer_cache_dir: Path | None,
+) -> dict[str, _RetryContextWindow]:
+    """Build one wider same-page crop for fragmented multi-packet retries."""
+    if not _should_attach_retry_union_context(
+        evidence,
+        target_set=target_set,
+        target_filter_active=target_filter_active,
+        verifier_reason=verifier_reason,
+    ):
+        return {}
+
+    out: dict[str, _RetryContextWindow] = {}
+    for packets in _target_packets_grouped_by_page(evidence, target_set).values():
+        if len(packets) < 2:
+            continue
+        bbox = _union_context_bbox(packets)
+        anchor = packets[0]
+        ref = await _crop_context_window(
+            anchor,
+            pdf_path=pdf_path,
+            page_image=(images_by_page or {}).get(anchor.page),
+            crop_cache_dir=crop_cache_dir,
+            bbox=bbox,
+            pad=0.0,
+        )
+        if ref is None:
+            continue
+        text = await _extract_neighbor_text(
+            _synth_context_window_region(anchor, bbox),
+            role="context_window",
+            pdf_path=pdf_path,
+            crop_ref=ref,
+            text_layer_cache_dir=text_layer_cache_dir,
+            crop_cache_dir=crop_cache_dir,
+        )
+        window = _RetryContextWindow(ref=ref, bbox=bbox, text=text)
+        for packet in packets:
+            out[packet.packet_id] = window
+    return out
+
+
+def _should_attach_retry_union_context(
+    evidence: EvidenceEvent,
+    *,
+    target_set: set[str],
+    target_filter_active: bool,
+    verifier_reason: str | None,
+) -> bool:
+    if not (target_filter_active and verifier_reason and len(target_set) >= 2):
+        return False
+    if not _RETRY_UNION_CONTEXT_RE.search(verifier_reason):
+        return False
+    return any(
+        len(packets) >= 2
+        for packets in _target_packets_grouped_by_page(evidence, target_set).values()
+    )
+
+
+def _target_packets_grouped_by_page(
+    evidence: EvidenceEvent,
+    target_set: set[str],
+) -> dict[int, list[EvidencePacket]]:
+    by_page: dict[int, list[EvidencePacket]] = {}
+    for packet in evidence.packets:
+        if packet.packet_id in target_set:
+            by_page.setdefault(packet.page, []).append(packet)
+    return by_page
+
+
+def _union_context_bbox(
+    packets: list[EvidencePacket],
+) -> tuple[float, float, float, float]:
+    x0 = min(packet.bbox_norm[0] for packet in packets)
+    y0 = min(packet.bbox_norm[1] for packet in packets)
+    x1 = max(packet.bbox_norm[2] for packet in packets)
+    y1 = max(packet.bbox_norm[3] for packet in packets)
+    return _pad_bbox((x0, y0, x1, y1), pad=_RETRY_UNION_CONTEXT_PAD)
 
 
 # ---------------------------------------------------------------------------
@@ -741,6 +871,17 @@ def _zoom_added(before: EvidenceEvent, after: EvidenceEvent) -> bool:
         _packet_scale_count(packet, "zoomed") > before_counts.get(packet.packet_id, 0)
         for packet in after.packets
     )
+
+
+def _visual_zoom_retry_should_stay_narrow(
+    *,
+    verifier_missing_context: list[str] | None,
+    verifier_reason: str | None,
+) -> bool:
+    """Keep pure readability retries zoom-only, but honor missing context asks."""
+    if verifier_missing_context:
+        return False
+    return not _neighbor_types_from_verifier_reason(verifier_reason)
 
 
 def _packet_scale_count(packet: EvidencePacket, scale: str) -> int:

@@ -85,9 +85,28 @@ _VISUAL_READABILITY_RE = re.compile(
     re.IGNORECASE,
 )
 _VISUAL_EVIDENCE_RE = re.compile(
-    r"\b(axis|chart|crop|figure|image|label|ocr|plot|visual)\b",
+    r"\b(axis|chart|crop|diagram|figure|image|label|ocr|plot|schematic|signal|timing|visual)\b",
     re.IGNORECASE,
 )
+_FOCUSED_RETRY_SUPPLEMENTAL_CONTEXT_TYPES = frozenset(
+    {
+        "caption",
+        "code",
+        "context_window",
+        "footnote",
+        "key-value region",
+        "key_value_region",
+        "list-item",
+        "list_item",
+        "page-header",
+        "section-header",
+        "section_header",
+        "table",
+        "text",
+        "title",
+    }
+)
+_MAX_FOCUSED_RETRY_SUPPLEMENTAL_PACKETS = 2
 _ANSWER_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _ANSWER_SELECTION_STOPWORDS = frozenset(
     {
@@ -593,7 +612,11 @@ class FocusWorkflow:
                     target_packet_ids=target_packet_ids,
                     retry_visual_zoom=retry_visual_zoom,
                 )
-                retry_answer_evidence = _focused_retry_evidence(evidence, target_packet_ids)
+                retry_answer_evidence = _focused_retry_evidence(
+                    evidence,
+                    target_packet_ids,
+                    cited_packet_ids=list(answer_event.citations),
+                )
                 # The retry answer should know what the verifier thought was
                 # missing. When there are no cited/target packets, the explicit
                 # empty target list keeps expansion from sweeping every packet;
@@ -1009,6 +1032,7 @@ class FocusWorkflow:
             use_evidence_graph=self.use_evidence_graph,
             plan=plan,
             verifier_reason=verifier_reason,
+            verifier_missing_context=verifier_missing_context,
             target_packet_ids=target_packet_ids,
             retry_visual_zoom=retry_visual_zoom,
         )
@@ -1211,15 +1235,70 @@ def _verifier_missing_context(verdict: VerdictEvent) -> list[str]:
 def _focused_retry_evidence(
     evidence: EvidenceEvent,
     target_packet_ids: list[str],
+    *,
+    cited_packet_ids: list[str] | None = None,
 ) -> EvidenceEvent:
-    """Restrict verifier-directed retry answers to cited/target packets."""
+    """Restrict verifier-directed retry answers to cited/target packets.
+
+    When the verifier names a visual/table target but the original answer also
+    cited same-page explanatory text, keep a tiny amount of that context. This
+    preserves verifier focus without dropping the packet that explains how to
+    interpret the visual evidence.
+    """
     target_set = {pid for pid in target_packet_ids if pid}
     if not target_set:
         return evidence
-    packets = [packet for packet in evidence.packets if packet.packet_id in target_set]
-    if not packets:
+    target_packets = [packet for packet in evidence.packets if packet.packet_id in target_set]
+    if not target_packets:
         return evidence
+    supplemental_set = _focused_retry_supplemental_context_ids(
+        evidence,
+        target_packets=target_packets,
+        target_set=target_set,
+        cited_packet_ids=cited_packet_ids or [],
+    )
+    keep_set = target_set | supplemental_set
+    packets = [packet for packet in evidence.packets if packet.packet_id in keep_set]
     return EvidenceEvent(packets=packets)
+
+
+def _focused_retry_supplemental_context_ids(
+    evidence: EvidenceEvent,
+    *,
+    target_packets: list[EvidencePacket],
+    target_set: set[str],
+    cited_packet_ids: list[str],
+) -> set[str]:
+    if not cited_packet_ids:
+        return set()
+
+    cited_set = {pid for pid in cited_packet_ids if pid and pid not in target_set}
+    if not cited_set:
+        return set()
+
+    target_pages = {packet.page for packet in target_packets}
+    out: set[str] = set()
+    for packet in evidence.packets:
+        if len(out) >= _MAX_FOCUSED_RETRY_SUPPLEMENTAL_PACKETS:
+            break
+        if packet.packet_id not in cited_set:
+            continue
+        if packet.page not in target_pages:
+            continue
+        if not _packet_is_explanatory_retry_context(packet):
+            continue
+        out.add(packet.packet_id)
+    return out
+
+
+def _packet_is_explanatory_retry_context(packet: EvidencePacket) -> bool:
+    region_type = (packet.region_type or "").strip().lower()
+    if region_type in _FOCUSED_RETRY_SUPPLEMENTAL_CONTEXT_TYPES:
+        return True
+    return bool(
+        (packet.text_layer_snippet and packet.text_layer_snippet.strip())
+        or (packet.ocr_snippet and packet.ocr_snippet.strip())
+    )
 
 
 def _evidence_scope(full_evidence: EvidenceEvent, answer_evidence: EvidenceEvent) -> str:

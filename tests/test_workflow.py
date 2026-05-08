@@ -24,12 +24,13 @@ import pytest
 
 from focusparse.evidence.packet import EvidencePacket, PacketProvenance
 from focusparse.models.base import ModelResponse
-from focusparse.pipeline.events import AnswerEvent
+from focusparse.pipeline.events import AnswerEvent, EvidenceEvent
 from focusparse.pipeline.workflow import (
     FocusWorkflow,
     SimpleBaselineAgent,
     WorkflowResult,
     _citations_from_packets,
+    _focused_retry_evidence,
     _images_by_page,
     _infer_doc_id,
     _is_better_unsupported_answer,
@@ -168,7 +169,7 @@ def test_verifier_visual_readability_retry_requires_precise_signal():
     )
 
     diagram = verdict.model_copy(update={"reason": "pkt_000 diagram text is garbled/unreadable"})
-    assert not _verifier_requests_visual_readability_retry(diagram, target_packet_ids=["pkt_000"])
+    assert _verifier_requests_visual_readability_retry(diagram, target_packet_ids=["pkt_000"])
 
     missing_neighbor = verdict.model_copy(
         update={
@@ -183,6 +184,46 @@ def test_verifier_visual_readability_retry_requires_precise_signal():
 
     vague = verdict.model_copy(update={"reason": "pkt_000 needs the legend"})
     assert not _verifier_requests_visual_readability_retry(vague, target_packet_ids=["pkt_000"])
+
+
+def test_focused_retry_keeps_same_page_cited_explanatory_context():
+    target = EvidencePacket(
+        packet_id="pkt_000",
+        page=2,
+        bbox_norm=(0.10, 0.20, 0.40, 0.50),
+        region_type="figure",
+        page_thumbnail_ref="/tmp/page.png",
+        local_crop_ref="/tmp/figure.png",
+        provenance=PacketProvenance(tool="test", args_hash="target"),
+    )
+    explanatory = EvidencePacket(
+        packet_id="pkt_002",
+        page=2,
+        bbox_norm=(0.10, 0.55, 0.70, 0.65),
+        region_type="text",
+        text_layer_snippet="Use IOUT at the OUT terminal, not VRECT.",
+        page_thumbnail_ref="/tmp/page.png",
+        local_crop_ref="/tmp/text.png",
+        provenance=PacketProvenance(tool="test", args_hash="text"),
+    )
+    other_page = EvidencePacket(
+        packet_id="pkt_003",
+        page=3,
+        bbox_norm=(0.10, 0.20, 0.40, 0.50),
+        region_type="text",
+        text_layer_snippet="Wrong page",
+        page_thumbnail_ref="/tmp/page3.png",
+        local_crop_ref="/tmp/text3.png",
+        provenance=PacketProvenance(tool="test", args_hash="other"),
+    )
+
+    out = _focused_retry_evidence(
+        EvidenceEvent(packets=[target, explanatory, other_page]),
+        ["pkt_000"],
+        cited_packet_ids=["pkt_000", "pkt_002", "pkt_003"],
+    )
+
+    assert [packet.packet_id for packet in out.packets] == ["pkt_000", "pkt_002"]
 
 
 def test_retry_answer_selector_allows_question_specific_fix_within_margin():
