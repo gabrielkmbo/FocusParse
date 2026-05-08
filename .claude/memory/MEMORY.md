@@ -131,6 +131,26 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-08 — inspect crop-level OCR fallback for empty element OCR
+
+Low-risk inspector hardening landed to reduce `cited_image_only` style misses
+when a crop exists but element-mode OCR returns empty text:
+
+- `pipeline/inspector.py` now falls back to OCR on the already-materialized
+  crop (`_ocr_existing_crop`) after `inspect_region(mode="element")` returns
+  empty text or fails. This keeps packet commit levels unchanged and only
+  contributes advisory `ocr_snippet` text.
+- New provenance signal `inspect_region:crop_fallback_ocr` marks when this
+  rescue path fired.
+- Added `tests/test_inspector.py::test_pdf_path_uses_crop_fallback_ocr_when_element_ocr_empty`
+  to lock behavior and confidence propagation for text-bearing packets.
+
+Focused verification:
+
+- `env PYTHONPATH=src uv run pytest tests/test_inspector.py -q`: **38 passed**.
+- `env PYTHONPATH=src uv run ruff check src/focusparse/pipeline/inspector.py tests/test_inspector.py`:
+  **clean**.
+
 ### 2026-05-07 — expand retry de-dup + line-aware table text
 
 Two low-risk evidence-path follow-ups landed on branch

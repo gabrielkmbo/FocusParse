@@ -352,6 +352,49 @@ async def test_text_region_falls_back_to_ocr_when_whitespace_only(tmp_path, monk
     assert ev.packets[0].ocr_snippet == "actual content"
 
 
+async def test_pdf_path_uses_crop_fallback_ocr_when_element_ocr_empty(tmp_path, monkeypatch):
+    """If element-mode OCR yields no text, use OCR on the staged crop as a fallback."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(
+        monkeypatch,
+        inspect_calls=inspect_calls,
+        text_calls=text_calls,
+        text_layer_out=_FakeTextLayerOutput(text="", source="empty_native"),
+        inspect_element_out=_FakeInspectOutput(crop_ref="/c.png", ocr_text="", confidence=0.0),
+    )
+    monkeypatch.setattr(
+        "focusparse.pipeline.inspector._ocr_existing_crop",
+        lambda crop_path: ("FALLBACK OCR", 0.61),
+    )
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="fallback",
+                page=1,
+                bbox_norm=(0, 0, 0.5, 0.5),
+                region_type="text",
+                score=0.9,
+            )
+        ]
+    )
+    ev = await inspect_regions(
+        _q(),
+        _plan(),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+    )
+    modes = [c["mode"] for c in inspect_calls]
+    assert modes == ["image", "element"]
+    packet = ev.packets[0]
+    assert packet.ocr_snippet == "FALLBACK OCR"
+    assert packet.confidence == pytest.approx(0.61)
+    assert "inspect_region:crop_fallback_ocr" in packet.provenance.args_hash
+
+
 async def test_unknown_region_type_still_gets_ocr(tmp_path, monkeypatch):
     inspect_calls: list = []
     text_calls: list = []

@@ -508,6 +508,17 @@ async def _inspect_one_region(
                         confidence = min(confidence, element_out.confidence)
             except (FileNotFoundError, ValueError) as exc:
                 logger.debug("inspect_region(element) failed for %s: %s", packet_id, exc)
+            # If element-mode OCR returns empty (or fails), fall back to OCR on
+            # the already-materialized crop. This recovers text labels from
+            # page-image fallback crops and from element-mode misses without
+            # forcing the packet into a text-first commit level.
+            if ocr_snippet is None and crop_ref and crop_ref != page_thumbnail_ref:
+                fallback_ocr, fallback_confidence = _ocr_existing_crop(Path(crop_ref))
+                if fallback_ocr:
+                    ocr_snippet = fallback_ocr
+                    crop_signals.append("inspect_region:crop_fallback_ocr")
+                    if fallback_confidence > 0 and not is_visual:
+                        confidence = min(confidence, fallback_confidence)
         else:
             fallback_ocr, fallback_confidence = _ocr_existing_crop(Path(crop_ref))
             if fallback_ocr:
