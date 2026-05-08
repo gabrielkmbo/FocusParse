@@ -1010,6 +1010,43 @@ async def test_loop_escalate_reasoner_reruns_only_answer_verify(
     assert answer_steps[1].args.get("had_escalation_hint") is True
 
 
+async def test_loop_escalate_reasoner_is_not_default_evidence_retry(
+    tmp_path, parser_bench_submodule_present
+):
+    """Default evidence retries are reserved for evidence-changing actions.
+
+    `escalate_reasoner` remains available when max_retries is explicitly
+    enabled, but the default +4 headline path should not spend another
+    frontier answer call without changing inspect/expand packets.
+    """
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.4}')
+    verifier = _FakeClient(
+        _verdict_json(
+            supported=False,
+            next_action="escalate_reasoner",
+            reason="reasoner mis-read the cited table cell",
+        )
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.telemetry["retries_used"] == 0
+    assert result.telemetry["evidence_retries_used"] == 0
+    assert result.telemetry["loop_terminated"] == "exhausted"
+    stage_counts = _stage_counts(result)
+    assert stage_counts["answer"] == 1
+    assert stage_counts["verify"] == 1
+    assert stage_counts["expand_context"] == 1
+
+
 async def test_loop_abstain_terminates_with_unanswerable(tmp_path, parser_bench_submodule_present):
     """abstain replaces the answer with 'Unanswerable' and ends the loop."""
     if not parser_bench_submodule_present:

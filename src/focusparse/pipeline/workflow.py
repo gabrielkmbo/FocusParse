@@ -60,7 +60,10 @@ _DEFAULT_MAX_RETRIES = 0
 # try one bounded evidence repair by default while keeping localization retries
 # behind `max_retries`.
 _DEFAULT_MAX_EVIDENCE_RETRIES = 1
-_EVIDENCE_RETRY_ACTIONS = frozenset({"expand_context", "escalate_reasoner"})
+# Keep the evidence-only budget for actions that actually mutate evidence.
+# `escalate_reasoner` spends another frontier call without improving
+# inspect/expand packets, so it stays behind the explicit full-loop budget.
+_EVIDENCE_RETRY_ACTIONS = frozenset({"expand_context"})
 
 # Knobs the retry loop tweaks per action. Values match (and float as)
 # the localizer's / expander's defaults — initial passes use these,
