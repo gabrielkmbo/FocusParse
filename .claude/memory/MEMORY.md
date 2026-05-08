@@ -173,6 +173,16 @@ Focused verification:
 - Ruff check and format-check were clean on touched workflow/harness/CLI/
   diagnostics files.
 
+Cloud eval blocker/fix: Codex Cloud could not run the evidence-retry A/B
+because `.env` was absent and `third_party/parser-bench` could not be cloned
+non-interactively (`could not read Username for 'https://github.com'`). The
+parser-bench shim now falls back to a narrow local compatibility schema when
+the canonical submodule schema is missing, while still preferring the submodule
+whenever present. Verification for the fallback + eval CLI slice:
+`tests/test_parser_bench_shim.py tests/test_hf_loader.py tests/test_hf_eval_cli.py
+tests/test_diagnose_predictions.py`: **67 passed, 1 skipped**; ruff/format
+clean on the touched files.
+
 ### 2026-05-08 — inspect crop-level OCR fallback for empty element OCR
 
 Low-risk inspector hardening landed to reduce `cited_image_only` style misses
