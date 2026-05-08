@@ -115,12 +115,22 @@ async def verify_answer(
     )
 
     parsed = _parse_verifier_response(response.text)
+    supported = parsed.get("supported", fallback.supported)
+    reason = parsed.get("reason") or fallback.reason
+    next_action = parsed.get("next_action") or fallback.next_action
+    confidence = parsed.get("confidence", fallback.confidence)
+    diagnostics = parsed.get("diagnostics", fallback.diagnostics)
+    next_action, diagnostics = _reconcile_supported_next_action(
+        supported=supported,
+        next_action=next_action,
+        diagnostics=diagnostics,
+    )
     verdict = VerdictEvent(
-        supported=parsed.get("supported", fallback.supported),
-        reason=parsed.get("reason") or fallback.reason,
-        next_action=parsed.get("next_action") or fallback.next_action,
-        confidence=parsed.get("confidence", fallback.confidence),
-        diagnostics=parsed.get("diagnostics", fallback.diagnostics),
+        supported=supported,
+        reason=reason,
+        next_action=next_action,
+        confidence=confidence,
+        diagnostics=diagnostics,
     )
     return verdict, response
 
@@ -262,6 +272,27 @@ def _normalize_next_action(value: str) -> str | None:
     if normalized in _VALID_NEXT_ACTIONS:
         return normalized
     return None
+
+
+def _reconcile_supported_next_action(
+    *,
+    supported: bool,
+    next_action: str,
+    diagnostics: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    """Make verifier control-flow fields internally consistent."""
+    if supported:
+        if next_action != "accept":
+            diagnostics = dict(diagnostics)
+            diagnostics["normalized_next_action"] = next_action
+        return "accept", diagnostics
+    if next_action == "accept":
+        diagnostics = dict(diagnostics)
+        diagnostics["normalized_next_action"] = "accept"
+        if diagnostics.get("missing_context"):
+            return "expand_context", diagnostics
+        return "escalate_reasoner", diagnostics
+    return next_action, diagnostics
 
 
 def _parse_diagnostics(raw: Any, *, reason: str | None = None) -> dict[str, Any]:

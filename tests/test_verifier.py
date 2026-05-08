@@ -335,6 +335,39 @@ async def test_verify_llm_populates_missing_context_diagnostics():
     }
 
 
+async def test_verify_llm_supported_true_forces_accept_action():
+    client = _FakeVerifierClient(
+        '{"supported": true, "reason": "evidence supports the answer", '
+        '"next_action": "escalate_reasoner", "confidence": 0.7}'
+    )
+    verdict, _ = await verify_answer(
+        _question(),
+        _evidence(_packet()),
+        _answer(confidence=0.42),
+        backend_client=client,
+    )
+    assert verdict.supported is True
+    assert verdict.next_action == "accept"
+    assert verdict.diagnostics["normalized_next_action"] == "escalate_reasoner"
+
+
+async def test_verify_llm_supported_false_accept_redirects_to_repair():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "missing footnote", '
+        '"next_action": "accept", "confidence": 0.7}'
+    )
+    verdict, _ = await verify_answer(
+        _question(),
+        _evidence(_packet()),
+        _answer(confidence=0.42),
+        backend_client=client,
+    )
+    assert verdict.supported is False
+    assert verdict.next_action == "expand_context"
+    assert verdict.diagnostics["missing_context"] == ["footnote"]
+    assert verdict.diagnostics["normalized_next_action"] == "accept"
+
+
 async def test_verify_llm_infers_missing_context_from_reason():
     client = _FakeVerifierClient(
         '{"supported": false, "reason": "missing legend and footnote; continued table '
