@@ -36,13 +36,11 @@ def _packet(
     linked_neighbor_types: list[str] | None = None,
     text_layer_snippet: str | None = None,
     ocr_snippet: str | None = None,
-    region_type: str | None = None,
 ) -> EvidencePacket:
     return EvidencePacket(
         packet_id=packet_id,
         page=page,
         bbox_norm=bbox,
-        region_type=region_type,
         page_thumbnail_ref=page_thumbnail_ref,
         local_crop_ref=local_crop_ref,
         multi_scale_crops=multi_scale or [],
@@ -364,7 +362,7 @@ def test_render_packet_line_focuses_long_table_text_on_question_terms() -> None:
             "VDFN3x3-8",
         ]
     )
-    p = _packet(text_layer_snippet=table_text + "\n" + ("filler row\n" * 80), region_type="Table")
+    p = _packet(text_layer_snippet=table_text + "\n" + ("filler row\n" * 80))
     line = _render_packet_line(
         p,
         question_text=(
@@ -373,44 +371,9 @@ def test_render_packet_line_focuses_long_table_text_on_question_terms() -> None:
         ),
     )
     assert "RTQ2510-QA" in line
-    assert "Headers: Part Number" in line
     assert "AEC-Q100" in line
     assert "VDFN3x3-8" in line
     assert "RT9187C" not in line
-
-
-def test_render_packet_line_keeps_table_header_for_matched_numeric_row() -> None:
-    table_text = "\n".join(
-        [
-            "Metric 2022 2023 2024",
-            "Revenue 100 125 140",
-            "Operating income 12 18 21",
-            "Net income 8 10 14",
-        ]
-        + ["filler row"] * 80
-    )
-    p = _packet(text_layer_snippet=table_text, region_type="Table")
-    line = _render_packet_line(p, question_text="What was operating income in 2024?")
-    assert "Headers: Metric 2022 2023 2024" in line
-    assert "Operating income 12 18 21" in line
-    assert "Revenue 100 125 140" in line
-
-
-def test_render_packet_line_table_focus_deprioritizes_context_window_text() -> None:
-    table_text = "\n".join(
-        [
-            "Parameter Conditions Min Typ Max Unit",
-            "VCC supply voltage TA=25C 2.7 3.3 3.6 V",
-            "ICC supply current active 1.0 1.5 2.0 mA",
-            "Context [context_window]: supply current active appears in a nearby table, "
-            + ("but this surrounding context is noisy " * 10),
-        ]
-    )
-    p = _packet(text_layer_snippet=table_text, region_type="Table")
-    line = _render_packet_line(p, question_text="What is the max supply current in mA?")
-    assert "Headers: Parameter Conditions Min Typ Max Unit" in line
-    assert "ICC supply current active 1.0 1.5 2.0 mA" in line
-    assert "noisy" not in line
 
 
 # ---------------------------------------------------------------------------
