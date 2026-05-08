@@ -126,9 +126,33 @@ _FALLBACK_MAX_NEIGHBORS_PER_PACKET = 1
 # when testing for neighbor overlap. 0.08 ≈ ~1 inch on a Letter page at 300
 # DPI — enough to catch a caption a few text lines away.
 _DEFAULT_ADJACENCY_PAD = 0.08
+_RETRY_CONTEXT_WINDOW_PAD = 0.24
 _MAX_LINKED_CONTEXT_TEXT_CHARS = 240
 _FIGURE_REF_RE = re.compile(r"\b(?:fig(?:ure)?\.?)\s*(?P<num>\d+[A-Za-z]?)\b", re.IGNORECASE)
 _CONTEXT_LINE_RE = re.compile(r"^Context\s+\[[^\]]+\]:\s*(?P<text>.*)$", re.IGNORECASE)
+_CONTEXT_WINDOW_REGION_TYPES: frozenset[str] = frozenset(
+    {
+        "bar_chart",
+        "candlestick",
+        "caption",
+        "chart",
+        "code",
+        "curve",
+        "diagram",
+        "figure",
+        "form",
+        "image",
+        "key-value region",
+        "key_value_region",
+        "line_chart",
+        "list-item",
+        "list_item",
+        "picture",
+        "plot",
+        "table",
+        "text",
+    }
+)
 
 
 async def expand_context(
@@ -227,6 +251,15 @@ async def expand_context(
         # Find the matching RegionCandidate so we can read figure_class +
         # expansion_hints (populated by item 4's reranker).
         primary_region = _match_primary_region(packet, candidates_on_page)
+        if not _should_initially_expand_packet(
+            primary_region,
+            has_rerank_signal=has_rerank_signal,
+            verifier_reason=verifier_reason,
+            target_filter_active=target_filter_active,
+            relevance_threshold=relevance_threshold,
+        ):
+            new_packets.append(packet)
+            continue
 
         # Graph walker is opt-in (default off) since the n=30 A/B on
         # 2026-04-27 showed it regressed region_recall (-0.113),
@@ -268,7 +301,20 @@ async def expand_context(
             )
             neighbors_with_role = [(n, _neighbor_role(n)) for n in spatial]
 
-        if not neighbors_with_role:
+        context_window_ref = None
+        if _should_attach_retry_context_window(
+            packet,
+            verifier_reason=verifier_reason,
+            target_filter_active=target_filter_active,
+        ):
+            context_window_ref = await _crop_context_window(
+                packet,
+                pdf_path=pdf_path,
+                page_image=(images_by_page or {}).get(packet.page),
+                crop_cache_dir=crop_cache_dir,
+            )
+
+        if not neighbors_with_role and context_window_ref is None:
             new_packets.append(packet)
             continue
 
@@ -277,9 +323,15 @@ async def expand_context(
         linked_texts: list[tuple[str, str]] = []
         seen_linked_refs = {ref for ref in linked_refs if ref}
         n_new_links = 0
+        n_new_neighbor_links = 0
+        if context_window_ref and context_window_ref not in seen_linked_refs:
+            linked_refs.append(context_window_ref)
+            linked_types.append("context_window")
+            seen_linked_refs.add(context_window_ref)
+            n_new_links += 1
         packet_figure_refs = _figure_refs_from_text(packet.text_layer_snippet, packet.ocr_snippet)
         for neighbor, role in neighbors_with_role:
-            if n_new_links >= new_link_cap:
+            if n_new_neighbor_links >= new_link_cap:
                 break
             crop_ref = await _crop_neighbor(
                 neighbor,
@@ -314,6 +366,7 @@ async def expand_context(
             linked_types.append(role)
             seen_linked_refs.add(crop_ref)
             n_new_links += 1
+            n_new_neighbor_links += 1
 
         if n_new_links == 0:
             new_packets.append(packet)
@@ -428,6 +481,47 @@ def _neighbor_role(cand: RegionCandidate) -> str:
     if cand.needed_for in _RERANK_CONTEXT_ROLES:
         return str(cand.needed_for)
     return ctype or "unknown"
+
+
+def _should_initially_expand_packet(
+    primary_region: RegionCandidate | None,
+    *,
+    has_rerank_signal: bool,
+    verifier_reason: str | None,
+    target_filter_active: bool,
+    relevance_threshold: float,
+) -> bool:
+    """Gate first-pass expansion to packets with query-conditioned support.
+
+    Once the reranker has annotated the region list, adding context to every
+    inspected packet can flood the reasoner with neighbors from packets the
+    reranker did not select. Verifier-directed retries are exempt: at that
+    point the controller has already named target packets and missing context.
+    """
+    if verifier_reason or target_filter_active:
+        return True
+    if not has_rerank_signal or primary_region is None:
+        return True
+    if primary_region.needed_for == "primary":
+        return True
+    if primary_region.needed_for in _RERANK_CONTEXT_ROLES:
+        return True
+    if primary_region.expansion_hints:
+        return True
+    return primary_region.relevance is not None and primary_region.relevance >= relevance_threshold
+
+
+def _should_attach_retry_context_window(
+    packet: EvidencePacket,
+    *,
+    verifier_reason: str | None,
+    target_filter_active: bool,
+) -> bool:
+    """Verifier retries add a wider crop for the cited/target packet itself."""
+    if not (verifier_reason and target_filter_active):
+        return False
+    region_type = (packet.region_type or "").strip().lower()
+    return not region_type or region_type in _CONTEXT_WINDOW_REGION_TYPES
 
 
 def _resolve_permitted_neighbor_types(
@@ -619,6 +713,59 @@ async def _crop_neighbor(
                 "neighbor page-image crop failed for page=%d bbox=%s: %s",
                 neighbor.page,
                 neighbor.bbox_norm,
+                exc,
+            )
+    return None
+
+
+async def _crop_context_window(
+    packet: EvidencePacket,
+    *,
+    pdf_path: Path | None,
+    page_image: Path | None,
+    crop_cache_dir: Path | None,
+    pad: float = _RETRY_CONTEXT_WINDOW_PAD,
+) -> str | None:
+    """Render a wider crop around the packet bbox for verifier retries."""
+    bbox = _pad_bbox(packet.bbox_norm, pad=pad)
+    if _bbox_equal(bbox, packet.bbox_norm):
+        return None
+    if pdf_path is not None:
+        try:
+            out = await inspect_region(
+                InspectRegionInput(
+                    doc_path=str(pdf_path),
+                    page=packet.page,
+                    bbox_norm=bbox,
+                    mode="image",
+                    expansion="none",
+                ),
+                cache_dir=crop_cache_dir,
+            )
+            return out.crop_ref
+        except (FileNotFoundError, ValueError) as exc:
+            logger.debug(
+                "context-window crop failed for packet=%s page=%d bbox=%s: %s",
+                packet.packet_id,
+                packet.page,
+                bbox,
+                exc,
+            )
+
+    if page_image is not None:
+        try:
+            return _crop_page_image(
+                page_image,
+                bbox,
+                cache_dir=crop_cache_dir,
+                expansion=0.0,
+            )
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            logger.debug(
+                "context-window page-image crop failed for packet=%s page=%d bbox=%s: %s",
+                packet.packet_id,
+                packet.page,
+                bbox,
                 exc,
             )
     return None

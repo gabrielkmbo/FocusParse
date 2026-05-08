@@ -25,6 +25,8 @@ _SYSTEM_PROMPT = (
     "wider crops for nearby labels, axes, legends, and curve geometry. "
     "When a packet's descriptor lists 'Attached neighbors', the images that follow "
     "the packet crop images are CONTEXT (caption, footnote, section header, etc.). "
+    "`context_window` is a wider crop around the same cited packet, useful for "
+    "reading surrounding axes, gridlines, row/column headers, and labels. "
     "Use the primary crop to ground the answer; consult the neighbor crops only "
     "when the answer requires reading text or labels around the primary region. "
     "For chart readings, use the question-target scale when a packet text calls one out. "
@@ -182,6 +184,12 @@ def _render_packet_line(packet, *, question_text: str | None = None) -> str:
         types = ", ".join(packet.linked_neighbor_types)
         n_neighbors = len(packet.linked_neighbor_types)
         base += f"\n  Attached neighbors ({n_neighbors}): {types}"
+        if "context_window" in {t.lower() for t in packet.linked_neighbor_types}:
+            base += (
+                "\n  Context window: this attached image is a wider crop around "
+                "the same packet; use it for axes, gridlines, labels, and "
+                "row/column headers that may be just outside the tight bbox."
+            )
     text_snippet = _packet_text_snippet(packet, question_text=question_text)
     if text_snippet:
         base += f"\n  Extracted text: {text_snippet!r}"

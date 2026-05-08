@@ -410,6 +410,18 @@ def test_render_packet_line_neighbor_count_matches_types() -> None:
     assert "section_header" in line
 
 
+def test_render_packet_line_explains_context_window() -> None:
+    """Verifier retry context windows are described as wider same-packet crops."""
+    p = _packet(
+        linked_crop_refs=["/cache/context.png"],
+        linked_neighbor_types=["context_window"],
+    )
+    line = _render_packet_line(p)
+    assert "Attached neighbors (1): context_window" in line
+    assert "wider crop around the same packet" in line
+    assert "row/column headers" in line
+
+
 # ---------------------------------------------------------------------------
 # Path A: system prompt explains the primary-vs-context layout
 # ---------------------------------------------------------------------------
@@ -422,4 +434,5 @@ def test_system_prompt_explains_neighbor_layout() -> None:
 
     assert "Attached neighbors" in _SYSTEM_PROMPT
     assert "primary crop" in _SYSTEM_PROMPT
+    assert "context_window" in _SYSTEM_PROMPT
     assert "context" in _SYSTEM_PROMPT.lower()

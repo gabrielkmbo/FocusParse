@@ -306,7 +306,13 @@ async def test_expand_context_deduplicates_repeated_context_text(tmp_path, monke
     )
     regions = RegionsEvent(
         candidates=[
-            _region(page=1, bbox_norm=(0.1, 0.1, 0.9, 0.4), region_type="picture"),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.1, 0.1, 0.9, 0.4),
+                region_type="picture",
+                relevance=0.8,
+                needed_for="primary",
+            ),
             _region_with_signals(
                 page=1,
                 bbox_norm=(0.15, 0.42, 0.85, 0.48),
@@ -1324,3 +1330,122 @@ async def test_query_aware_relevance_orders_neighbors_by_score(tmp_path, monkeyp
     assert types[0] == "footnote"
     assert types[1] == "title"
     assert "caption" not in types
+
+
+async def test_initial_expand_skips_unscored_primary_when_reranker_present(tmp_path, monkeypatch):
+    """When rerank ran, do not spend first-pass neighbor budget on packets
+    whose own region had no query-conditioned score."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    bbox = (0.30, 0.40, 0.70, 0.50)
+    ev = EvidenceEvent(packets=[_packet(packet_id="p0", page=1, bbox_norm=bbox)])
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(page=1, bbox_norm=bbox, region_type="picture"),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.52, 0.70, 0.56),
+                region_type="caption",
+                relevance=0.9,
+            ),
+        ]
+    )
+    out = await expand_context(ev, regions=regions, pdf_path=Path("/fake.pdf"))
+    assert out.packets[0].linked_neighbor_types == []
+    assert calls == []
+
+
+async def test_initial_expand_keeps_high_relevance_primary(tmp_path, monkeypatch):
+    """A packet whose primary region was scored relevant keeps first-pass
+    expansion behavior."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    bbox = (0.30, 0.40, 0.70, 0.50)
+    ev = EvidenceEvent(packets=[_packet(packet_id="p0", page=1, bbox_norm=bbox)])
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(
+                page=1,
+                bbox_norm=bbox,
+                region_type="picture",
+                relevance=0.8,
+                needed_for="primary",
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.52, 0.70, 0.56),
+                region_type="caption",
+                relevance=0.9,
+            ),
+        ]
+    )
+    out = await expand_context(ev, regions=regions, pdf_path=Path("/fake.pdf"))
+    assert out.packets[0].linked_neighbor_types == ["caption"]
+    assert calls[0]["mode"] == "image"
+
+
+async def test_retry_expand_adds_context_window_for_target_packet(tmp_path, monkeypatch):
+    """Verifier retries attach a wider crop for the cited packet itself."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    bbox = (0.30, 0.40, 0.70, 0.50)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(packet_id="p0", page=1, bbox_norm=bbox, region_type="Picture"),
+        ]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(page=1, bbox_norm=bbox, region_type="picture"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        verifier_reason="needs a larger readable visual context",
+        target_packet_ids=["p0"],
+    )
+    packet = out.packets[0]
+    assert packet.linked_neighbor_types == ["context_window"]
+    assert len(packet.linked_crop_refs) == 1
+    assert tuple(round(v, 2) for v in calls[0]["bbox_norm"]) == (0.06, 0.16, 0.94, 0.74)
+
+
+async def test_retry_expand_context_window_does_not_consume_neighbor_cap(tmp_path, monkeypatch):
+    """The wider retry crop is extra evidence; table/text neighbors still get
+    their normal cap."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    bbox = (0.30, 0.40, 0.70, 0.50)
+    ev = EvidenceEvent(
+        packets=[
+            _packet(packet_id="p0", page=1, bbox_norm=bbox, region_type="Table"),
+        ]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(page=1, bbox_norm=bbox, region_type="table"),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.52, 0.70, 0.56),
+                region_type="table",
+                relevance=0.9,
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.34, 0.70, 0.38),
+                region_type="text",
+                relevance=0.8,
+            ),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        verifier_reason="missing row and column cell value",
+        target_packet_ids=["p0"],
+        max_neighbors_per_packet=2,
+    )
+    assert out.packets[0].linked_neighbor_types == ["context_window", "table", "text"]
