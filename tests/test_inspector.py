@@ -25,7 +25,12 @@ from focusparse.pipeline.events import (
     RegionCandidate,
     RegionsEvent,
 )
-from focusparse.pipeline.inspector import _chart_scale_hint, inspect_regions
+from focusparse.pipeline.inspector import (
+    _AUTOZOOM_CODE,
+    _AUTOZOOM_MAX_DIM,
+    _chart_scale_hint,
+    inspect_regions,
+)
 
 
 def _q() -> QuestionEvent:
@@ -1110,6 +1115,29 @@ def _bbox_with_area(area: float) -> tuple[float, float, float, float]:
     """Return a bbox with the requested normalized area (square)."""
     side = area**0.5
     return (0.1, 0.1, 0.1 + side, 0.1 + side)
+
+
+def _run_autozoom_code(size: tuple[int, int]) -> tuple[int, int]:
+    from PIL import Image
+
+    saved: list[Image.Image] = []
+    namespace = {
+        "images": {"input": Image.new("RGB", size, "white")},
+        "save_image": saved.append,
+    }
+    exec(_AUTOZOOM_CODE, namespace)  # noqa: S102 - exercises our sandbox payload string
+    assert len(saved) == 1
+    return saved[0].size
+
+
+def test_autozoom_code_doubles_small_crops():
+    assert _run_autozoom_code((320, 180)) == (640, 360)
+
+
+def test_autozoom_code_caps_large_retry_crops():
+    width, height = _run_autozoom_code((1250, 1667))
+    assert max(width, height) == _AUTOZOOM_MAX_DIM
+    assert (width, height) == (1536, 2048)
 
 
 async def test_auto_zoom_skips_when_disabled(tmp_path, monkeypatch):

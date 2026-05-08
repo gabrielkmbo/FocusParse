@@ -23,7 +23,7 @@ _SYSTEM_PROMPT = (
     "When a packet's descriptor lists image scales, the packet images appear in that "
     "listed order. `tight` is the target region; `context` and `chart_context` are "
     "wider crops for nearby labels, axes, legends, and curve geometry; `zoomed` "
-    "is a 2x readable copy of the same tight crop. "
+    "is a readable upsampled copy of the same tight crop. "
     "When a packet's descriptor lists 'Attached neighbor images', the images that follow "
     "the packet crop images are CONTEXT (caption, footnote, section header, etc.). "
     "'Attached text-only context' has already been extracted from neighboring regions; "

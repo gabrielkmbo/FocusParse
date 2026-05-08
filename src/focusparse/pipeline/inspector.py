@@ -55,16 +55,25 @@ logger = logging.getLogger(__name__)
 # that fine details (axis labels, footnotes) might be unreadable at native
 # resolution.
 _AUTOZOOM_AREA_THRESHOLD = 0.005
+_AUTOZOOM_MAX_DIM = 2048
 
 # LANCZOS 2× upsample code passed to the sandboxed `run_python`. The sandbox
 # loads the input crop into `images[ref]`; we resize and `save_image()` the
-# result. The sandbox returns a content-addressed ref we point the packet at.
-_AUTOZOOM_CODE = """
+# result. Larger retry crops are capped so visual readability repairs cannot
+# hand the reasoner oversized images. The sandbox returns a content-addressed
+# ref we point the packet at.
+_AUTOZOOM_CODE = f"""
 from PIL import Image
 ref = list(images.keys())[0]
 img = images[ref]
 w, h = img.size
-out = img.resize((w * 2, h * 2), Image.Resampling.LANCZOS)
+target_w, target_h = w * 2, h * 2
+max_dim = {_AUTOZOOM_MAX_DIM}
+if max(target_w, target_h) > max_dim:
+    scale = max_dim / max(target_w, target_h)
+    target_w = max(1, int(round(target_w * scale)))
+    target_h = max(1, int(round(target_h * scale)))
+out = img.resize((target_w, target_h), Image.Resampling.LANCZOS)
 print("zoomed", img.size, "->", out.size)
 save_image(out)
 """
@@ -1063,12 +1072,14 @@ async def _zoom_crop(
     cache_dir: Path | None,
     packet_id: str,
 ) -> str | None:
-    """LANCZOS 2× upsample `crop_ref` via the run_python sandbox.
+    """LANCZOS upsample `crop_ref` via the run_python sandbox.
 
     Returns the path to the zoomed PNG (so the packet's `local_crop_ref`
     can swap to it) or None on any failure (silent — keep the original
-    crop). Cache dir is the same content-addressed dir `inspect_region`
-    writes to; the upsampled PNG goes there too keyed by sha256(bytes).
+    crop). Tiny crops get a true 2× resize; larger retry crops are capped
+    by `_AUTOZOOM_MAX_DIM`. Cache dir is the same content-addressed dir
+    `inspect_region` writes to; the upsampled PNG goes there too keyed
+    by sha256(bytes).
     """
     try:
         out = await run_python(
