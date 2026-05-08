@@ -181,7 +181,8 @@ async def expand_context(
             and hurt 11 of 13 affected examples.
         target_packet_ids: optional packet ids to expand. Verifier-driven
             retries use this to avoid adding fresh context to packets the
-            answer did not cite.
+            answer did not cite. ``None`` means expand all eligible packets
+            (initial pass); an explicit empty list means expand none.
         relevance_threshold: when the reranker (Phase 2 item 4) scored
             candidates, neighbors below this threshold are filtered out
             even if they overlap spatially. Default 0.3.
@@ -216,9 +217,10 @@ async def expand_context(
         regions_by_page.setdefault(r.page, []).append(r)
 
     new_packets: list[EvidencePacket] = []
+    target_filter_active = target_packet_ids is not None
     target_set = {pid for pid in (target_packet_ids or []) if pid}
     for packet in evidence.packets:
-        if target_set and packet.packet_id not in target_set:
+        if target_filter_active and packet.packet_id not in target_set:
             new_packets.append(packet)
             continue
         candidates_on_page = regions_by_page.get(packet.page, [])

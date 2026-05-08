@@ -507,6 +507,11 @@ class FocusWorkflow:
                     verifier_missing_context=verifier_missing_context,
                     target_packet_ids=target_packet_ids,
                 )
+                # The retry answer should know what the verifier thought was
+                # missing. When there are no cited/target packets, the explicit
+                # empty target list keeps expansion from sweeping every packet;
+                # the hint still gives the reasoner a focused repair instruction.
+                escalation_hint = verdict.reason
             elif action == "escalate_reasoner":
                 # No state change — just feed the verifier's reason into the
                 # next reasoner call so it knows what to address.
@@ -882,8 +887,17 @@ class FocusWorkflow:
             verifier_reason=verifier_reason,
             target_packet_ids=target_packet_ids,
         )
+        before_neighbor_counts = {p.packet_id: len(p.linked_crop_refs) for p in evidence.packets}
         n_with_neighbors = sum(1 for p in expanded.packets if p.linked_crop_refs)
         n_neighbors = sum(len(p.linked_crop_refs) for p in expanded.packets)
+        n_neighbors_added = sum(
+            max(0, len(p.linked_crop_refs) - before_neighbor_counts.get(p.packet_id, 0))
+            for p in expanded.packets
+        )
+        n_packets_with_new_neighbors = sum(
+            len(p.linked_crop_refs) > before_neighbor_counts.get(p.packet_id, 0)
+            for p in expanded.packets
+        )
         expand_tier = "deterministic" if n_with_neighbors > 0 else "skeleton"
         recorder.record(
             TrajectoryStep(
@@ -895,6 +909,8 @@ class FocusWorkflow:
                     "n_packets": len(expanded.packets),
                     "n_with_neighbors": n_with_neighbors,
                     "n_neighbors_attached": n_neighbors,
+                    "n_neighbors_added": n_neighbors_added,
+                    "n_packets_with_new_neighbors": n_packets_with_new_neighbors,
                     "adjacency_pad": adjacency_pad,
                     "retry_attempt": retry_attempt,
                     "verifier_reason": verifier_reason,
@@ -913,6 +929,8 @@ class FocusWorkflow:
                 "n_packets": len(expanded.packets),
                 "n_with_neighbors": n_with_neighbors,
                 "n_neighbors_attached": n_neighbors,
+                "n_neighbors_added": n_neighbors_added,
+                "n_packets_with_new_neighbors": n_packets_with_new_neighbors,
                 "adjacency_pad": adjacency_pad,
                 "verifier_reason": verifier_reason,
                 "verifier_missing_context": verifier_missing_context or [],

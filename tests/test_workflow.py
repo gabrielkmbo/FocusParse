@@ -768,6 +768,10 @@ async def test_loop_expand_context_reruns_only_expand_answer_verify(
     assert expand_steps[1].args["verifier_missing_context"] == ["footnote"]
     assert expand_steps[1].args["verifier_reason"] == "missing footnote context"
     assert expand_steps[1].args["target_packet_ids"] == ["pkt_000"]
+    assert "n_neighbors_added" in expand_steps[1].args
+    answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
+    assert answer_steps[0].args.get("had_escalation_hint") is False
+    assert answer_steps[1].args.get("had_escalation_hint") is True
 
 
 async def test_loop_expand_context_retries_once_by_default(
@@ -803,6 +807,46 @@ async def test_loop_expand_context_retries_once_by_default(
     assert stage_counts["expand_context"] == 2
     assert stage_counts["answer"] == 2
     assert stage_counts["verify"] == 2
+
+
+async def test_loop_expand_context_with_no_citations_targets_no_packets(
+    tmp_path, parser_bench_submodule_present
+):
+    """Verifier-directed expansion needs a packet anchor; empty citations
+    become a focused reasoner retry instead of expanding all packets."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "5.5", "citations": [], "confidence": 0.4}',
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="expand_context",
+                reason="missing caption context",
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    expand_steps = [s for s in result.trace.steps if s.stage == "expand_context"]
+    assert expand_steps[1].args["target_packet_ids"] == []
+    assert expand_steps[1].args["n_neighbors_added"] == 0
+    answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
+    assert answer_steps[1].args.get("had_escalation_hint") is True
+    assert "missing caption context" in reasoner.calls[1]["prompt"]
 
 
 async def test_loop_evidence_retry_can_be_explicitly_disabled(
