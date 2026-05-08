@@ -449,11 +449,12 @@ class FocusWorkflow:
         evidence_retries_used = 0
         loop_terminated = ""  # set in the loop body before break
         escalation_hint: str | None = None
+        answer_evidence = evidence
         best_unsupported_answer: AnswerEvent | None = None
         best_unsupported_evidence: EvidenceEvent | None = None
         if not verdict.supported:
             best_unsupported_answer = answer_event
-            best_unsupported_evidence = evidence
+            best_unsupported_evidence = answer_evidence
 
         while True:
             action = verdict.next_action
@@ -530,6 +531,7 @@ class FocusWorkflow:
                     retry_attempt=retries_used,
                     plan=plan,
                 )
+                retry_answer_evidence = evidence
             elif action == "expand_context":
                 adjacency_pad = min(adjacency_pad * _EXPAND_RETRY_FACTOR, _MAX_ADJACENCY_PAD)
                 verifier_missing_context = _verifier_missing_context(verdict)
@@ -557,6 +559,7 @@ class FocusWorkflow:
                     target_packet_ids=target_packet_ids,
                     retry_visual_zoom=retry_visual_zoom,
                 )
+                retry_answer_evidence = _focused_retry_evidence(evidence, target_packet_ids)
                 # The retry answer should know what the verifier thought was
                 # missing. When there are no cited/target packets, the explicit
                 # empty target list keeps expansion from sweeping every packet;
@@ -565,6 +568,7 @@ class FocusWorkflow:
             elif action == "escalate_reasoner":
                 # No state change — just feed the verifier's reason into the
                 # next reasoner call so it knows what to address.
+                retry_answer_evidence = evidence
                 escalation_hint = verdict.reason
             else:
                 # Unknown action (future verifier extension) — accept the
@@ -577,15 +581,17 @@ class FocusWorkflow:
             # decides whether the loop continues.
             answer_event, reasoner_response = await self._run_answer(
                 question_event,
-                evidence,
+                retry_answer_evidence,
                 escalation_hint=escalation_hint,
                 recorder=recorder,
                 step_counter=step_counter,
                 retry_attempt=retries_used,
+                evidence_scope=_evidence_scope(evidence, retry_answer_evidence),
             )
+            answer_evidence = retry_answer_evidence
             verdict, verify_response = await self._run_verify(
                 question_event,
-                evidence,
+                answer_evidence,
                 answer_event,
                 backend_client=verifier_client,
                 recorder=recorder,
@@ -598,7 +604,7 @@ class FocusWorkflow:
                 question_text=question_event.question,
             ):
                 best_unsupported_answer = answer_event
-                best_unsupported_evidence = evidence
+                best_unsupported_evidence = answer_evidence
 
         # `loop_retry_helped`: did the retries flip the verdict from
         # unsupported → supported? Null when no retries fired (caller
@@ -630,6 +636,8 @@ class FocusWorkflow:
             )
             answer_event = best_unsupported_answer
             evidence = best_unsupported_evidence
+        else:
+            evidence = answer_evidence
 
         # Convert packet-id citations back to {page, bbox} dicts.
         citations = _citations_from_packets(answer_event.citations, evidence.packets)
@@ -1045,6 +1053,7 @@ class FocusWorkflow:
         recorder: TrajectoryRecorder,
         step_counter: _StepCounter,
         retry_attempt: int = 0,
+        evidence_scope: str = "full",
     ) -> tuple[AnswerEvent, ModelResponse]:
         answer_event, reasoner_response = await answer_from_evidence(
             question_event,
@@ -1062,6 +1071,7 @@ class FocusWorkflow:
                     "n_packets": len(evidence.packets),
                     "retry_attempt": retry_attempt,
                     "had_escalation_hint": bool(escalation_hint),
+                    "evidence_scope": evidence_scope,
                 },
                 obs_summary=(reasoner_response.text[:200] if reasoner_response.text else None),
                 tokens_in=reasoner_response.tokens_in,
@@ -1081,6 +1091,7 @@ class FocusWorkflow:
                 "citations": list(answer_event.citations),
                 "confidence": answer_event.confidence,
                 "had_escalation_hint": bool(escalation_hint),
+                "evidence_scope": evidence_scope,
             },
         )
         return answer_event, reasoner_response
@@ -1161,6 +1172,26 @@ def _verifier_missing_context(verdict: VerdictEvent) -> list[str]:
         seen.add(value)
         out.append(value)
     return out
+
+
+def _focused_retry_evidence(
+    evidence: EvidenceEvent,
+    target_packet_ids: list[str],
+) -> EvidenceEvent:
+    """Restrict verifier-directed retry answers to cited/target packets."""
+    target_set = {pid for pid in target_packet_ids if pid}
+    if not target_set:
+        return evidence
+    packets = [packet for packet in evidence.packets if packet.packet_id in target_set]
+    if not packets:
+        return evidence
+    return EvidenceEvent(packets=packets)
+
+
+def _evidence_scope(full_evidence: EvidenceEvent, answer_evidence: EvidenceEvent) -> str:
+    if len(answer_evidence.packets) < len(full_evidence.packets):
+        return "targeted"
+    return "full"
 
 
 def _verifier_requests_visual_readability_retry(

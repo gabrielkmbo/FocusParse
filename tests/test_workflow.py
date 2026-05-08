@@ -924,6 +924,51 @@ async def test_loop_expand_context_visual_readability_retry_zooms_target_crop(
     assert reasoner.calls[1]["n_images"] > reasoner.calls[0]["n_images"]
 
 
+async def test_loop_expand_context_retry_answers_with_target_packets_only(
+    tmp_path, parser_bench_submodule_present
+):
+    """Verifier-targeted evidence retries do not resend every packet."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.4}',
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="expand_context",
+                reason="pkt_000 needs clearer supporting context",
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(),
+        [
+            tmp_path / "datasheet-A_page_0003_300dpi.png",
+            tmp_path / "datasheet-A_page_0007_300dpi.png",
+        ],
+        protocol="focus",
+    )
+
+    answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
+    assert answer_steps[0].args["n_packets"] == 2
+    assert answer_steps[0].args["evidence_scope"] == "full"
+    assert answer_steps[1].args["n_packets"] == 1
+    assert answer_steps[1].args["evidence_scope"] == "targeted"
+    assert "pkt_000" in reasoner.calls[1]["prompt"]
+    assert "pkt_001" not in reasoner.calls[1]["prompt"]
+
+
 async def test_loop_exhausted_keeps_best_unsupported_answer(
     tmp_path, parser_bench_submodule_present
 ):
