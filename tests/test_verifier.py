@@ -237,6 +237,36 @@ async def test_verify_prompt_keeps_enough_table_text_for_math_verdict():
     assert "Prefer `escalate_reasoner`" in client.calls[0]["system"]
 
 
+async def test_verify_prompt_focuses_long_packet_text_on_question_terms():
+    client = _FakeVerifierClient(
+        '{"supported": true, "reason": "ok", "next_action": "accept", "confidence": 0.9}'
+    )
+    long_table = "\n".join(
+        [
+            "BCR[22:20] Meaning",
+            "b000 IMVA match when BRP is not linked",
+            "b001 joint IMVA and context ID match",
+            "b010 context ID match",
+            "b011 joint IMVA or DMVA and context ID match",
+            "b100 IMVA mismatch when BRP is not linked",
+            "b101 joint IMVA mismatch and context ID match",
+        ]
+        + ["filler row"] * 80
+    )
+    question = _question()
+    question.question = "Which BCR[22:20] value means IMVA mismatch when the BRP is not linked?"
+    await verify_answer(
+        question,
+        _evidence(_packet("pA", snippet=long_table)),
+        _answer(answer="b100", citations=["pA"]),
+        backend_client=client,
+    )
+
+    prompt = client.calls[0]["prompt"]
+    assert "b100 IMVA mismatch when BRP is not linked" in prompt
+    assert "b101 joint IMVA mismatch" in prompt
+
+
 async def test_verify_prompt_summarizes_multi_scale_chart_context():
     client = _FakeVerifierClient(
         '{"supported": true, "reason": "ok", "next_action": "accept", "confidence": 0.9}'

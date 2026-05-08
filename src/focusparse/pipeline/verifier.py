@@ -86,6 +86,31 @@ _SYSTEM_PROMPT = (
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _MAX_VERIFIER_PACKET_TEXT_CHARS = 500
+_VERIFIER_FOCUS_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "with",
+        "what",
+        "which",
+    }
+)
 
 
 async def verify_answer(
@@ -162,7 +187,12 @@ def _build_verifier_prompt(
 ) -> str:
     cited_packet_ids = set(answer.citations)
     packet_lines = [
-        _summarize_packet(p, cited=p.packet_id in cited_packet_ids) for p in evidence.packets
+        _summarize_packet(
+            p,
+            cited=p.packet_id in cited_packet_ids,
+            question_text=question.question,
+        )
+        for p in evidence.packets
     ]
     if not packet_lines:
         packet_block = "(no evidence packets were cited)"
@@ -182,13 +212,19 @@ def _build_verifier_prompt(
     )
 
 
-def _summarize_packet(packet: EvidencePacket, *, cited: bool = False) -> str:
+def _summarize_packet(
+    packet: EvidencePacket,
+    *,
+    cited: bool = False,
+    question_text: str | None = None,
+) -> str:
     """One-line packet summary for the verifier prompt.
 
     Keep it compact — the verifier tier is cheap and long packets balloon the
     prompt cost without helping binary support decisions.
     """
     snippet = packet.text_layer_snippet or packet.ocr_snippet or ""
+    snippet = _question_focused_text(snippet, question_text=question_text)
     snippet = snippet.strip().replace("\n", " ")
     if len(snippet) > _MAX_VERIFIER_PACKET_TEXT_CHARS:
         snippet = snippet[: _MAX_VERIFIER_PACKET_TEXT_CHARS - 3] + "..."
@@ -201,6 +237,41 @@ def _summarize_packet(packet: EvidencePacket, *, cited: bool = False) -> str:
         f"- [{packet.packet_id}] page={packet.page} type={region} "
         f"bbox={_fmt_bbox(packet.bbox_norm)}{scale_part}{cited_part} text={snippet!r}"
     )
+
+
+def _question_focused_text(text: str, *, question_text: str | None = None) -> str:
+    """Surface question-matching rows in long packet summaries for verification."""
+    if not text or not question_text or len(text) <= _MAX_VERIFIER_PACKET_TEXT_CHARS:
+        return text
+    q_tokens = _focus_tokens(question_text)
+    if not q_tokens:
+        return text
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    scored: list[tuple[int, int]] = []
+    for idx, line in enumerate(lines):
+        overlap = len(q_tokens & _focus_tokens(line))
+        if overlap:
+            scored.append((overlap, idx))
+    if not scored:
+        return text
+
+    max_score = max(score for score, _idx in scored)
+    score_floor = max(1, max_score - 1)
+    selected_indexes: set[int] = set()
+    for _score, idx in [
+        item
+        for item in sorted(scored, key=lambda item: (-item[0], item[1]))
+        if item[0] >= score_floor
+    ][:4]:
+        selected_indexes.update({idx - 1, idx, idx + 1})
+    selected = [lines[idx] for idx in sorted(selected_indexes) if 0 <= idx < len(lines)]
+    return " / ".join(selected)
+
+
+def _focus_tokens(text: str) -> set[str]:
+    tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+    return {tok for tok in tokens if len(tok) > 1 and tok not in _VERIFIER_FOCUS_STOPWORDS}
 
 
 def _fmt_scales(crops: list) -> str:
