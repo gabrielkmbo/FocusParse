@@ -1499,9 +1499,9 @@ def _format_hint(answer_type: object) -> str:
     stem = s.split(".")[-1].lower() if "." in s else s.lower()
     if stem == "numeric":
         return (
-            "Answer with a single number. If the question asks for a percentage, "
-            "include the % sign. Do not add explanations or units beyond what the "
-            "question asks for."
+            "Answer with a single number, including the requested unit or % sign "
+            "when the question explicitly asks for one. Do not add explanations "
+            "or extra units beyond what the question asks for."
         )
     if stem == "exact_match":
         return (

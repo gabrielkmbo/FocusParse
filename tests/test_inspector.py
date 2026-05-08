@@ -1604,6 +1604,88 @@ async def test_chart_question_adds_context_crop_without_chart_to_table(tmp_path,
     assert "chart_to_table:attempt" not in pkt.provenance.args_hash
 
 
+async def test_timing_diagram_adds_visual_context_crop_without_multi_scale(tmp_path, monkeypatch):
+    """Timing questions get a modest same-packet context crop by default."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    timing_region = _region(
+        region_id="timing0",
+        page=1,
+        bbox_norm=(0.20, 0.30, 0.50, 0.60),
+        score=0.9,
+        region_type="picture",
+        supporting_signals=["figure_class=timing_diagram"],
+    )
+    plan = _plan().model_copy(
+        update={
+            "question_family": "timing_diagram_reading",
+            "evidence_types": ["figure"],
+        }
+    )
+
+    ev = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=[timing_region]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=False,
+        multi_scale=False,
+    )
+
+    pkt = ev.packets[0]
+    assert len(pkt.multi_scale_crops) == 2
+    assert pkt.multi_scale_crops[0].scale == "tight"
+    assert pkt.multi_scale_crops[1].scale == "context"
+    assert pkt.multi_scale_crops[1].bbox_norm == pytest.approx(
+        (0.04, 0.14, 0.66, 0.76),
+        abs=1e-6,
+    )
+    assert "inspect_region:visual_context" in pkt.provenance.args_hash
+
+    image_calls = [call for call in inspect_calls if call["mode"] == "image"]
+    assert tuple(image_calls[1]["bbox_norm"]) == pytest.approx(
+        (0.04, 0.14, 0.66, 0.76),
+        abs=1e-6,
+    )
+
+
+async def test_generic_visual_question_does_not_add_visual_context_crop(tmp_path, monkeypatch):
+    """The proactive context crop is family-gated, not a global image-budget bump."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    visual_region = _region(
+        region_id="pic0",
+        page=1,
+        bbox_norm=(0.20, 0.30, 0.50, 0.60),
+        score=0.9,
+        region_type="picture",
+    )
+
+    ev = await inspect_regions(
+        _q(),
+        _plan().model_copy(update={"question_family": "single_value_lookup"}),
+        RegionsEvent(candidates=[visual_region]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=False,
+        multi_scale=False,
+    )
+
+    pkt = ev.packets[0]
+    assert pkt.multi_scale_crops == []
+    assert "visual_context" not in pkt.provenance.args_hash
+    assert len([call for call in inspect_calls if call["mode"] == "image"]) == 1
+
+
 async def test_chart_context_crop_dropped_when_target_scale_is_already_visible(
     tmp_path, monkeypatch
 ):

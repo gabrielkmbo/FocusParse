@@ -183,6 +183,7 @@ _DEFAULT_MAX_CROPS = 8
 _MIN_TEXT_LAYER_CHARS = 4  # anything shorter is "basically empty"
 _IMAGE_FALLBACK_EXPANSION = 0.02
 _CHART_CONTEXT_PAD = 0.12
+_VISUAL_CONTEXT_PAD = 0.16
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _CHART_SCALE_RE = re.compile(
     r"\b(?P<label>[A-Z][A-Z0-9_ ]{0,24}?)\s*"
@@ -244,8 +245,24 @@ _FINE_DETAIL_QUESTION_FAMILIES = frozenset(
     {
         "axis_value_interpolation",
         "confusable_label",
+        "direct_label_reading",
+        "legend_series_binding",
         "min_typ_max_disambiguation",
         "package_mechanical_reading",
+        "timing_diagram_reading",
+    }
+)
+
+# Families where the target visual region is often correct but the answer
+# depends on labels, markers, or sibling panels just outside the tight bbox.
+_VISUAL_CONTEXT_QUESTION_FAMILIES = frozenset(
+    {
+        "chart_caption_fusion",
+        "curve_axis_reading",
+        "direct_label_reading",
+        "legend_series_binding",
+        "multi_chart_comparison",
+        "timing_diagram_reading",
     }
 )
 
@@ -475,6 +492,54 @@ async def _inspect_one_region(
                 crop_signals.append("page_image_crop:chart_context")
             except (FileNotFoundError, OSError, ValueError) as exc:
                 logger.debug("page-image chart context crop failed for %s: %s", packet_id, exc)
+
+    # Timing diagrams, label-binding charts, and multi-panel visual questions
+    # often localize the right object but need a little surrounding context for
+    # markers, axis labels, symbol definitions, or sibling panels. Add a modest
+    # context crop for those families without enabling broad multi_scale for
+    # every packet in the headline path.
+    if (
+        not multi_scale_crops
+        and _needs_visual_context_crop(question_family)
+        and is_visual
+        and crop_ref
+        and crop_ref != page_thumbnail_ref
+    ):
+        context_bbox = _expand_bbox(region.bbox_norm, pad=_VISUAL_CONTEXT_PAD)
+        if pdf_path is not None:
+            try:
+                ctx_out = await inspect_region(
+                    InspectRegionInput(
+                        doc_path=str(pdf_path),
+                        page=region.page,
+                        bbox_norm=context_bbox,
+                        mode="image",
+                        expansion="none",
+                    ),
+                    cache_dir=crop_cache_dir,
+                )
+                multi_scale_crops = [
+                    CropRef(ref=crop_ref, bbox_norm=region.bbox_norm, scale="tight"),
+                    CropRef(ref=ctx_out.crop_ref, bbox_norm=context_bbox, scale="context"),
+                ]
+                crop_signals.append("inspect_region:visual_context")
+            except (FileNotFoundError, ValueError) as exc:
+                logger.debug("inspect_region(visual_context) failed for %s: %s", packet_id, exc)
+        elif page_image is not None:
+            try:
+                ctx_ref = _crop_page_image(
+                    page_image,
+                    context_bbox,
+                    cache_dir=crop_cache_dir,
+                    expansion=0.0,
+                )
+                multi_scale_crops = [
+                    CropRef(ref=crop_ref, bbox_norm=region.bbox_norm, scale="tight"),
+                    CropRef(ref=ctx_ref, bbox_norm=context_bbox, scale="context"),
+                ]
+                crop_signals.append("page_image_crop:visual_context")
+            except (FileNotFoundError, OSError, ValueError) as exc:
+                logger.debug("page-image visual context crop failed for %s: %s", packet_id, exc)
 
     # --- 1b. Auto-zoom via run_python sandbox.
     #
@@ -760,6 +825,10 @@ def _chart_context_needed(ocr_snippet: str | None, *, question_text: str | None 
     if target and f"question target scale: {target.lower()}=" in normalized:
         return False
     return target is not None or "detected chart scales:" not in normalized
+
+
+def _needs_visual_context_crop(question_family: str | None) -> bool:
+    return (question_family or "") in _VISUAL_CONTEXT_QUESTION_FAMILIES
 
 
 def _target_chart_label(question_text: str | None) -> str | None:

@@ -1246,6 +1246,7 @@ async def test_simple_agent_prompt_includes_numeric_format_hint(
 
     prompt = client.calls[0]["prompt"]
     assert "single number" in prompt.lower()
+    assert "requested unit" in prompt.lower()
 
 
 async def test_simple_agent_prompt_includes_exact_match_hint(

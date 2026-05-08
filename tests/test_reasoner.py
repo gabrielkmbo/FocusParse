@@ -19,6 +19,7 @@ from focusparse.pipeline.events import EvidenceEvent
 from focusparse.pipeline.reasoner import (
     _MAX_PACKET_TEXT_CHARS,
     _collect_packet_images,
+    _format_hint,
     _render_packet_line,
 )
 
@@ -375,6 +376,13 @@ def test_render_packet_line_chart_without_confidence_renders_advisory() -> None:
     assert "Chart extraction" in line
     assert "advisory" in line
     assert "confidence=" not in line
+
+
+def test_numeric_format_hint_preserves_requested_units() -> None:
+    hint = _format_hint("numeric")
+    assert "single number" in hint
+    assert "requested unit" in hint
+    assert "% sign" in hint
 
 
 # ---------------------------------------------------------------------------
