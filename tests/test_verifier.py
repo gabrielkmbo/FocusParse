@@ -207,6 +207,10 @@ async def test_verify_prompt_includes_packet_summary_and_citations():
     assert "pA" in prompt
     assert "cited_by_answer=yes" in prompt
     assert "cited_by_answer=no" in prompt
+    system = client.calls[0]["system"]
+    assert "same cited row" in system
+    assert "AEC-Q100" in system
+    assert "lowest/highest/min/max" in system
 
 
 async def test_verify_prompt_keeps_enough_table_text_for_math_verdict():
