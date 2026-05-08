@@ -1384,6 +1384,57 @@ async def test_initial_expand_keeps_high_relevance_primary(tmp_path, monkeypatch
     assert calls[0]["mode"] == "image"
 
 
+async def test_initial_reranked_expand_caps_total_neighbors(tmp_path, monkeypatch):
+    """Reranked first-pass expansion should not attach context to every packet.
+
+    The full n=148 runs showed examples with 15+ first-pass neighbor crops.
+    Since the reasoner sees every linked crop image, that behaves like tool
+    overload. Keep the initial pass small; verifier retries can still target
+    cited packets later.
+    """
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    packets = []
+    candidates = []
+    for idx in range(4):
+        y0 = 0.10 + idx * 0.20
+        bbox = (0.30, y0, 0.70, y0 + 0.08)
+        packets.append(_packet(packet_id=f"p{idx}", page=1, bbox_norm=bbox, region_type="picture"))
+        candidates.extend(
+            [
+                _region_with_signals(
+                    page=1,
+                    bbox_norm=bbox,
+                    region_type="picture",
+                    relevance=0.8,
+                    needed_for="primary",
+                ),
+                _region_with_signals(
+                    page=1,
+                    bbox_norm=(0.30, y0 + 0.09, 0.70, y0 + 0.11),
+                    region_type="caption",
+                    relevance=0.9,
+                ),
+                _region_with_signals(
+                    page=1,
+                    bbox_norm=(0.30, y0 - 0.04, 0.70, y0 - 0.02),
+                    region_type="footnote",
+                    relevance=0.8,
+                ),
+            ]
+        )
+
+    out = await expand_context(
+        EvidenceEvent(packets=packets),
+        regions=RegionsEvent(candidates=candidates),
+        pdf_path=Path("/fake.pdf"),
+        max_neighbors_per_packet=2,
+    )
+
+    assert [len(p.linked_neighbor_types) for p in out.packets] == [2, 2, 2, 0]
+    assert sum(len(p.linked_neighbor_types) for p in out.packets) == 6
+
+
 async def test_retry_expand_adds_context_window_for_target_packet(tmp_path, monkeypatch):
     """Verifier retries attach a wider crop for the cited packet itself."""
     calls: list = []

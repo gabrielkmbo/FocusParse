@@ -265,6 +265,14 @@ _VISUAL_CONTEXT_QUESTION_FAMILIES = frozenset(
         "timing_diagram_reading",
     }
 )
+_BROAD_VISUAL_CONTEXT_QUESTION_FAMILIES = frozenset(
+    {
+        "legend_series_binding",
+        "multi_chart_comparison",
+    }
+)
+_BROAD_VISUAL_CONTEXT_MAX_PACKETS = 2
+_BROAD_VISUAL_CONTEXT_MIN_RELEVANCE = 0.65
 
 
 async def inspect_regions(
@@ -456,6 +464,7 @@ async def _inspect_one_region(
         and crop_ref
         and crop_ref != page_thumbnail_ref
         and _region_is_chart(region)
+        and _allow_proactive_context_crop(question_family, region, packet_index=idx)
     ):
         context_bbox = _expand_bbox(region.bbox_norm, pad=_CHART_CONTEXT_PAD)
         if pdf_path is not None:
@@ -504,6 +513,7 @@ async def _inspect_one_region(
         and is_visual
         and crop_ref
         and crop_ref != page_thumbnail_ref
+        and _allow_proactive_context_crop(question_family, region, packet_index=idx)
     ):
         context_bbox = _expand_bbox(region.bbox_norm, pad=_VISUAL_CONTEXT_PAD)
         if pdf_path is not None:
@@ -829,6 +839,31 @@ def _chart_context_needed(ocr_snippet: str | None, *, question_text: str | None 
 
 def _needs_visual_context_crop(question_family: str | None) -> bool:
     return (question_family or "") in _VISUAL_CONTEXT_QUESTION_FAMILIES
+
+
+def _allow_proactive_context_crop(
+    question_family: str | None,
+    region: RegionCandidate,
+    *,
+    packet_index: int,
+) -> bool:
+    """Keep same-packet context selective for broad chart/legend questions.
+
+    Multi-chart and legend-binding examples were the noisiest branch-tip
+    families: several wrong runs handed the reasoner context crops for nearly
+    every visual packet. Keep the useful top-of-list signal, but avoid turning
+    every sibling panel into another image unless the reranker gave no signal.
+    """
+    family = question_family or ""
+    if family not in _BROAD_VISUAL_CONTEXT_QUESTION_FAMILIES:
+        return True
+    if packet_index >= _BROAD_VISUAL_CONTEXT_MAX_PACKETS:
+        return False
+    if region.needed_for == "primary":
+        return True
+    if region.relevance is None:
+        return True
+    return region.relevance >= _BROAD_VISUAL_CONTEXT_MIN_RELEVANCE
 
 
 def _target_chart_label(question_text: str | None) -> str | None:

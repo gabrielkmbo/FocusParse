@@ -1654,6 +1654,88 @@ async def test_timing_diagram_adds_visual_context_crop_without_multi_scale(tmp_p
     )
 
 
+async def test_multi_chart_context_crops_are_limited_to_top_visual_packets(tmp_path, monkeypatch):
+    """Broad chart-comparison questions should not add context to every panel."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    regions = [
+        _region(
+            region_id=f"chart{i}",
+            page=1,
+            bbox_norm=(0.10, 0.10 + i * 0.20, 0.40, 0.25 + i * 0.20),
+            score=0.9 - i * 0.01,
+            region_type="picture",
+            supporting_signals=["figure_class=line_chart"],
+        )
+        for i in range(3)
+    ]
+    plan = _plan().model_copy(
+        update={
+            "question_family": "multi_chart_comparison",
+            "evidence_types": ["chart", "legend"],
+        }
+    )
+
+    ev = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=regions),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=False,
+        multi_scale=False,
+    )
+
+    assert [bool(p.multi_scale_crops) for p in ev.packets] == [True, True, False]
+    assert [p.multi_scale_crops[-1].scale if p.multi_scale_crops else None for p in ev.packets] == [
+        "chart_context",
+        "chart_context",
+        None,
+    ]
+
+
+async def test_legend_series_context_crop_skips_weak_rerank_signal(tmp_path, monkeypatch):
+    """If reranker scored a broad legend packet weakly, keep it single-scale."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    weak_region = RegionCandidate(
+        region_id="legend-panel",
+        page=1,
+        bbox_norm=(0.20, 0.30, 0.50, 0.60),
+        score=0.95,
+        region_type="picture",
+        relevance=0.4,
+    )
+    plan = _plan().model_copy(
+        update={
+            "question_family": "legend_series_binding",
+            "evidence_types": ["figure", "legend"],
+        }
+    )
+
+    ev = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=[weak_region]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=False,
+        multi_scale=False,
+    )
+
+    pkt = ev.packets[0]
+    assert pkt.multi_scale_crops == []
+    assert "visual_context" not in pkt.provenance.args_hash
+
+
 async def test_generic_visual_question_does_not_add_visual_context_crop(tmp_path, monkeypatch):
     """The proactive context crop is family-gated, not a global image-budget bump."""
     inspect_calls: list = []

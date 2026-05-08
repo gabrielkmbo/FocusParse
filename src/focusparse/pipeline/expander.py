@@ -122,6 +122,23 @@ _DEFAULT_MAX_NEIGHBORS_PER_PACKET = 2
 # the reranker didn't run. Halves the spatial-only-fallback budget so
 # a query-blind expansion can't dominate the reasoner's image budget.
 _FALLBACK_MAX_NEIGHBORS_PER_PACKET = 1
+# First-pass expansion with reranker scores can still flood the reasoner when
+# many inspected packets look relevant. Keep the initial evidence budget small;
+# verifier-directed retries remain target-packet based and are not capped here.
+_INITIAL_RERANKED_TOTAL_NEIGHBOR_CAP = 6
+_INITIAL_CAP_EXEMPT_QUESTION_FAMILIES = frozenset(
+    {
+        "axis_value_interpolation",
+        "chart_caption_fusion",
+        "chart_footnote_fusion",
+        "chart_table_cross_ref",
+        "curve_axis_reading",
+        "dual_axis_disambiguation",
+        "legend_series_binding",
+        "multi_chart_comparison",
+        "timing_diagram_reading",
+    }
+)
 # Expand the packet's bbox by this fraction of the [0,1] range on each side
 # when testing for neighbor overlap. 0.08 ≈ ~1 inch on a Letter page at 300
 # DPI — enough to catch a caption a few text lines away.
@@ -243,6 +260,17 @@ async def expand_context(
     new_packets: list[EvidencePacket] = []
     target_filter_active = target_packet_ids is not None
     target_set = {pid for pid in (target_packet_ids or []) if pid}
+    total_new_neighbor_cap = (
+        _INITIAL_RERANKED_TOTAL_NEIGHBOR_CAP
+        if _should_cap_initial_reranked_expansion(
+            plan,
+            has_rerank_signal=has_rerank_signal,
+            verifier_reason=verifier_reason,
+            target_filter_active=target_filter_active,
+        )
+        else None
+    )
+    total_new_neighbor_links = 0
     for packet in evidence.packets:
         if target_filter_active and packet.packet_id not in target_set:
             new_packets.append(packet)
@@ -276,14 +304,24 @@ async def expand_context(
         existing_link_count = len([ref for ref in packet.linked_crop_refs if ref])
         candidate_limit = max_neighbors_per_packet + existing_link_count
         new_link_cap = effective_max
+        remaining_total_links: int | None = None
+        if total_new_neighbor_cap is not None:
+            remaining_total_links = total_new_neighbor_cap - total_new_neighbor_links
+            if remaining_total_links <= 0:
+                new_packets.append(packet)
+                continue
+            new_link_cap = min(new_link_cap, remaining_total_links)
+            candidate_limit = min(candidate_limit, existing_link_count + new_link_cap)
         if use_evidence_graph and has_graph_entry(packet.region_type, figure_class):
             hints = primary_region.expansion_hints if primary_region else None
             graph_matches = find_graph_neighbors(
                 primary_region or _synth_primary_from_packet(packet),
                 candidates_on_page,
                 expansion_hints=hints,
-            )[: max_neighbors_per_packet + existing_link_count]
+            )[:candidate_limit]
             new_link_cap = max_neighbors_per_packet
+            if remaining_total_links is not None:
+                new_link_cap = min(new_link_cap, remaining_total_links)
 
         if graph_matches:
             neighbors_with_role: list[tuple[RegionCandidate, str]] = list(graph_matches)
@@ -371,6 +409,7 @@ async def expand_context(
         if n_new_links == 0:
             new_packets.append(packet)
             continue
+        total_new_neighbor_links += n_new_neighbor_links
 
         updates = {
             "linked_crop_refs": linked_refs,
@@ -509,6 +548,26 @@ def _should_initially_expand_packet(
     if primary_region.expansion_hints:
         return True
     return primary_region.relevance is not None and primary_region.relevance >= relevance_threshold
+
+
+def _should_cap_initial_reranked_expansion(
+    plan: PlanEvent | None,
+    *,
+    has_rerank_signal: bool,
+    verifier_reason: str | None,
+    target_filter_active: bool,
+) -> bool:
+    """Apply the run-level context budget to text/table-ish first passes.
+
+    Visual chart/timing families often need several sibling packets plus axes
+    or legends before the first answer. Text/table families are where the
+    latest full run showed large neighbor fanout without corresponding
+    support, so cap them until a verifier retry names target packets.
+    """
+    if not has_rerank_signal or verifier_reason or target_filter_active:
+        return False
+    family = (plan.question_family if plan else None) or ""
+    return family not in _INITIAL_CAP_EXEMPT_QUESTION_FAMILIES
 
 
 def _should_attach_retry_context_window(

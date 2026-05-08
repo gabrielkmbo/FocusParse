@@ -71,6 +71,31 @@ _LOCALIZATION_RETRY_FACTOR = 0.7  # multiplied each retry → more boxes surface
 _DEFAULT_ADJACENCY_PAD = 0.08
 _EXPAND_RETRY_FACTOR = 1.5  # multiplied each retry → wider neighbor net
 _MAX_ADJACENCY_PAD = 0.30  # cap so the pad stays meaningful
+_RETRY_SELECTION_CONFIDENCE_MARGIN = 0.15
+_ANSWER_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_ANSWER_SELECTION_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "by",
+        "for",
+        "from",
+        "in",
+        "is",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "what",
+        "which",
+        "with",
+    }
+)
 
 
 @dataclass
@@ -410,6 +435,11 @@ class FocusWorkflow:
         evidence_retries_used = 0
         loop_terminated = ""  # set in the loop body before break
         escalation_hint: str | None = None
+        best_unsupported_answer: AnswerEvent | None = None
+        best_unsupported_evidence: EvidenceEvent | None = None
+        if not verdict.supported:
+            best_unsupported_answer = answer_event
+            best_unsupported_evidence = evidence
 
         while True:
             action = verdict.next_action
@@ -543,6 +573,13 @@ class FocusWorkflow:
                 step_counter=step_counter,
                 retry_attempt=retries_used,
             )
+            if not verdict.supported and _is_better_unsupported_answer(
+                answer_event,
+                best_unsupported_answer,
+                question_text=question_event.question,
+            ):
+                best_unsupported_answer = answer_event
+                best_unsupported_evidence = evidence
 
         # `loop_retry_helped`: did the retries flip the verdict from
         # unsupported → supported? Null when no retries fired (caller
@@ -550,6 +587,30 @@ class FocusWorkflow:
         loop_retry_helped: bool | None = None
         if retries_used > 0:
             loop_retry_helped = (not initial_supported) and verdict.supported
+
+        if (
+            loop_terminated == "exhausted"
+            and not verdict.supported
+            and best_unsupported_answer is not None
+            and best_unsupported_evidence is not None
+            and best_unsupported_answer is not answer_event
+        ):
+            _add_debug_event(
+                recorder,
+                stage="answer",
+                event_type="selection",
+                retry_attempt=retries_used,
+                payload={
+                    "selected": "best_unsupported",
+                    "reason": "retry_exhausted_without_support",
+                    "selected_answer": best_unsupported_answer.answer,
+                    "selected_confidence": best_unsupported_answer.confidence,
+                    "discarded_answer": answer_event.answer,
+                    "discarded_confidence": answer_event.confidence,
+                },
+            )
+            answer_event = best_unsupported_answer
+            evidence = best_unsupported_evidence
 
         # Convert packet-id citations back to {page, bbox} dicts.
         citations = _citations_from_packets(answer_event.citations, evidence.packets)
@@ -1108,6 +1169,64 @@ def _packet_id_mentions(text: str | None) -> list[str]:
     for pattern in patterns:
         mentions.extend(match.group(0) for match in re.finditer(pattern, text, re.IGNORECASE))
     return mentions
+
+
+def _is_better_unsupported_answer(
+    candidate: AnswerEvent,
+    incumbent: AnswerEvent | None,
+    *,
+    question_text: str | None = None,
+) -> bool:
+    """Prefer the strongest unsupported answer if retries never get accepted.
+
+    Verifier-directed evidence retries are useful when they produce a supported
+    answer, but the n=148 branch-tip diagnostics showed several unsupported
+    retries overwrote a more plausible initial answer. If the loop exhausts
+    without support, keep the strongest answer the reasoner produced. A retry
+    can beat a slightly higher-confidence incumbent when it is more specific to
+    the question wording, which protects scorer-compliant fixes like
+    `G = 24` -> `Gain = 24`.
+    """
+    if incumbent is None:
+        return True
+    if candidate.citations and not incumbent.citations:
+        return True
+    if incumbent.citations and not candidate.citations:
+        return False
+    candidate_confidence = float(candidate.confidence or 0.0)
+    incumbent_confidence = float(incumbent.confidence or 0.0)
+    candidate_overlap = _answer_question_overlap(candidate.answer, question_text)
+    incumbent_overlap = _answer_question_overlap(incumbent.answer, question_text)
+    if (
+        candidate_overlap > incumbent_overlap
+        and candidate_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= incumbent_confidence
+    ):
+        return True
+    if (
+        incumbent_overlap > candidate_overlap
+        and incumbent_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= candidate_confidence
+    ):
+        return False
+    return candidate_confidence > incumbent_confidence
+
+
+def _answer_question_overlap(answer: str | None, question_text: str | None) -> int:
+    if not answer or not question_text:
+        return 0
+    q_tokens = _answer_selection_tokens(question_text)
+    if not q_tokens:
+        return 0
+    return len(q_tokens & _answer_selection_tokens(answer))
+
+
+def _answer_selection_tokens(text: str) -> set[str]:
+    normalized = str(text).lower()
+    normalized = normalized.replace("µ", "u")
+    return {
+        token
+        for token in _ANSWER_TOKEN_RE.findall(normalized)
+        if len(token) > 1 and token not in _ANSWER_SELECTION_STOPWORDS
+    }
 
 
 def _normalize_packet_id_mention(value: str) -> str | None:

@@ -24,6 +24,7 @@ import pytest
 
 from focusparse.evidence.packet import EvidencePacket, PacketProvenance
 from focusparse.models.base import ModelResponse
+from focusparse.pipeline.events import AnswerEvent
 from focusparse.pipeline.workflow import (
     FocusWorkflow,
     SimpleBaselineAgent,
@@ -31,6 +32,7 @@ from focusparse.pipeline.workflow import (
     _citations_from_packets,
     _images_by_page,
     _infer_doc_id,
+    _is_better_unsupported_answer,
     _page_number_from_filename,
     _verifier_target_packet_ids,
 )
@@ -138,6 +140,28 @@ def test_verifier_target_packet_ids_normalizes_diagnostics_and_prose():
         verdict,
         valid_packet_ids={"pkt_002", "pkt_003", "pkt_004"},
     ) == ["pkt_003", "pkt_002", "pkt_004"]
+
+
+def test_retry_answer_selector_allows_question_specific_fix_within_margin():
+    incumbent = AnswerEvent(answer="G = 24", citations=["pkt_000"], confidence=0.87)
+    candidate = AnswerEvent(answer="Gain = 24", citations=["pkt_000"], confidence=0.81)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="Which gain setting has the highest response?",
+    )
+
+
+def test_retry_answer_selector_keeps_higher_confidence_when_overlap_ties():
+    incumbent = AnswerEvent(answer="4 µs", citations=["pkt_000"], confidence=0.74)
+    candidate = AnswerEvent(answer="8 µs", citations=["pkt_000"], confidence=0.64)
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="What is the C2V hold time?",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -825,6 +849,48 @@ async def test_loop_expand_context_retries_once_by_default(
     assert stage_counts["expand_context"] == 2
     assert stage_counts["answer"] == 2
     assert stage_counts["verify"] == 2
+
+
+async def test_loop_exhausted_keeps_best_unsupported_answer(
+    tmp_path, parser_bench_submodule_present
+):
+    """If an evidence retry remains unsupported, do not let it overwrite a
+    higher-confidence prior answer.
+
+    This pins the timing-diagram failure where the first answer was `4 µs`,
+    the verifier requested more context, and the retry drifted to `8 µs`.
+    """
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "4 µs", "citations": ["pkt_000"], "confidence": 0.74}',
+            '{"answer": "8 µs", "citations": ["pkt_000"], "confidence": 0.64}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(supported=False, next_action="expand_context"),
+            _verdict_json(supported=False, next_action="expand_context"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "4 µs"
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["loop_terminated"] == "exhausted"
+    selection_events = [
+        e for e in result.trace.debug_events if e.stage == "answer" and e.event_type == "selection"
+    ]
+    assert selection_events
+    assert selection_events[-1].payload["selected"] == "best_unsupported"
 
 
 async def test_loop_expand_context_with_no_citations_targets_no_packets(
