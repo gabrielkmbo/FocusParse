@@ -144,9 +144,17 @@ _INITIAL_CAP_EXEMPT_QUESTION_FAMILIES = frozenset(
 # DPI — enough to catch a caption a few text lines away.
 _DEFAULT_ADJACENCY_PAD = 0.08
 _RETRY_CONTEXT_WINDOW_PAD = 0.24
+_RETRY_VISUAL_BAND_Y_PAD = 0.18
 _MAX_LINKED_CONTEXT_TEXT_CHARS = 240
 _FIGURE_REF_RE = re.compile(r"\b(?:fig(?:ure)?\.?)\s*(?P<num>\d+[A-Za-z]?)\b", re.IGNORECASE)
 _CONTEXT_LINE_RE = re.compile(r"^Context\s+\[[^\]]+\]:\s*(?P<text>.*)$", re.IGNORECASE)
+_VISUAL_RETRY_BAND_RE = re.compile(
+    r"\b("
+    r"axis|axes|bbox|block|blocks|chart|diagram|figure|grid|gridline|image|"
+    r"label|labels|layout|location|marker|panel|position|relative|spatial|visual"
+    r")\b",
+    re.IGNORECASE,
+)
 _CONTEXT_WINDOW_REGION_TYPES: frozenset[str] = frozenset(
     {
         "bar_chart",
@@ -168,6 +176,20 @@ _CONTEXT_WINDOW_REGION_TYPES: frozenset[str] = frozenset(
         "plot",
         "table",
         "text",
+    }
+)
+_VISUAL_CONTEXT_WINDOW_TYPES: frozenset[str] = frozenset(
+    {
+        "bar_chart",
+        "candlestick",
+        "chart",
+        "curve",
+        "diagram",
+        "figure",
+        "image",
+        "line_chart",
+        "picture",
+        "plot",
     }
 )
 
@@ -347,7 +369,7 @@ async def expand_context(
             verifier_reason=verifier_reason,
             target_filter_active=target_filter_active,
         ):
-            context_window_bbox = _context_window_bbox(packet)
+            context_window_bbox = _context_window_bbox(packet, verifier_reason=verifier_reason)
             context_window_ref = await _crop_context_window(
                 packet,
                 pdf_path=pdf_path,
@@ -850,11 +872,32 @@ def _context_window_bbox(
     packet: EvidencePacket,
     *,
     pad: float = _RETRY_CONTEXT_WINDOW_PAD,
+    verifier_reason: str | None = None,
 ) -> tuple[float, float, float, float] | None:
+    if _needs_visual_retry_band(packet, verifier_reason):
+        y0, y1 = packet.bbox_norm[1], packet.bbox_norm[3]
+        bbox = (
+            0.0,
+            max(0.0, y0 - _RETRY_VISUAL_BAND_Y_PAD),
+            1.0,
+            min(1.0, y1 + _RETRY_VISUAL_BAND_Y_PAD),
+        )
+        if not _bbox_equal(bbox, packet.bbox_norm):
+            return bbox
     bbox = _pad_bbox(packet.bbox_norm, pad=pad)
     if _bbox_equal(bbox, packet.bbox_norm):
         return None
     return bbox
+
+
+def _needs_visual_retry_band(packet: EvidencePacket, reason: str | None) -> bool:
+    """Verifier-directed visual failures need a same-row band, not just padding."""
+    if not reason:
+        return False
+    region_type = (packet.region_type or "").strip().lower()
+    if region_type and region_type not in _VISUAL_CONTEXT_WINDOW_TYPES:
+        return False
+    return bool(_VISUAL_RETRY_BAND_RE.search(reason))
 
 
 def _synth_context_window_region(

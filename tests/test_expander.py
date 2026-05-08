@@ -1474,8 +1474,8 @@ async def test_retry_expand_adds_context_window_for_target_packet(tmp_path, monk
     packet = out.packets[0]
     assert packet.linked_neighbor_types == ["context_window"]
     assert len(packet.linked_crop_refs) == 1
-    assert tuple(round(v, 2) for v in calls[0]["bbox_norm"]) == (0.06, 0.16, 0.94, 0.74)
-    assert tuple(round(v, 2) for v in seen_text_layer["bbox_norm"]) == (0.06, 0.16, 0.94, 0.74)
+    assert tuple(round(v, 2) for v in calls[0]["bbox_norm"]) == (0.0, 0.22, 1.0, 0.68)
+    assert tuple(round(v, 2) for v in seen_text_layer["bbox_norm"]) == (0.0, 0.22, 1.0, 0.68)
     assert (
         packet.text_layer_snippet
         == "Context [context_window]: surrounding axis labels and row headers"
@@ -1519,3 +1519,4 @@ async def test_retry_expand_context_window_does_not_consume_neighbor_cap(tmp_pat
         max_neighbors_per_packet=2,
     )
     assert out.packets[0].linked_neighbor_types == ["context_window", "table", "text"]
+    assert tuple(round(v, 2) for v in calls[0]["bbox_norm"]) == (0.06, 0.16, 0.94, 0.74)
