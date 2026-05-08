@@ -31,7 +31,9 @@ from __future__ import annotations
 import hashlib
 import multiprocessing as mp
 import os
+import queue
 import sys
+import threading
 import traceback
 from io import BytesIO
 from pathlib import Path
@@ -70,6 +72,7 @@ ALLOWED_IMPORTS: frozenset[str] = frozenset(
 DEFAULT_WALL_TIME_S = 15
 DEFAULT_CPU_S = 15
 DEFAULT_RSS_MB = 1024
+DEFAULT_RECV_TIMEOUT_S = 2.0
 
 
 _RUN_PYTHON_CODE_EXAMPLE = (
@@ -214,12 +217,7 @@ async def run_python(
             proc.kill()
             proc.join()
 
-    payload: dict | None = None
-    if parent_conn.poll(timeout=0.1):
-        try:
-            payload = parent_conn.recv()
-        except (EOFError, ConnectionResetError):
-            payload = None
+    payload = _recv_payload(parent_conn, timeout_s=DEFAULT_RECV_TIMEOUT_S)
     parent_conn.close()
 
     if payload is None:
@@ -252,6 +250,27 @@ async def run_python(
         exit_code=int(payload_exit) if payload_exit is not None else -1,
         timed_out=timed_out,
     )
+
+
+def _recv_payload(conn, *, timeout_s: float) -> dict | None:
+    """Receive a child payload without letting a partial pipe block forever."""
+    if not conn.poll(timeout=0.1):
+        return None
+
+    result_q: queue.Queue[dict | None] = queue.Queue(maxsize=1)
+
+    def _recv() -> None:
+        try:
+            result_q.put(conn.recv())
+        except (EOFError, ConnectionResetError, OSError):
+            result_q.put(None)
+
+    thread = threading.Thread(target=_recv, daemon=True)
+    thread.start()
+    try:
+        return result_q.get(timeout=timeout_s)
+    except queue.Empty:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -290,12 +309,8 @@ def _child_main(
         # return the leaf module, not the parent package.
         preloaded = {}
         for name in ALLOWED_IMPORTS:
-            try:
+            with contextlib.suppress(ImportError):
                 preloaded[name] = importlib.import_module(name)
-            except ImportError:
-                # Optional modules (matplotlib, scipy) may be missing in
-                # minimal environments; skip silently.
-                pass
 
         # Build the namespace the code runs in.
         builtins_dict = _safe_builtins()
@@ -345,7 +360,7 @@ def _child_main(
         )
     except Exception:
         # Last-ditch: report whatever we managed to capture.
-        try:
+        with contextlib.suppress(Exception):
             pipe.send(
                 {
                     "stdout": stdout_buf.getvalue().decode("utf-8", errors="replace"),
@@ -358,13 +373,9 @@ def _child_main(
                     "exit_code": 2,
                 }
             )
-        except Exception:
-            pass
     finally:
-        try:
+        with contextlib.suppress(Exception):
             pipe.close()
-        except Exception:
-            pass
         os._exit(0)
 
 

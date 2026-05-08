@@ -16,12 +16,13 @@ suite. Marked `slow` so devs can skip with `-m "not slow"` when iterating.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
-from focusparse.tools.run_python import RunPythonInput, run_python
+from focusparse.tools.run_python import RunPythonInput, _recv_payload, run_python
 
 pytestmark = pytest.mark.asyncio
 
@@ -30,6 +31,32 @@ pytestmark = pytest.mark.asyncio
 # entirely on CI runners that don't have a working `fork`/`spawn` context.
 if sys.platform == "win32":
     pytest.skip("run_python uses multiprocessing.spawn; skip on Windows", allow_module_level=True)
+
+
+async def test_recv_payload_timeout_does_not_block_forever():
+    class _BlockingConn:
+        def poll(self, timeout):
+            return True
+
+        def recv(self):
+            time.sleep(2)
+            return {"late": True}
+
+    t0 = time.perf_counter()
+
+    assert _recv_payload(_BlockingConn(), timeout_s=0.05) is None
+    assert time.perf_counter() - t0 < 0.5
+
+
+async def test_recv_payload_returns_ready_payload():
+    class _ReadyConn:
+        def poll(self, timeout):
+            return True
+
+        def recv(self):
+            return {"ok": True}
+
+    assert _recv_payload(_ReadyConn(), timeout_s=0.05) == {"ok": True}
 
 
 async def test_simple_code_runs_and_captures_stdout():
