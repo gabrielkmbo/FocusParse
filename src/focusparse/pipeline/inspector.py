@@ -85,8 +85,18 @@ _TEXT_REGION_TYPES = frozenset(
         "list-item",
         "list_item",
         "caption",
+        "checkbox-selected",
+        "checkbox_selected",
+        "checkbox-unselected",
+        "checkbox_unselected",
+        "code",
+        "document index",
+        "document_index",
         "footnote",
         "formula",
+        "form",
+        "key-value region",
+        "key_value_region",
         "legend",
         "page-header",
         "page-footer",
@@ -138,7 +148,22 @@ _EVIDENCE_TYPE_ALIASES: dict[str, frozenset[str]] = {
     "image": frozenset({"picture", "image", "figure"}),
     "table": frozenset({"table"}),
     "text": frozenset(
-        {"text", "section_header", "section-header", "title", "list-item", "list_item"}
+        {
+            "checkbox-selected",
+            "checkbox_selected",
+            "code",
+            "document index",
+            "document_index",
+            "form",
+            "key-value region",
+            "key_value_region",
+            "list-item",
+            "list_item",
+            "section_header",
+            "section-header",
+            "text",
+            "title",
+        }
     ),
     "caption": frozenset({"caption"}),
     "footnote": frozenset({"footnote"}),
@@ -289,6 +314,7 @@ async def inspect_regions(
             auto_zoom=auto_zoom,
             multi_scale=multi_scale,
             chart_extraction_active=chart_extraction_active,
+            chart_context_active=wants_chart,
             question_family=plan.question_family,
             question_text=question.question,
         )
@@ -314,6 +340,7 @@ async def _inspect_one_region(
     auto_zoom: bool = False,
     multi_scale: bool = False,
     chart_extraction_active: bool = False,
+    chart_context_active: bool = False,
     question_family: str | None = None,
     question_text: str | None = None,
 ) -> EvidencePacket:
@@ -407,7 +434,7 @@ async def _inspect_one_region(
     # flag remains the larger 30% context experiment.
     if (
         not multi_scale_crops
-        and chart_extraction_active
+        and chart_context_active
         and is_visual
         and crop_ref
         and crop_ref != page_thumbnail_ref

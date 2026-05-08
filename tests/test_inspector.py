@@ -310,6 +310,56 @@ async def test_legend_and_axis_label_regions_get_text_extraction(tmp_path, monke
     assert [p.commit_level for p in ev.packets] == ["element", "element"]
 
 
+async def test_structured_text_detector_labels_get_text_extraction(tmp_path, monkeypatch):
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(
+        monkeypatch,
+        inspect_calls=inspect_calls,
+        text_calls=text_calls,
+        text_layer_out=_FakeTextLayerOutput(text="", source="empty_native"),
+        inspect_element_out=_FakeInspectOutput(
+            crop_ref="/crops/p1_element.png", ocr_text="STRUCTURED TEXT", confidence=0.81
+        ),
+    )
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    labels = ["Key-Value Region", "Code", "Document Index"]
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id=f"r{idx}",
+                page=1,
+                bbox_norm=(0.1 * idx, 0.0, 0.1 * idx + 0.08, 0.2),
+                region_type=label,
+                score=0.9 - (idx * 0.01),
+            )
+            for idx, label in enumerate(labels)
+        ]
+    )
+
+    ev = await inspect_regions(
+        _q(),
+        _plan(max_crops=3).model_copy(update={"evidence_types": ["text"]}),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+    )
+
+    assert len(text_calls) == 3
+    assert [c["mode"] for c in inspect_calls] == [
+        "image",
+        "element",
+        "image",
+        "element",
+        "image",
+        "element",
+    ]
+    assert [p.ocr_snippet for p in ev.packets] == ["STRUCTURED TEXT"] * 3
+    assert all("inspect_region:element" in p.provenance.args_hash for p in ev.packets)
+
+
 async def test_text_region_uses_native_text_layer(tmp_path, monkeypatch):
     inspect_calls: list = []
     text_calls: list = []
@@ -1498,6 +1548,60 @@ async def test_chart_extraction_adds_chart_context_crop_without_multi_scale(tmp_
         (0.08, 0.18, 0.62, 0.72),
         abs=1e-6,
     )
+
+
+async def test_chart_question_adds_context_crop_without_chart_to_table(tmp_path, monkeypatch):
+    """The lightweight chart-context crop is useful even when the heavier
+    chart_to_table helper is disabled for the headline +4 path."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+
+    chart_calls: list = []
+
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None):
+        chart_calls.append({"crop_ref": inp.crop_ref})
+        raise AssertionError("chart_to_table should stay disabled")
+
+    monkeypatch.setattr(
+        "focusparse.tools.chart_to_table.chart_to_table",
+        _fake_chart_to_table,
+    )
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    chart_region = _region(
+        region_id="chart0",
+        page=1,
+        bbox_norm=(0.20, 0.30, 0.50, 0.60),
+        score=0.9,
+        region_type="picture",
+        supporting_signals=["figure_class=line_chart"],
+    )
+    plan = _plan().model_copy(
+        update={
+            "question_family": "axis_value_interpolation",
+            "evidence_types": ["chart"],
+        }
+    )
+
+    ev = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=[chart_region]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=False,
+        multi_scale=False,
+    )
+
+    pkt = ev.packets[0]
+    assert chart_calls == []
+    assert len(pkt.multi_scale_crops) == 2
+    assert pkt.multi_scale_crops[0].scale == "tight"
+    assert pkt.multi_scale_crops[1].scale == "chart_context"
+    assert "inspect_region:chart_context" in pkt.provenance.args_hash
+    assert "chart_to_table:attempt" not in pkt.provenance.args_hash
 
 
 async def test_chart_context_crop_dropped_when_target_scale_is_already_visible(
