@@ -182,6 +182,8 @@ _EVIDENCE_TYPE_BOOST = 1.5
 
 _DEFAULT_MAX_CROPS = 8
 _MIN_TEXT_LAYER_CHARS = 4  # anything shorter is "basically empty"
+_VISUAL_NATIVE_TEXT_MAX_CHARS = 220
+_VISUAL_NATIVE_TEXT_WEAK_OCR_CHARS = 20
 _IMAGE_FALLBACK_EXPANSION = 0.02
 _CHART_CONTEXT_PAD = 0.12
 _VISUAL_CONTEXT_PAD = 0.16
@@ -805,20 +807,35 @@ def _usable_native_text(text: str | None) -> str | None:
 
 
 def _merge_visual_native_text(native_text: str, ocr_text: str | None) -> str:
-    """Combine deterministic visual text with OCR without duplicating it."""
+    """Use deterministic visual text only when it sharpens weak OCR.
+
+    Native text extracted from a figure bbox can include broad surrounding
+    paragraph text. That is useful when OCR is empty or tiny, but noisy when
+    OCR already names the visual object. Keep the old OCR-first behavior for
+    strong visual OCR and add compact native text only as a fallback.
+    """
     native = _usable_native_text(native_text) or ""
     ocr = " ".join((ocr_text or "").split())
     if not native:
         return ocr
     if not ocr:
-        return native
+        return _truncate_visual_native_text(native)
     native_key = native.casefold()
     ocr_key = ocr.casefold()
     if native_key in ocr_key:
         return ocr
     if ocr_key in native_key:
-        return native
-    return f"Native PDF text: {native} OCR: {ocr}"
+        return _truncate_visual_native_text(native)
+    if len(ocr) >= _VISUAL_NATIVE_TEXT_WEAK_OCR_CHARS:
+        return ocr
+    return f"Native PDF text: {_truncate_visual_native_text(native)} OCR: {ocr}"
+
+
+def _truncate_visual_native_text(text: str) -> str:
+    text = " ".join(text.split())
+    if len(text) <= _VISUAL_NATIVE_TEXT_MAX_CHARS:
+        return text
+    return text[: _VISUAL_NATIVE_TEXT_MAX_CHARS - 3].rstrip() + "..."
 
 
 def _chart_scale_hint(ocr_snippet: str | None, *, question_text: str | None = None) -> str | None:
