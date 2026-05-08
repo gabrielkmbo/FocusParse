@@ -304,6 +304,70 @@ def test_evidence_packet_quality_counts_unresolved_answer_citation(tmp_path: Pat
     assert diag.cited_packet_text_coverage_rate is None
 
 
+def test_failure_reason_breakdown_buckets_incorrect_examples(tmp_path: Path) -> None:
+    spec = tmp_path / "focusparse_focus_x"
+    _write_per_example(
+        spec,
+        [
+            {
+                "example_id": "loc",
+                "answer_correct": 0.0,
+                "is_lazy": 0,
+                "citations": [{"page": 1, "bbox": [0, 0, 1, 1]}],
+                "stages": {"localization": {"region_recall": 0.0}},
+                "trace": {
+                    "evidence_snapshot": [{"packet_id": "pkt_loc", "text_layer_snippet": "x"}],
+                    "debug_events": [
+                        {"stage": "answer", "payload": {"citations": ["pkt_loc"]}},
+                    ],
+                },
+            },
+            {
+                "example_id": "image",
+                "answer_correct": 0.0,
+                "is_lazy": 0,
+                "citations": [{"page": 2, "bbox": [0, 0, 1, 1]}],
+                "stages": {"localization": {"region_recall": 1.0}},
+                "trace": {
+                    "evidence_snapshot": [
+                        {
+                            "packet_id": "pkt_image",
+                            "text_layer_snippet": None,
+                            "ocr_snippet": None,
+                            "chart_csv": None,
+                        }
+                    ],
+                    "debug_events": [
+                        {"stage": "answer", "payload": {"citations": ["pkt_image"]}},
+                    ],
+                    "steps": [
+                        {
+                            "stage": "verify",
+                            "action": "llm_call",
+                            "args": {"supported": False},
+                        }
+                    ],
+                },
+            },
+            {
+                "example_id": "ok",
+                "answer_correct": 1.0,
+                "is_lazy": 0,
+                "citations": [{"page": 3, "bbox": [0, 0, 1, 1]}],
+                "trace": {"steps": []},
+            },
+        ],
+    )
+
+    diag = dp.diagnose_spec(spec)
+    md = dp.render_markdown([diag])
+
+    assert diag.failure_reasons["localization_miss"] == 1
+    assert diag.failure_reasons["cited_image_only"] == 1
+    assert "top_failure" in md
+    assert "incorrect-example failure reasons" in md
+
+
 def test_answer_packet_citations_prefer_debug_events(tmp_path: Path) -> None:
     spec = tmp_path / "focusparse_focus_x"
     _write_per_example(

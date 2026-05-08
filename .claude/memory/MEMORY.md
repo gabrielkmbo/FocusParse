@@ -165,6 +165,22 @@ localization; the smoke predicted **68%** with both supporting table packets
 cited. The shared layout endpoint returned a preflight 503, so the smoke used
 `--skip-layout-preflight` and cached layout for this already-run example.
 
+Instrumentation follow-up: `diagnose_predictions.py` now classifies each
+incorrect example into one primary failure reason: `lazy_or_no_bbox`,
+`empty_citation`, `localization_miss`, `partial_localization`, `abstained`,
+`cited_image_only`, `verifier_unsupported`, or `reasoning_or_extraction`. The
+summary table surfaces `top_failure`, the detailed section lists the full
+breakdown, and the JSON report includes `failure_reasons`.
+
+Regenerated focus +2/+4 diagnostics at
+`results/hf/headline-v1-rebaseline-v2/focus-toolset-diagnostics-v2.{md,json}`.
+Old rebaseline-v2 +2 top failure was `cited_image_only` (17), followed by
+partial/localization misses and lazy/no-bbox. Old +4 also topped out at
+`cited_image_only` (19) despite attaching mean **13.34** neighbors. This
+supports the mechanism claim that extra context/tool access alone does not fix
+unsupported evidence; disciplined packet construction and verification are the
+actual product lever.
+
 ### 2026-05-07 — Path A replicate hold + evidence text pathway
 
 Path A was run twice at n=148 on HF revision

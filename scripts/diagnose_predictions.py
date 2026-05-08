@@ -67,6 +67,7 @@ class SpecDiagnosis:
     packet_chart_attempt_rate: float = 0.0
     packet_chart_empty_rate: float = 0.0
     packet_chart_error_rate: float = 0.0
+    failure_reasons: Counter[str] = field(default_factory=Counter)
     cited_packet_count: int = 0
     cited_packet_resolved_rate: float | None = None
     cited_packet_text_coverage_rate: float | None = None
@@ -119,7 +120,8 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
         steps = (record.get("trace") or {}).get("steps") or []
         diag.n_steps += len(steps)
 
-        if record.get("answer_correct", 0.0) >= 1.0:
+        answer_correct = record.get("answer_correct", 0.0) >= 1.0
+        if answer_correct:
             diag.answers_correct += 1
         usd_values.append(float(record.get("usd") or 0.0))
 
@@ -207,6 +209,15 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
                 any_cited_image_only = True
         if verifier_supported is False and answer_citations:
             unsupported_cited_image_only_flags.append(any_cited_image_only)
+        if not answer_correct:
+            diag.failure_reasons[
+                _classify_failure_reason(
+                    record,
+                    answer_citations=answer_citations,
+                    any_cited_image_only=any_cited_image_only,
+                    verifier_supported=verifier_supported,
+                )
+            ] += 1
 
         # lazy_answer_rate: harness already stamps `is_lazy` on the record
         # using tool_calls == 0 OR no predicted bboxes. Trust that flag.
@@ -309,22 +320,23 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
     lines.append(
         "| Spec | n | accuracy | lazy_rate | empty_cite_rate "
         "| premature_final | verifier_unsupported | expand_called "
-        "| mean_neighbors | tool_err_rate | mean_tool_calls | mean_usd |"
+        "| mean_neighbors | tool_err_rate | mean_tool_calls | mean_usd | top_failure |"
     )
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for d in diags:
         tool_err_rate = d.n_tool_errors / max(d.n_steps, 1)
         prem = f"{d.premature_final_rate:.1%}" if d.premature_final_rate is not None else "—"
         verifier_unsupported = (
             f"{d.verifier_unsupported_rate:.1%}" if d.verifier_unsupported_rate is not None else "—"
         )
+        top_failure = _fmt_top_counter(d.failure_reasons)
         lines.append(
             f"| {d.spec_name} | {d.n_examples} | {d.accuracy:.1%} "
             f"| {d.lazy_answer_rate:.1%} | {d.empty_citation_rate:.1%} "
             f"| {prem} | {verifier_unsupported} "
             f"| {d.expand_context_called_rate:.1%} | {d.mean_neighbors_attached:.2f} "
             f"| {tool_err_rate:.1%} | {d.mean_tool_calls:.2f} "
-            f"| ${d.mean_usd:.4f} |"
+            f"| ${d.mean_usd:.4f} | {top_failure} |"
         )
     lines.append("")
 
@@ -395,6 +407,10 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
             f"- expand_context called: **{d.expand_context_called_rate:.1%}**, "
             f"mean neighbors attached: **{d.mean_neighbors_attached:.2f}**"
         )
+        if d.failure_reasons:
+            lines.append("- incorrect-example failure reasons:")
+            for reason, count in d.failure_reasons.most_common():
+                lines.append(f"  - `{reason}`: {count}")
         if d.premature_final_rate is not None:
             lines.append(
                 f"- premature_final_rate (final at iter 0, no tool call): "
@@ -454,6 +470,7 @@ def to_json(diags: list[SpecDiagnosis]) -> dict[str, Any]:
                 "packet_chart_attempt_rate": d.packet_chart_attempt_rate,
                 "packet_chart_empty_rate": d.packet_chart_empty_rate,
                 "packet_chart_error_rate": d.packet_chart_error_rate,
+                "failure_reasons": dict(d.failure_reasons),
                 "cited_packet_count": d.cited_packet_count,
                 "cited_packet_resolved_rate": d.cited_packet_resolved_rate,
                 "cited_packet_text_coverage_rate": d.cited_packet_text_coverage_rate,
@@ -599,8 +616,62 @@ def _packet_chart_error(packet: dict[str, Any]) -> bool:
     return "chart_to_table:error" in str(packet.get("provenance_args_hash") or "")
 
 
+def _classify_failure_reason(
+    record: dict[str, Any],
+    *,
+    answer_citations: list[str],
+    any_cited_image_only: bool,
+    verifier_supported: bool | None,
+) -> str:
+    """Single primary bucket for an incorrect example.
+
+    The buckets are intentionally coarse and ordered by actionability for the
+    inspect/expand research loop: first path/pathology failures, then evidence
+    visibility, then verifier/reasoner extraction.
+    """
+    if int(record.get("is_lazy", 0)) == 1:
+        return "lazy_or_no_bbox"
+    if not answer_citations and not record.get("citations"):
+        return "empty_citation"
+
+    loc = (record.get("stages") or {}).get("localization") or {}
+    region_recall = _as_float_or_none(loc.get("region_recall"))
+    bbox_iou = _as_float_or_none(loc.get("bbox_iou_max"))
+    if region_recall is not None:
+        if region_recall <= 0.0:
+            return "localization_miss"
+        if region_recall < 1.0:
+            return "partial_localization"
+    elif bbox_iou is not None and bbox_iou <= 0.1:
+        return "localization_miss"
+
+    answer_pred = str(record.get("answer_pred") or "").strip().lower()
+    loop = (record.get("stages") or {}).get("loop") or {}
+    if answer_pred == "unanswerable" or loop.get("loop_terminated") == "abstained":
+        return "abstained"
+    if any_cited_image_only:
+        return "cited_image_only"
+    if verifier_supported is False:
+        return "verifier_unsupported"
+    return "reasoning_or_extraction"
+
+
+def _as_float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _fmt_optional_pct(value: float | None) -> str:
     return "—" if value is None else f"{value:.1%}"
+
+
+def _fmt_top_counter(counter: Counter[str]) -> str:
+    if not counter:
+        return "—"
+    reason, count = counter.most_common(1)[0]
+    return f"`{reason}` ({count})"
 
 
 def _iter_prediction_records(spec_dir: Path) -> Iterable[dict[str, Any]]:
