@@ -75,6 +75,8 @@ save_image(out)
 # silently becomes invisible.
 _TEXT_REGION_TYPES = frozenset(
     {
+        "axis-label",
+        "axis_label",
         "text",
         "table",
         "section_header",
@@ -85,23 +87,52 @@ _TEXT_REGION_TYPES = frozenset(
         "caption",
         "footnote",
         "formula",
+        "legend",
         "page-header",
         "page-footer",
+        "tick-label",
+        "tick_label",
     }
 )
 
 # Visual region types whose crop remains the primary evidence. They also get
 # a best-effort `element` OCR pass so text embedded in figures/charts is not
 # invisible to the verifier or trace diagnostics.
-_VISUAL_REGION_TYPES = frozenset({"picture", "image", "chart", "figure"})
+_VISUAL_REGION_TYPES = frozenset(
+    {
+        "bar_chart",
+        "candlestick",
+        "chart",
+        "curve",
+        "diagram",
+        "figure",
+        "image",
+        "line_chart",
+        "picture",
+        "plot",
+    }
+)
 
 # Map `plan.evidence_types` strings (planner vocabulary) to the region_type
 # labels RT-DETRv2 emits. Planner uses coarse types (figure, table, text);
 # detector uses fine labels (picture, table, section_header, etc.). This
 # bridges the two vocabularies so the ranker can boost matches.
 _EVIDENCE_TYPE_ALIASES: dict[str, frozenset[str]] = {
-    "figure": frozenset({"picture", "image", "chart", "figure", "diagram"}),
-    "chart": frozenset({"chart", "figure", "picture"}),
+    "axis": frozenset({"axis-label", "axis_label", "tick-label", "tick_label"}),
+    "axis_label": frozenset({"axis-label", "axis_label", "tick-label", "tick_label"}),
+    "figure": frozenset({"picture", "image", "chart", "figure", "diagram", "plot", "curve"}),
+    "chart": frozenset(
+        {
+            "bar_chart",
+            "candlestick",
+            "chart",
+            "curve",
+            "figure",
+            "line_chart",
+            "picture",
+            "plot",
+        }
+    ),
     "diagram": frozenset({"picture", "figure", "image", "diagram"}),
     "picture": frozenset({"picture", "image", "figure"}),
     "image": frozenset({"picture", "image", "figure"}),
@@ -113,6 +144,7 @@ _EVIDENCE_TYPE_ALIASES: dict[str, frozenset[str]] = {
     "footnote": frozenset({"footnote"}),
     "formula": frozenset({"formula"}),
     "header": frozenset({"page-header", "section_header", "section-header", "title"}),
+    "legend": frozenset({"legend"}),
     "footer": frozenset({"page-footer"}),
 }
 

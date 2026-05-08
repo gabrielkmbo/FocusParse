@@ -292,6 +292,30 @@ async def test_verify_llm_rejects_invalid_next_action():
     assert verdict.reason == "ok"
 
 
+@pytest.mark.parametrize(
+    ("raw_action", "expected"),
+    [
+        ("Expand_Context", "expand_context"),
+        ("expand context.", "expand_context"),
+        ("retry-localization", "retry_localization"),
+        ("`escalate_reasoner`", "escalate_reasoner"),
+    ],
+)
+async def test_verify_llm_normalizes_common_next_action_variants(raw_action, expected):
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "needs repair", '
+        f'"next_action": "{raw_action}", "confidence": 0.7}}'
+    )
+    verdict, _ = await verify_answer(
+        _question(),
+        _evidence(_packet()),
+        _answer(confidence=0.42),
+        backend_client=client,
+    )
+    assert verdict.supported is False
+    assert verdict.next_action == expected
+
+
 async def test_verify_llm_rejects_non_bool_supported():
     client = _FakeVerifierClient(
         '{"supported": "yes", "reason": "ok", "next_action": "accept", "confidence": 0.9}'

@@ -227,8 +227,10 @@ def _parse_verifier_response(text: str | None) -> dict[str, Any]:
         out["reason"] = reason.strip()[:240]
 
     next_action = obj.get("next_action")
-    if isinstance(next_action, str) and next_action in _VALID_NEXT_ACTIONS:
-        out["next_action"] = next_action
+    if isinstance(next_action, str):
+        normalized_action = _normalize_next_action(next_action)
+        if normalized_action is not None:
+            out["next_action"] = normalized_action
 
     confidence = obj.get("confidence")
     if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
@@ -237,3 +239,14 @@ def _parse_verifier_response(text: str | None) -> dict[str, Any]:
             out["confidence"] = c
 
     return out
+
+
+def _normalize_next_action(value: str) -> str | None:
+    """Accept common enum spelling variants while rejecting unknown actions."""
+    normalized = value.strip().lower()
+    normalized = normalized.strip("`'\".,;:()[]{}")
+    normalized = re.sub(r"[\s\-]+", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized)
+    if normalized in _VALID_NEXT_ACTIONS:
+        return normalized
+    return None

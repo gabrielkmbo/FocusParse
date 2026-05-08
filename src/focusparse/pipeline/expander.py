@@ -47,8 +47,11 @@ logger = logging.getLogger(__name__)
 # other pictures / text blocks are not "annotations", they're siblings.
 _NEIGHBOR_TYPES: frozenset[str] = frozenset(
     {
+        "axis-label",
+        "axis_label",
         "caption",
         "footnote",
+        "legend",
         "section_header",
         "section-header",
         "title",
@@ -63,10 +66,18 @@ _NEIGHBOR_TYPES: frozenset[str] = frozenset(
 # never attach "figure" or "chart" as a neighbor because those are siblings,
 # not annotations.
 _EVIDENCE_TYPE_TO_NEIGHBOR_TYPES: dict[str, frozenset[str]] = {
+    "axis": frozenset({"axis-label", "axis_label"}),
+    "axis_label": frozenset({"axis-label", "axis_label"}),
+    "axis-label": frozenset({"axis-label", "axis_label"}),
     "caption": frozenset({"caption"}),
     "footnote": frozenset({"footnote"}),
     "header": frozenset({"page-header", "section_header", "section-header", "title"}),
     "footer": frozenset({"page-footer"}),
+    "chart": frozenset({"axis-label", "axis_label", "caption", "legend", "title"}),
+    "legend": frozenset({"legend"}),
+    "table": frozenset(
+        {"caption", "footnote", "page-header", "section_header", "section-header", "title"}
+    ),
     "title": frozenset({"title", "section_header", "section-header"}),
     "section_header": frozenset({"section_header", "section-header", "title"}),
 }
@@ -203,13 +214,17 @@ async def expand_context(
             else None
         )
         graph_matches: list[tuple[RegionCandidate, str]] = []
+        existing_link_count = len([ref for ref in packet.linked_crop_refs if ref])
+        candidate_limit = effective_max + existing_link_count
+        new_link_cap = effective_max
         if use_evidence_graph and has_graph_entry(packet.region_type, figure_class):
             hints = primary_region.expansion_hints if primary_region else None
             graph_matches = find_graph_neighbors(
                 primary_region or _synth_primary_from_packet(packet),
                 candidates_on_page,
                 expansion_hints=hints,
-            )[:max_neighbors_per_packet]
+            )[: max_neighbors_per_packet + existing_link_count]
+            new_link_cap = max_neighbors_per_packet
 
         if graph_matches:
             neighbors_with_role: list[tuple[RegionCandidate, str]] = list(graph_matches)
@@ -219,7 +234,7 @@ async def expand_context(
             spatial = _pick_neighbors(
                 packet,
                 candidates_on_page,
-                max_n=effective_max,
+                max_n=candidate_limit,
                 pad=adjacency_pad,
                 permitted_neighbor_types=permitted_neighbor_types,
                 has_planner_hint=has_planner_hint,
@@ -238,6 +253,8 @@ async def expand_context(
         n_new_links = 0
         packet_figure_refs = _figure_refs_from_text(packet.text_layer_snippet, packet.ocr_snippet)
         for neighbor, role in neighbors_with_role:
+            if n_new_links >= new_link_cap:
+                break
             crop_ref = await _crop_neighbor(
                 neighbor,
                 pdf_path=pdf_path,

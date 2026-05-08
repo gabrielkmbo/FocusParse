@@ -233,6 +233,83 @@ async def test_visual_region_gets_advisory_ocr(tmp_path, monkeypatch):
     assert "inspect_region:element" in packet.provenance.args_hash
 
 
+async def test_chart_curve_region_is_treated_as_visual(tmp_path, monkeypatch):
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="curve",
+                page=1,
+                bbox_norm=(0, 0, 0.5, 0.5),
+                region_type="curve",
+                score=0.9,
+            )
+        ]
+    )
+    ev = await inspect_regions(
+        _q(),
+        _plan(),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+    )
+    assert [c["mode"] for c in inspect_calls] == ["image", "element"]
+    assert text_calls == []
+    packet = ev.packets[0]
+    assert packet.commit_level == "image"
+    assert packet.provenance.mode == "visual"
+
+
+async def test_legend_and_axis_label_regions_get_text_extraction(tmp_path, monkeypatch):
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(
+        monkeypatch,
+        inspect_calls=inspect_calls,
+        text_calls=text_calls,
+        text_layer_out=_FakeTextLayerOutput(text="", source="empty_native"),
+    )
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    regions = RegionsEvent(
+        candidates=[
+            _region(
+                region_id="legend",
+                page=1,
+                bbox_norm=(0, 0, 0.4, 0.2),
+                region_type="legend",
+                score=0.9,
+            ),
+            _region(
+                region_id="axis",
+                page=1,
+                bbox_norm=(0, 0.2, 0.4, 0.4),
+                region_type="axis_label",
+                score=0.8,
+            ),
+        ]
+    )
+    ev = await inspect_regions(
+        _q(),
+        _plan(max_crops=2),
+        regions,
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+    )
+    assert [c["mode"] for c in inspect_calls] == ["image", "element", "image", "element"]
+    assert [tuple(c["bbox_norm"]) for c in text_calls] == [
+        (0.0, 0.0, 0.4, 0.2),
+        (0.0, 0.2, 0.4, 0.4),
+    ]
+    assert [p.commit_level for p in ev.packets] == ["element", "element"]
+
+
 async def test_text_region_uses_native_text_layer(tmp_path, monkeypatch):
     inspect_calls: list = []
     text_calls: list = []

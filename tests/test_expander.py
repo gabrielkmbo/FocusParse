@@ -882,6 +882,76 @@ async def test_query_aware_filters_to_planner_evidence_types(tmp_path, monkeypat
     assert "footnote" not in types  # planner didn't ask for footnotes
 
 
+async def test_retry_expand_looks_past_already_linked_neighbors(tmp_path, monkeypatch):
+    """A verifier-triggered wider pass should not stop at duplicate neighbors."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.52, 0.70, 0.56),
+                region_type="caption",
+                relevance=0.9,
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.34, 0.70, 0.38),
+                region_type="footnote",
+                relevance=0.8,
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.30, 0.57, 0.70, 0.60),
+                region_type="title",
+                relevance=0.7,
+            ),
+        ]
+    )
+    first = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        max_neighbors_per_packet=2,
+    )
+    assert first.packets[0].linked_neighbor_types == ["caption", "footnote"]
+
+    second = await expand_context(
+        first,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        max_neighbors_per_packet=2,
+        adjacency_pad=0.10,
+    )
+    assert second.packets[0].linked_neighbor_types == ["caption", "footnote", "title"]
+
+
+async def test_planner_chart_hint_allows_legend_and_axis_labels(tmp_path, monkeypatch):
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.30, 0.40, 0.70, 0.50))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region(page=1, bbox_norm=(0.30, 0.52, 0.70, 0.56), region_type="legend"),
+            _region(page=1, bbox_norm=(0.30, 0.34, 0.70, 0.38), region_type="axis_label"),
+            _region(page=1, bbox_norm=(0.30, 0.58, 0.70, 0.62), region_type="footnote"),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        plan=_plan(evidence_types=["chart"]),
+        max_neighbors_per_packet=2,
+    )
+    assert set(out.packets[0].linked_neighbor_types) == {"axis_label", "legend"}
+
+
 async def test_query_aware_planner_no_hint_uses_fallback_max_1(tmp_path, monkeypatch):
     """Without planner hint AND without rerank scores, the spatial-only
     fallback is bounded to _FALLBACK_MAX_NEIGHBORS_PER_PACKET (= 1 as of
