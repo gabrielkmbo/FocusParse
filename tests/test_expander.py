@@ -1439,6 +1439,20 @@ async def test_retry_expand_adds_context_window_for_target_packet(tmp_path, monk
     """Verifier retries attach a wider crop for the cited packet itself."""
     calls: list = []
     _install_fake_inspect(monkeypatch, calls=calls)
+    seen_text_layer: dict = {}
+
+    class _TextOut:
+        text = "surrounding axis labels and row headers"
+        source = "native"
+
+    async def _fake_get_text_layer(inp, *, cache_dir=None):
+        seen_text_layer["page"] = inp.page
+        seen_text_layer["bbox_norm"] = inp.bbox_norm
+        seen_text_layer["cache_dir"] = cache_dir
+        return _TextOut()
+
+    monkeypatch.setattr("focusparse.pipeline.expander.get_text_layer", _fake_get_text_layer)
+
     bbox = (0.30, 0.40, 0.70, 0.50)
     ev = EvidenceEvent(
         packets=[
@@ -1461,6 +1475,11 @@ async def test_retry_expand_adds_context_window_for_target_packet(tmp_path, monk
     assert packet.linked_neighbor_types == ["context_window"]
     assert len(packet.linked_crop_refs) == 1
     assert tuple(round(v, 2) for v in calls[0]["bbox_norm"]) == (0.06, 0.16, 0.94, 0.74)
+    assert tuple(round(v, 2) for v in seen_text_layer["bbox_norm"]) == (0.06, 0.16, 0.94, 0.74)
+    assert (
+        packet.text_layer_snippet
+        == "Context [context_window]: surrounding axis labels and row headers"
+    )
 
 
 async def test_retry_expand_context_window_does_not_consume_neighbor_cap(tmp_path, monkeypatch):

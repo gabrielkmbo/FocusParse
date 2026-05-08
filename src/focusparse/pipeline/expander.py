@@ -340,17 +340,30 @@ async def expand_context(
             neighbors_with_role = [(n, _neighbor_role(n)) for n in spatial]
 
         context_window_ref = None
+        context_window_text = None
+        context_window_bbox = None
         if _should_attach_retry_context_window(
             packet,
             verifier_reason=verifier_reason,
             target_filter_active=target_filter_active,
         ):
+            context_window_bbox = _context_window_bbox(packet)
             context_window_ref = await _crop_context_window(
                 packet,
                 pdf_path=pdf_path,
                 page_image=(images_by_page or {}).get(packet.page),
                 crop_cache_dir=crop_cache_dir,
+                bbox=context_window_bbox,
             )
+            if context_window_ref and context_window_bbox is not None:
+                context_window_text = await _extract_neighbor_text(
+                    _synth_context_window_region(packet, context_window_bbox),
+                    role="context_window",
+                    pdf_path=pdf_path,
+                    crop_ref=context_window_ref,
+                    text_layer_cache_dir=text_layer_cache_dir,
+                    crop_cache_dir=crop_cache_dir,
+                )
 
         if not neighbors_with_role and context_window_ref is None:
             new_packets.append(packet)
@@ -365,6 +378,8 @@ async def expand_context(
         if context_window_ref and context_window_ref not in seen_linked_refs:
             linked_refs.append(context_window_ref)
             linked_types.append("context_window")
+            if context_window_text:
+                linked_texts.append(("context_window", context_window_text))
             seen_linked_refs.add(context_window_ref)
             n_new_links += 1
         packet_figure_refs = _figure_refs_from_text(packet.text_layer_snippet, packet.ocr_snippet)
@@ -783,11 +798,12 @@ async def _crop_context_window(
     pdf_path: Path | None,
     page_image: Path | None,
     crop_cache_dir: Path | None,
+    bbox: tuple[float, float, float, float] | None = None,
     pad: float = _RETRY_CONTEXT_WINDOW_PAD,
 ) -> str | None:
     """Render a wider crop around the packet bbox for verifier retries."""
-    bbox = _pad_bbox(packet.bbox_norm, pad=pad)
-    if _bbox_equal(bbox, packet.bbox_norm):
+    bbox = bbox or _context_window_bbox(packet, pad=pad)
+    if bbox is None:
         return None
     if pdf_path is not None:
         try:
@@ -828,6 +844,30 @@ async def _crop_context_window(
                 exc,
             )
     return None
+
+
+def _context_window_bbox(
+    packet: EvidencePacket,
+    *,
+    pad: float = _RETRY_CONTEXT_WINDOW_PAD,
+) -> tuple[float, float, float, float] | None:
+    bbox = _pad_bbox(packet.bbox_norm, pad=pad)
+    if _bbox_equal(bbox, packet.bbox_norm):
+        return None
+    return bbox
+
+
+def _synth_context_window_region(
+    packet: EvidencePacket,
+    bbox: tuple[float, float, float, float],
+) -> RegionCandidate:
+    return RegionCandidate(
+        region_id=f"{packet.packet_id}_context_window",
+        page=packet.page,
+        bbox_norm=bbox,
+        region_type=packet.region_type or "context_window",
+        score=float(packet.confidence),
+    )
 
 
 async def _extract_neighbor_text(
