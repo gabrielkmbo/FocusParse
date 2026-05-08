@@ -220,55 +220,17 @@ async def test_visual_region_gets_advisory_ocr(tmp_path, monkeypatch):
         images_by_page={1: tmp_path / "p1.png"},
         pdf_path=pdf,
     )
-    # Visual packets are still image-first, but native/vector PDF text is
-    # merged with advisory OCR when available.
+    # Visual packets still skip native text extraction, but now get an
+    # advisory element-mode OCR pass for embedded labels/callouts.
     assert [c["mode"] for c in inspect_calls] == ["image", "element"]
-    assert len(text_calls) == 1
+    assert text_calls == []
     packet = ev.packets[0]
-    assert packet.ocr_snippet == "Native PDF text: NATIVE TEXT OCR: OCR TEXT"
+    assert packet.ocr_snippet == "OCR TEXT"
     assert packet.text_layer_snippet is None
     assert packet.commit_level == "image"
     assert packet.confidence == pytest.approx(0.9)
     assert packet.provenance.mode == "visual"
-    assert "get_text_layer:native:visual" in packet.provenance.args_hash
     assert "inspect_region:element" in packet.provenance.args_hash
-
-
-async def test_visual_region_empty_native_keeps_advisory_ocr(tmp_path, monkeypatch):
-    inspect_calls: list = []
-    text_calls: list = []
-    _install_fake_tools(
-        monkeypatch,
-        inspect_calls=inspect_calls,
-        text_calls=text_calls,
-        text_layer_out=_FakeTextLayerOutput(text=" .", source="empty_native"),
-    )
-    pdf = tmp_path / "doc.pdf"
-    pdf.write_bytes(b"%PDF-1.4")
-
-    regions = RegionsEvent(
-        candidates=[
-            _region(
-                region_id="pic",
-                page=1,
-                bbox_norm=(0, 0, 0.5, 0.5),
-                region_type="picture",
-                score=0.9,
-            )
-        ]
-    )
-    ev = await inspect_regions(
-        _q(),
-        _plan(),
-        regions,
-        images_by_page={1: tmp_path / "p1.png"},
-        pdf_path=pdf,
-    )
-    packet = ev.packets[0]
-    assert len(text_calls) == 1
-    assert packet.ocr_snippet == "OCR TEXT"
-    assert packet.text_layer_snippet is None
-    assert "get_text_layer:empty_native:visual" not in packet.provenance.args_hash
 
 
 async def test_chart_curve_region_is_treated_as_visual(tmp_path, monkeypatch):
@@ -297,7 +259,7 @@ async def test_chart_curve_region_is_treated_as_visual(tmp_path, monkeypatch):
         pdf_path=pdf,
     )
     assert [c["mode"] for c in inspect_calls] == ["image", "element"]
-    assert len(text_calls) == 1
+    assert text_calls == []
     packet = ev.packets[0]
     assert packet.commit_level == "image"
     assert packet.provenance.mode == "visual"

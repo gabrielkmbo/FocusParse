@@ -14,9 +14,8 @@ inspector:
   4. When native text is empty (image-only PDF) and a source PDF is available,
      falls back to `inspect_region(mode='element')` with Tesseract.
   5. For visual regions (picture / chart) we still keep the crop as the
-     primary artifact, but also run best-effort native text extraction and
-     OCR so embedded chart labels, captions, and callouts can reach
-     downstream text-only checks.
+     primary artifact, but also run best-effort OCR so embedded chart labels,
+     captions, and callouts can reach downstream text-only checks.
 
 The result is a list of `EvidencePacket`s with real `local_crop_ref`,
 `text_layer_snippet`, and `ocr_snippet` fields populated. The reasoner
@@ -587,7 +586,6 @@ async def _inspect_one_region(
     # --- 2. Text extraction — prefer native PDF, fall back to OCR. ---
     text_layer_snippet: str | None = None
     ocr_snippet: str | None = None
-    visual_native_text: str | None = None
     confidence = float(region.score)
 
     if is_texty and pdf_path is not None:
@@ -606,35 +604,17 @@ async def _inspect_one_region(
         except (FileNotFoundError, ValueError) as exc:
             logger.debug("get_text_layer failed for %s: %s", packet_id, exc)
 
-    # Visual packets remain image-first, but native/vector PDF text inside a
-    # figure is often cleaner than OCR. Keep it in the advisory OCR channel so
-    # the reasoner sees one merged text snippet without changing commit level.
-    if is_visual and pdf_path is not None:
-        try:
-            text_out = await get_text_layer(
-                GetTextLayerInput(
-                    doc_path=str(pdf_path),
-                    page=region.page,
-                    bbox_norm=region.bbox_norm,
-                ),
-                cache_dir=text_layer_cache_dir,
-            )
-            visual_native_text = _usable_native_text(text_out.text)
-            if visual_native_text:
-                crop_signals.append(f"get_text_layer:{text_out.source}:visual")
-        except (FileNotFoundError, ValueError) as exc:
-            logger.debug("visual get_text_layer failed for %s: %s", packet_id, exc)
-
     # OCR the crop when:
     #  * region is text-bearing/unknown OR visual, AND
-    #  * text packets didn't get usable native text, AND
+    #  * we didn't get usable native text, AND
     #  * either a PDF-backed crop or a page-image fallback crop exists.
     #
     # For visual packets, OCR is advisory: the crop remains the primary
     # evidence (`commit_level="image"`), but OCR can expose embedded labels,
     # axis ticks, captions, or callouts to text-only verifier summaries.
     need_ocr = (
-        ((is_texty and text_layer_snippet is None) or is_visual)
+        (is_texty or is_visual)
+        and text_layer_snippet is None
         and crop_ref
         and crop_ref != page_thumbnail_ref
     )
@@ -680,9 +660,6 @@ async def _inspect_one_region(
                 crop_signals.append("page_image_crop:ocr")
                 if fallback_confidence > 0 and not is_visual:
                     confidence = min(confidence, fallback_confidence)
-
-    if visual_native_text:
-        ocr_snippet = _merge_visual_native_text(visual_native_text, ocr_snippet)
 
     # --- 3. (Phase 6 #7 / sprint Phase 3) chart_to_table extraction.
     # Fires only when the question is a chart-reading family AND the region
@@ -795,30 +772,6 @@ def _prepend_chart_note(ocr_snippet: str | None, note: str) -> str:
     if ocr_snippet:
         return f"{note} OCR: {ocr_snippet}"
     return note
-
-
-def _usable_native_text(text: str | None) -> str | None:
-    cleaned = " ".join((text or "").split())
-    if len(cleaned) < _MIN_TEXT_LAYER_CHARS:
-        return None
-    return cleaned
-
-
-def _merge_visual_native_text(native_text: str, ocr_text: str | None) -> str:
-    """Combine deterministic visual text with OCR without duplicating it."""
-    native = _usable_native_text(native_text) or ""
-    ocr = " ".join((ocr_text or "").split())
-    if not native:
-        return ocr
-    if not ocr:
-        return native
-    native_key = native.casefold()
-    ocr_key = ocr.casefold()
-    if native_key in ocr_key:
-        return ocr
-    if ocr_key in native_key:
-        return native
-    return f"Native PDF text: {native} OCR: {ocr}"
 
 
 def _chart_scale_hint(ocr_snippet: str | None, *, question_text: str | None = None) -> str | None:
