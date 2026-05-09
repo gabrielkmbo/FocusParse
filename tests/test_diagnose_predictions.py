@@ -463,7 +463,57 @@ def test_focus_stage_diagnostics_capture_verifier_and_expand_context(tmp_path: P
     assert diag.expand_context_called_rate == 0.5
     assert diag.mean_neighbors_attached == 1.5
     assert diag.mean_neighbors_added == 1.0
-    assert diag.tool_sequence_top == [("deterministic_inspector", 2)]
+    assert diag.tool_sequence_top == [
+        ("deterministic_inspector -> expand_context", 1),
+        ("deterministic_inspector", 1),
+    ]
+
+
+def test_focus_tool_instrumentation_exports_json(tmp_path: Path) -> None:
+    spec = tmp_path / "focusparse_focus_x"
+    _write_per_example(
+        spec,
+        [
+            {
+                "example_id": "a",
+                "answer_correct": 1.0,
+                "is_lazy": 0,
+                "citations": [{"page": 1}],
+                "tool_calls": 1,
+                "usd": 0.01,
+                "evidence_reward": 1.0,
+                "available_tools": [
+                    "inspect_region",
+                    "get_text_layer",
+                    "expand_context",
+                    "run_python",
+                ],
+                "selected_tools": ["inspect_region", "expand_context"],
+                "tool_call_sequence": ["inspect_region", "expand_context"],
+                "failed_tool_call_count": 0,
+                "useful_tool_call_count": 2,
+                "irrelevant_tool_call_count": 0,
+                "answer_changed_after_tool": True,
+                "verifier_supported_after_tool": True,
+                "telemetry": {},
+                "trace": {"steps": []},
+            }
+        ],
+    )
+
+    diag = dp.diagnose_spec(spec)
+    exported = dp.to_json([diag])["specs"][0]
+
+    assert diag.available_tools_top == [
+        ("inspect_region + get_text_layer + expand_context + run_python", 1)
+    ]
+    assert diag.selected_tools_top == [("inspect_region + expand_context", 1)]
+    assert diag.mean_useful_tool_call_count == 2.0
+    assert diag.mean_irrelevant_tool_call_count == 0.0
+    assert diag.answer_changed_after_tool_rate == 1.0
+    assert diag.verifier_supported_after_tool_rate == 1.0
+    assert exported["mean_useful_tool_call_count"] == 2.0
+    assert exported["answer_changed_after_tool_rate"] == 1.0
 
 
 def test_action_input_shape_topn(tmp_path: Path) -> None:

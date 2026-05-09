@@ -71,6 +71,13 @@ class SpecDiagnosis:
     mean_neighbors_attached: float = 0.0
     mean_neighbors_added: float = 0.0
     tool_sequence_top: list[tuple[str, int]] = field(default_factory=list)
+    available_tools_top: list[tuple[str, int]] = field(default_factory=list)
+    selected_tools_top: list[tuple[str, int]] = field(default_factory=list)
+    mean_failed_tool_call_count: float = 0.0
+    mean_useful_tool_call_count: float = 0.0
+    mean_irrelevant_tool_call_count: float = 0.0
+    answer_changed_after_tool_rate: float | None = None
+    verifier_supported_after_tool_rate: float | None = None
     total_evidence_packets: int = 0
     packet_text_coverage_rate: float = 0.0
     packet_linked_context_rate: float = 0.0
@@ -117,6 +124,13 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
     neighbors_attached_values: list[int] = []
     neighbors_added_values: list[int] = []
     tool_sequence_counter: Counter[str] = Counter()
+    available_tools_counter: Counter[str] = Counter()
+    selected_tools_counter: Counter[str] = Counter()
+    failed_tool_call_counts: list[int] = []
+    useful_tool_call_counts: list[int] = []
+    irrelevant_tool_call_counts: list[int] = []
+    answer_changed_after_tool_flags: list[bool] = []
+    verifier_supported_after_tool_flags: list[bool] = []
     packet_has_text_flags: list[bool] = []
     packet_has_context_flags: list[bool] = []
     packet_has_chart_flags: list[bool] = []
@@ -153,8 +167,14 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
 
         per_example_tool_calls = 0
         per_example_iterations = 0
+        per_example_failed_tool_errors = 0
         first_step_was_final = False
         per_example_tool_sequence: list[str] = []
+        explicit_tool_sequence = _string_list(record.get("tool_call_sequence"))
+        explicit_selected_tools = _string_list(record.get("selected_tools"))
+        available_tools = _string_list(record.get("available_tools")) or _string_list(
+            telemetry.get("available_tools")
+        )
         verifier_supported: bool | None = None
         verifier_next_action: str | None = None
         expand_context_called = False
@@ -192,6 +212,9 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
                 ] += 1
             if action == "tool_error":
                 diag.n_tool_errors += 1
+                per_example_failed_tool_errors += 1
+                if tool:
+                    per_example_tool_sequence.append(str(tool))
                 err = step_args.get("error") or "unknown"
                 diag.error_categories[str(err)] += 1
             if action != "final_answer" and action != "react_final":
@@ -204,6 +227,8 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
                 verifier_next_action = str(step_args["next_action"])
             if stage == "expand_context":
                 expand_context_called = True
+                if action != "passthrough":
+                    per_example_tool_sequence.append("expand_context")
                 with suppress(TypeError, ValueError):
                     neighbors_attached += int(step_args.get("n_neighbors_attached") or 0)
                 with suppress(TypeError, ValueError):
@@ -224,10 +249,45 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
                 diag.verifier_unsupported_next_actions[verifier_next_action] += 1
             if not answer_correct:
                 diag.incorrect_verifier_next_actions[verifier_next_action] += 1
-        if per_example_tool_sequence:
-            tool_sequence_counter[" -> ".join(per_example_tool_sequence)] += 1
+        tool_sequence = explicit_tool_sequence or per_example_tool_sequence
+        selected_tools = explicit_selected_tools or list(dict.fromkeys(tool_sequence))
+        if tool_sequence:
+            tool_sequence_counter[" -> ".join(tool_sequence)] += 1
         else:
             tool_sequence_counter["<none>"] += 1
+        if selected_tools:
+            selected_tools_counter[" + ".join(selected_tools)] += 1
+        if available_tools:
+            available_tools_counter[" + ".join(available_tools)] += 1
+        failed_tool_call_counts.append(
+            _as_int(record.get("failed_tool_call_count"), default=per_example_failed_tool_errors)
+        )
+        evidence_reward = _as_float_or_none(record.get("evidence_reward")) or 0.0
+        useful_tool_call_counts.append(
+            _as_int(
+                record.get("useful_tool_call_count"),
+                default=(len(tool_sequence) if tool_sequence and evidence_reward > 0 else 0),
+            )
+        )
+        irrelevant_tool_call_counts.append(
+            _as_int(
+                record.get("irrelevant_tool_call_count"),
+                default=(len(tool_sequence) if tool_sequence and evidence_reward <= 0 else 0),
+            )
+        )
+        answer_changed_after_tool = _optional_bool(
+            record.get("answer_changed_after_tool", telemetry.get("answer_changed_after_tool"))
+        )
+        if answer_changed_after_tool is not None:
+            answer_changed_after_tool_flags.append(answer_changed_after_tool)
+        verifier_supported_after_tool = _optional_bool(
+            record.get(
+                "verifier_supported_after_tool",
+                telemetry.get("verifier_supported_after_tool"),
+            )
+        )
+        if verifier_supported_after_tool is not None:
+            verifier_supported_after_tool_flags.append(verifier_supported_after_tool)
 
         answer_citations = _answer_packet_citations(record)
         any_cited_image_only = False
@@ -311,6 +371,27 @@ def diagnose_spec(spec_dir: Path) -> SpecDiagnosis:
         statistics.mean(neighbors_added_values) if neighbors_added_values else 0.0
     )
     diag.tool_sequence_top = tool_sequence_counter.most_common(5)
+    diag.available_tools_top = available_tools_counter.most_common(5)
+    diag.selected_tools_top = selected_tools_counter.most_common(5)
+    diag.mean_failed_tool_call_count = (
+        statistics.mean(failed_tool_call_counts) if failed_tool_call_counts else 0.0
+    )
+    diag.mean_useful_tool_call_count = (
+        statistics.mean(useful_tool_call_counts) if useful_tool_call_counts else 0.0
+    )
+    diag.mean_irrelevant_tool_call_count = (
+        statistics.mean(irrelevant_tool_call_counts) if irrelevant_tool_call_counts else 0.0
+    )
+    diag.answer_changed_after_tool_rate = (
+        statistics.mean(answer_changed_after_tool_flags)
+        if answer_changed_after_tool_flags
+        else None
+    )
+    diag.verifier_supported_after_tool_rate = (
+        statistics.mean(verifier_supported_after_tool_flags)
+        if verifier_supported_after_tool_flags
+        else None
+    )
     diag.packet_text_coverage_rate = (
         statistics.mean(packet_has_text_flags) if packet_has_text_flags else 0.0
     )
@@ -375,11 +456,12 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
         "| Spec | n | accuracy | lazy_rate | empty_cite_rate "
         "| premature_final | verifier_unsupported | expand_called "
         "| mean_neighbors | mean_new_neighbors | tool_err_rate | mean_tool_calls | mean_usd "
+        "| useful_tools | irrelevant_tools | answer_changed_after_tool | verifier_supported_after_tool "
         "| retry_rate | evidence_retry_rate | top_loop | top_failure "
         "| top_verifier_action | top_wrong_action |"
     )
     lines.append(
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
     )
     for d in diags:
         tool_err_rate = d.n_tool_errors / max(d.n_steps, 1)
@@ -397,7 +479,11 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
             f"| {prem} | {verifier_unsupported} "
             f"| {d.expand_context_called_rate:.1%} | {d.mean_neighbors_attached:.2f} "
             f"| {d.mean_neighbors_added:.2f} | {tool_err_rate:.1%} | {d.mean_tool_calls:.2f} "
-            f"| ${d.mean_usd:.4f} | {d.retry_used_rate:.1%} "
+            f"| ${d.mean_usd:.4f} | {d.mean_useful_tool_call_count:.2f} "
+            f"| {d.mean_irrelevant_tool_call_count:.2f} "
+            f"| {_fmt_optional_pct(d.answer_changed_after_tool_rate)} "
+            f"| {_fmt_optional_pct(d.verifier_supported_after_tool_rate)} "
+            f"| {d.retry_used_rate:.1%} "
             f"| {d.evidence_retry_used_rate:.1%} | {top_loop} | {top_failure} "
             f"| {top_verifier_action} | {top_wrong_action} |"
         )
@@ -524,6 +610,29 @@ def render_markdown(diags: list[SpecDiagnosis]) -> str:
             lines.append("- top tool-call sequences:")
             for sequence, count in d.tool_sequence_top:
                 lines.append(f"  - `{sequence}` × {count}")
+        if d.available_tools_top:
+            lines.append("- available tool belts:")
+            for sequence, count in d.available_tools_top:
+                lines.append(f"  - `{sequence}` × {count}")
+        if d.selected_tools_top:
+            lines.append("- selected tool sets:")
+            for sequence, count in d.selected_tools_top:
+                lines.append(f"  - `{sequence}` × {count}")
+        lines.append(
+            f"- useful / irrelevant / failed tool-call proxy means: "
+            f"**{d.mean_useful_tool_call_count:.2f}** / "
+            f"**{d.mean_irrelevant_tool_call_count:.2f}** / "
+            f"**{d.mean_failed_tool_call_count:.2f}**"
+        )
+        if d.answer_changed_after_tool_rate is not None:
+            lines.append(
+                f"- answer_changed_after_tool rate: **{d.answer_changed_after_tool_rate:.1%}**"
+            )
+        if d.verifier_supported_after_tool_rate is not None:
+            lines.append(
+                f"- verifier_supported_after_tool rate: "
+                f"**{d.verifier_supported_after_tool_rate:.1%}**"
+            )
         if d.action_input_top:
             lines.append("- top action_input shapes per tool:")
             for tool, top in d.action_input_top.items():
@@ -570,6 +679,13 @@ def to_json(diags: list[SpecDiagnosis]) -> dict[str, Any]:
                 "mean_neighbors_attached": d.mean_neighbors_attached,
                 "mean_neighbors_added": d.mean_neighbors_added,
                 "tool_sequence_top": d.tool_sequence_top,
+                "available_tools_top": d.available_tools_top,
+                "selected_tools_top": d.selected_tools_top,
+                "mean_failed_tool_call_count": d.mean_failed_tool_call_count,
+                "mean_useful_tool_call_count": d.mean_useful_tool_call_count,
+                "mean_irrelevant_tool_call_count": d.mean_irrelevant_tool_call_count,
+                "answer_changed_after_tool_rate": d.answer_changed_after_tool_rate,
+                "verifier_supported_after_tool_rate": d.verifier_supported_after_tool_rate,
                 "total_evidence_packets": d.total_evidence_packets,
                 "packet_text_coverage_rate": d.packet_text_coverage_rate,
                 "packet_linked_context_rate": d.packet_linked_context_rate,
@@ -775,6 +891,26 @@ def _as_int(value: Any, *, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str) and item]
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+    return None
 
 
 def _fmt_optional_pct(value: float | None) -> str:

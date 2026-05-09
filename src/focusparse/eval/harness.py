@@ -207,6 +207,7 @@ async def run_comparator_eval(
     pred_dir.mkdir(parents=True, exist_ok=True)
 
     tools = resolve_tool_set(tool_set)
+    available_tools = [tool.name for tool in tools]
     if agent_kind == "react":
         agent = ReActAgent(backend_client=backend_client, tools=tools)
     elif agent_kind == "agent_baseline":
@@ -259,6 +260,7 @@ async def run_comparator_eval(
                     result,
                     protocol=protocol,
                     image_dims_by_page=image_dims,
+                    available_tools=available_tools,
                 )
                 if agentic_meta is not None:
                     record["agentic_meta"] = agentic_meta
@@ -276,6 +278,7 @@ async def run_comparator_eval(
     run_manifest: dict[str, Any] = {
         "agent": agent_kind,
         "tool_set": tool_set,
+        "available_tools": available_tools,
         "backend": backend,
         "model": model,
         "protocol": protocol,
@@ -410,6 +413,7 @@ async def run_focus_eval(
         # gated on question_family + figure_class inside the inspector.
         workflow_kwargs["chart_to_table_enabled"] = True
     workflow = FocusWorkflow(**workflow_kwargs)
+    available_tools = workflow.available_tools()
     per_example: list[dict[str, Any]] = []
 
     started_at = time.time()
@@ -457,7 +461,11 @@ async def run_focus_eval(
                 )
                 image_dims = _image_dims_by_page(example, images)
                 record = _score_and_record(
-                    example, result, protocol=protocol, image_dims_by_page=image_dims
+                    example,
+                    result,
+                    protocol=protocol,
+                    image_dims_by_page=image_dims,
+                    available_tools=available_tools,
                 )
                 if agentic_meta is not None:
                     record["agentic_meta"] = agentic_meta
@@ -478,6 +486,15 @@ async def run_focus_eval(
 
     run_manifest: dict[str, Any] = {
         "agent": "focus",
+        "tool_set": tool_set,
+        "available_tools": available_tools,
+        "focus_features": {
+            "auto_zoom": workflow.auto_zoom,
+            "chart_to_table_enabled": workflow.chart_to_table_enabled,
+            "use_react_inspector": workflow.use_react_inspector,
+            "multi_scale_packets": workflow.multi_scale_packets,
+            "use_evidence_graph": workflow.use_evidence_graph,
+        },
         "backend": backend,
         "model": model,
         "protocol": protocol,
@@ -825,6 +842,7 @@ def _score_and_record(
     protocol: str,
     image_dims_by_page: dict[int, tuple[int, int]] | None = None,
     image_pages: list[int] | None = None,
+    available_tools: list[str] | None = None,
 ) -> dict[str, Any]:
     """Score one prediction and flatten into a per-example record.
 
@@ -871,6 +889,11 @@ def _score_and_record(
         image_dims_by_page=image_dims_by_page,
     )
     is_lazy = int(tool_calls == 0 or not predicted_bboxes)
+    tool_diagnostics = _tool_diagnostics_from_trace(
+        result,
+        evidence_reward=evidence,
+        available_tools=available_tools,
+    )
 
     # Trace as a plain dict so the stage-metrics module can read it without
     # depending on the workflow internals. Stages get summed across multi-
@@ -911,6 +934,20 @@ def _score_and_record(
         "debug_events": [e.model_dump(mode="json") for e in debug_events],
     }
 
+    telemetry = dict(result.telemetry or {})
+    telemetry.update(
+        {
+            "available_tools": tool_diagnostics["available_tools"],
+            "selected_tools": tool_diagnostics["selected_tools"],
+            "tool_call_sequence": tool_diagnostics["tool_call_sequence"],
+            "failed_tool_call_count": tool_diagnostics["failed_tool_call_count"],
+            "useful_tool_call_count": tool_diagnostics["useful_tool_call_count"],
+            "irrelevant_tool_call_count": tool_diagnostics["irrelevant_tool_call_count"],
+            "answer_changed_after_tool": tool_diagnostics["answer_changed_after_tool"],
+            "verifier_supported_after_tool": tool_diagnostics["verifier_supported_after_tool"],
+        }
+    )
+
     record = {
         "example_id": example.id,
         "protocol": protocol,
@@ -932,7 +969,8 @@ def _score_and_record(
         "latency_ms": result.telemetry.get("latency_ms", 0),
         "citations": citations,
         "cache_hit": False,
-        "telemetry": dict(result.telemetry or {}),
+        **tool_diagnostics,
+        "telemetry": telemetry,
         "trace": trace_dict,
     }
 
@@ -944,6 +982,59 @@ def _score_and_record(
     record["stages"] = stages.model_dump(mode="json")
 
     return record
+
+
+def _tool_diagnostics_from_trace(
+    result: WorkflowResult,
+    *,
+    evidence_reward: float,
+    available_tools: list[str] | None = None,
+) -> dict[str, Any]:
+    """Per-example tool instrumentation for +2/+4 ablations.
+
+    `tool_calls` stays historically compatible. This helper adds a richer,
+    explicitly named view that treats FocusParse's deterministic
+    `expand_context` stage as a tool-like action without changing the
+    aggregate metric used by old headline tables.
+    """
+    telemetry = result.telemetry or {}
+    available = list(available_tools or telemetry.get("available_tools") or [])
+    sequence: list[str] = []
+    failed_count = 0
+
+    for step in result.trace.steps:
+        if step.action == "tool_error":
+            failed_count += 1
+            sequence.append(_canonical_tool_name(step.tool or step.stage))
+            continue
+        if step.action == "tool_call" or step.tool is not None:
+            sequence.append(_canonical_tool_name(step.tool or step.stage))
+            continue
+        if step.stage == "expand_context" and step.action != "passthrough":
+            sequence.append("expand_context")
+
+    selected_tools = list(dict.fromkeys(sequence))
+    useful_count = len(sequence) if sequence and evidence_reward > 0 else 0
+    irrelevant_count = len(sequence) if sequence and evidence_reward <= 0 else 0
+
+    return {
+        "available_tools": available,
+        "selected_tools": selected_tools,
+        "tool_call_sequence": sequence,
+        "failed_tool_call_count": failed_count,
+        "useful_tool_call_count": useful_count,
+        "irrelevant_tool_call_count": irrelevant_count,
+        "answer_changed_after_tool": telemetry.get("answer_changed_after_tool"),
+        "verifier_supported_after_tool": telemetry.get("verifier_supported_after_tool"),
+    }
+
+
+def _canonical_tool_name(name: str | None) -> str:
+    if not name:
+        return "unknown"
+    if name == "deterministic_inspector":
+        return "inspect_region"
+    return name
 
 
 def _error_record(example: BenchmarkExample, *, protocol: str, error: str) -> dict[str, Any]:
@@ -958,6 +1049,14 @@ def _error_record(example: BenchmarkExample, *, protocol: str, error: str) -> di
         "bbox_iou": 0.0,
         "evidence_reward": 0.0,
         "is_lazy": 1,
+        "available_tools": [],
+        "selected_tools": [],
+        "tool_call_sequence": [],
+        "failed_tool_call_count": 0,
+        "useful_tool_call_count": 0,
+        "irrelevant_tool_call_count": 0,
+        "answer_changed_after_tool": None,
+        "verifier_supported_after_tool": None,
         "tool_calls": 0,
         "tokens_in": 0,
         "tokens_out": 0,
