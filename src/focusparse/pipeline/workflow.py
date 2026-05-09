@@ -489,8 +489,10 @@ class FocusWorkflow:
         # 2026-04-27 n=30 A/B revealed the loop hurts more than it helps
         # without a smarter retry mutation).
         initial_supported = verdict.supported
+        initial_answer_text = answer_event.answer
         retries_used = 0
         evidence_retries_used = 0
+        tool_retry_used = False
         loop_terminated = ""  # set in the loop body before break
         escalation_hint: str | None = None
         answer_evidence = evidence
@@ -564,6 +566,7 @@ class FocusWorkflow:
                 evidence_retries_used += 1
 
             if action == "retry_localization":
+                tool_retry_used = True
                 confidence_threshold *= _LOCALIZATION_RETRY_FACTOR
                 regions = await self._run_localize(
                     question_event,
@@ -609,6 +612,7 @@ class FocusWorkflow:
                 )
                 retry_answer_evidence = evidence
             elif action == "expand_context":
+                tool_retry_used = True
                 adjacency_pad = min(adjacency_pad * _EXPAND_RETRY_FACTOR, _MAX_ADJACENCY_PAD)
                 verifier_missing_context = _verifier_missing_context(verdict)
                 target_packet_ids = _verifier_target_packet_ids(
@@ -733,6 +737,13 @@ class FocusWorkflow:
         telemetry["evidence_retries_used"] = evidence_retries_used
         telemetry["loop_terminated"] = loop_terminated
         telemetry["loop_retry_helped"] = loop_retry_helped
+        telemetry["available_tools"] = self.available_tools()
+        telemetry["answer_changed_after_tool"] = (
+            tool_retry_used
+            and _normalize_answer_for_telemetry(answer_event.answer)
+            != _normalize_answer_for_telemetry(initial_answer_text)
+        )
+        telemetry["verifier_supported_after_tool"] = verdict.supported if tool_retry_used else None
         return WorkflowResult(
             answer=answer_event.answer,
             citations=citations,
@@ -741,6 +752,15 @@ class FocusWorkflow:
         )
 
     # -- per-stage runners (used by both initial cascade and retry loop) --
+
+    def available_tools(self) -> list[str]:
+        """Focus-pipeline tool belt for run metadata and +2/+4 diagnostics."""
+        tools = ["inspect_region", "get_text_layer"]
+        if self.tool_set == "full":
+            tools.extend(["expand_context", "run_python"])
+        if self.chart_to_table_enabled:
+            tools.append("chart_to_table")
+        return tools
 
     def _retry_budget_for_action(self, action: str) -> int:
         """Return the retry budget for a verifier action.
@@ -1368,7 +1388,9 @@ def _focused_retry_visual_sibling_ids(
         candidates.append((bucket, distance, _bbox_area(packet.bbox_norm), packet.packet_id))
 
     candidates.sort()
-    return {pid for _bucket, _distance, _area, pid in candidates[:_MAX_FOCUSED_RETRY_VISUAL_SIBLINGS]}
+    return {
+        pid for _bucket, _distance, _area, pid in candidates[:_MAX_FOCUSED_RETRY_VISUAL_SIBLINGS]
+    }
 
 
 def _packet_is_visual(packet: EvidencePacket) -> bool:
@@ -2046,6 +2068,11 @@ def _make_telemetry(response: ModelResponse) -> dict[str, Any]:
         "latency_ms": response.latency_ms,
         "raw_response_len": len(response.text or ""),
     }
+
+
+def _normalize_answer_for_telemetry(answer: str) -> str:
+    """Low-stakes normalization for answer-change instrumentation."""
+    return " ".join(str(answer or "").strip().lower().split())
 
 
 # ---------------------------------------------------------------------------

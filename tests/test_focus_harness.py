@@ -140,8 +140,24 @@ async def test_run_focus_eval_records_focus_metrics(tmp_path, parser_bench_submo
     # Citations translated back to {page, bbox} — not empty
     assert per["citations"]
     assert per["tool_calls"] >= 1
+    assert per["available_tools"] == [
+        "inspect_region",
+        "get_text_layer",
+        "expand_context",
+        "run_python",
+    ]
+    assert per["selected_tools"] == ["inspect_region", "expand_context"]
+    assert per["tool_call_sequence"] == ["inspect_region", "expand_context"]
+    assert per["failed_tool_call_count"] == 0
+    assert per["telemetry"]["available_tools"] == per["available_tools"]
+    assert per["telemetry"]["tool_call_sequence"] == per["tool_call_sequence"]
     # Not lazy because we have tool calls AND predicted bboxes
     assert per["is_lazy"] == 0
+
+    manifest = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert manifest["tool_set"] == "full"
+    assert manifest["available_tools"] == per["available_tools"]
+    assert manifest["focus_features"]["auto_zoom"] is False
 
 
 async def test_run_focus_eval_flags_lazy_when_no_citations(

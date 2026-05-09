@@ -128,6 +128,7 @@ def _record(
     domain: str | None = "Domain.DATASHEET",
     is_lazy: int = 0,
     tool_calls: int = 1,
+    latency_ms: float = 1000.0,
 ) -> dict:
     return {
         "answer_correct": correct,
@@ -139,6 +140,7 @@ def _record(
         "tool_calls": tool_calls,
         "tokens_in": 100,
         "tokens_out": 10,
+        "latency_ms": latency_ms,
         "domain": domain,
     }
 
@@ -162,11 +164,18 @@ def test_aggregate_usd_per_correct_ci_present_when_correct_exist():
     assert m.usd_per_correct_ci is not None
 
 
+def test_aggregate_carries_latency_mean():
+    records = [_record(latency_ms=1000.0), _record(latency_ms=3000.0)]
+    m = aggregate(records, bootstrap_resamples=100)
+    assert m.latency_ms_mean == pytest.approx(2000.0)
+
+
 def test_aggregate_returns_zero_metrics_for_empty():
     m = aggregate([])
     assert m.n == 0
     assert m.accuracy == 0.0
     assert m.usd_per_correct is None
+    assert m.latency_ms_mean == 0.0
 
 
 # ---------------------------------------------------------------------------

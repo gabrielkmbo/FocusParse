@@ -328,8 +328,7 @@ def test_retry_answer_selector_prefers_concise_variable_answer():
         candidate,
         incumbent,
         question_text=(
-            "Which Y-axis variable, VRECT or IOUT, should be used to calculate output "
-            "power at OUT?"
+            "Which Y-axis variable, VRECT or IOUT, should be used to calculate output power at OUT?"
         ),
     )
 
@@ -346,8 +345,7 @@ def test_retry_answer_selector_prefers_variable_over_descriptive_fragment():
         candidate,
         incumbent,
         question_text=(
-            "Which Y-axis variable, VRECT or IOUT, should be used to calculate output "
-            "power at OUT?"
+            "Which Y-axis variable, VRECT or IOUT, should be used to calculate output power at OUT?"
         ),
     )
 
@@ -1071,6 +1069,37 @@ async def test_loop_expand_context_retries_once_by_default(
     assert stage_counts["verify"] == 2
 
 
+async def test_loop_expand_context_records_tool_retry_answer_change(
+    tmp_path, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "about 50%", "citations": ["pkt_000"], "confidence": 0.5}',
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(supported=False, next_action="expand_context"),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.telemetry["answer_changed_after_tool"] is True
+    assert result.telemetry["verifier_supported_after_tool"] is True
+
+
 async def test_loop_expand_context_visual_readability_retry_zooms_target_crop(
     tmp_path, monkeypatch, parser_bench_submodule_present
 ):
@@ -1397,9 +1426,7 @@ async def test_loop_escalate_reasoner_is_not_default_evidence_retry(
     assert stage_counts["expand_context"] == 1
 
 
-async def test_loop_allows_single_entity_shape_retry(
-    tmp_path, parser_bench_submodule_present
-):
+async def test_loop_allows_single_entity_shape_retry(tmp_path, parser_bench_submodule_present):
     """A list-like answer to a singular entity question gets one hinted retry."""
     if not parser_bench_submodule_present:
         pytest.skip("parser-bench submodule required")
@@ -1812,6 +1839,8 @@ async def test_workflow_minimal_tool_set_skips_expand_context(
     images = [tmp_path / "datasheet-A_page_0003_300dpi.png"]
     result = await workflow.run(_make_example(), images, protocol="focus")
 
+    assert result.telemetry["available_tools"] == ["inspect_region", "get_text_layer"]
+
     expand_steps = [s for s in result.trace.steps if s.stage == "expand_context"]
     assert len(expand_steps) == 1
     step = expand_steps[0]
@@ -1829,6 +1858,13 @@ async def test_workflow_full_tool_set_runs_expand_context(tmp_path, parser_bench
     workflow = FocusWorkflow(backend_client=client, tool_set="full")
     images = [tmp_path / "datasheet-A_page_0003_300dpi.png"]
     result = await workflow.run(_make_example(), images, protocol="focus")
+
+    assert result.telemetry["available_tools"] == [
+        "inspect_region",
+        "get_text_layer",
+        "expand_context",
+        "run_python",
+    ]
 
     expand_steps = [s for s in result.trace.steps if s.stage == "expand_context"]
     assert len(expand_steps) == 1

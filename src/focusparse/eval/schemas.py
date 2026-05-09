@@ -29,6 +29,7 @@ class PerProtocolResults(BaseModel):
     cost_per_correct_usd: float | None = None
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    latency_ms_mean: float = 0.0
 
     # FocusParse additions — populated only for focus-agent runs.
     evidence_reward_mean: float | None = None

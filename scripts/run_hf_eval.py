@@ -640,6 +640,7 @@ def _wrap_results(
         cost_per_correct_usd=agg.usd_per_correct,
         total_input_tokens=int(round(agg.tokens_in_mean * agg.n)) if agg.n else 0,
         total_output_tokens=int(round(agg.tokens_out_mean * agg.n)) if agg.n else 0,
+        latency_ms_mean=agg.latency_ms_mean,
         # focus-agent extras (populated only when agent == 'focus' post-Phase-2)
         evidence_reward_mean=(agg.evidence_reward_mean if agent == "focus" else None),
         lazy_answer_rate=(agg.lazy_answer_rate if agent == "focus" else None),

@@ -104,6 +104,7 @@ def _make_harness_result(
     usd_per_correct=0.06,
     tokens_in_mean=1000.0,
     tokens_out_mean=50.0,
+    latency_ms_mean=2500.0,
     evidence_reward_mean=0.3,
     lazy_answer_rate=0.25,
     tool_calls_mean=1.5,
@@ -127,6 +128,7 @@ def _make_harness_result(
             tool_calls_mean=tool_calls_mean,
             tokens_in_mean=tokens_in_mean,
             tokens_out_mean=tokens_out_mean,
+            latency_ms_mean=latency_ms_mean,
             usd_total=usd_total,
             usd_per_correct=usd_per_correct,
         ),
@@ -157,6 +159,7 @@ def test_wrap_results_simple_agent_nulls_focus_extras(script_mod):
     assert wrapped.overall.count == 4
     assert wrapped.overall.total_cost_usd == 0.12
     assert wrapped.overall.cost_per_correct_usd == 0.06
+    assert wrapped.overall.latency_ms_mean == 2500.0
     # Focus-only columns must be None for simple agent
     assert wrapped.overall.evidence_reward_mean is None
     assert wrapped.overall.lazy_answer_rate is None
@@ -223,6 +226,7 @@ def test_wrap_results_empty_run_handles_zero_division(script_mod):
             tool_calls_mean=0.0,
             tokens_in_mean=0.0,
             tokens_out_mean=0.0,
+            latency_ms_mean=0.0,
             usd_total=0.0,
             usd_per_correct=None,
         ),
