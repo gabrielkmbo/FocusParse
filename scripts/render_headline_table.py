@@ -1,9 +1,11 @@
 """Render `headline_table.json` to markdown / HTML for paper figures.
 
 Reads the canonical shape produced by `scripts/run_headline_eval.py` and
-emits two outputs alongside it:
+emits outputs alongside it:
   * `headline_table.md`  — paper-ready markdown table with CIs
   * `headline_table.html` — quick-look HTML for spot-checking
+  * `headline_table.csv` — flat method × domain rows for spreadsheets
+  * `headline_table.jsonl` — flat method × domain rows for scripts
 
 Usage:
     uv run python scripts/render_headline_table.py results/hf/headline-v1/headline_table.json
@@ -13,9 +15,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import sys
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +28,25 @@ logger = logging.getLogger(__name__)
 
 _DOMAINS_ORDER = ("datasheet", "finance", "_overall")
 _DOMAIN_LABELS = {"datasheet": "Datasheets", "finance": "Finance", "_overall": "Overall"}
+_CSV_FIELDS = (
+    "method",
+    "agent",
+    "tool_set",
+    "domain",
+    "missing",
+    "n",
+    "accuracy",
+    "accuracy_ci_low",
+    "accuracy_ci_high",
+    "usd_per_correct",
+    "usd_per_correct_ci_low",
+    "usd_per_correct_ci_high",
+    "latency_ms_mean",
+    "latency_s_mean",
+    "bbox_iou",
+    "page_recall",
+    "usd_total",
+)
 
 
 def _fmt_pct(value: float | None, ci: list[float] | None) -> str:
@@ -47,6 +70,85 @@ def _fmt_latency(value: float | None) -> str:
     if value is None:
         return "n/a"
     return f"{float(value) / 1000:.2f}s"
+
+
+def _ci_bounds(value: list[float] | None) -> tuple[float | None, float | None]:
+    if not value or len(value) != 2:
+        return None, None
+    return value[0], value[1]
+
+
+def _flat_rows(table: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return one machine-readable row per method × domain cell."""
+    rows: list[dict[str, Any]] = []
+    for row in table.get("rows", []):
+        if row.get("missing"):
+            for domain in _DOMAINS_ORDER:
+                rows.append(
+                    {
+                        "method": row.get("label"),
+                        "agent": row.get("agent"),
+                        "tool_set": row.get("tool_set"),
+                        "domain": domain,
+                        "missing": True,
+                        "n": 0,
+                        "accuracy": None,
+                        "accuracy_ci_low": None,
+                        "accuracy_ci_high": None,
+                        "usd_per_correct": None,
+                        "usd_per_correct_ci_low": None,
+                        "usd_per_correct_ci_high": None,
+                        "latency_ms_mean": None,
+                        "latency_s_mean": None,
+                        "bbox_iou": None,
+                        "page_recall": None,
+                        "usd_total": None,
+                    }
+                )
+            continue
+
+        by_domain = row.get("by_domain", {})
+        for domain in _DOMAINS_ORDER:
+            metrics = by_domain.get(domain) or {}
+            acc_lo, acc_hi = _ci_bounds(metrics.get("accuracy_ci"))
+            usd_lo, usd_hi = _ci_bounds(metrics.get("usd_per_correct_ci"))
+            latency_ms = metrics.get("latency_ms_mean")
+            rows.append(
+                {
+                    "method": row.get("label"),
+                    "agent": row.get("agent"),
+                    "tool_set": row.get("tool_set"),
+                    "domain": domain,
+                    "missing": False,
+                    "n": metrics.get("n", row.get("n_total", 0) if domain == "_overall" else 0),
+                    "accuracy": metrics.get("accuracy"),
+                    "accuracy_ci_low": acc_lo,
+                    "accuracy_ci_high": acc_hi,
+                    "usd_per_correct": metrics.get("usd_per_correct"),
+                    "usd_per_correct_ci_low": usd_lo,
+                    "usd_per_correct_ci_high": usd_hi,
+                    "latency_ms_mean": latency_ms,
+                    "latency_s_mean": (
+                        float(latency_ms) / 1000 if latency_ms is not None else None
+                    ),
+                    "bbox_iou": metrics.get("bbox_iou"),
+                    "page_recall": metrics.get("page_recall"),
+                    "usd_total": metrics.get("usd_total"),
+                }
+            )
+    return rows
+
+
+def _to_csv(table: dict[str, Any]) -> str:
+    buf = StringIO()
+    writer = csv.DictWriter(buf, fieldnames=list(_CSV_FIELDS), lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(_flat_rows(table))
+    return buf.getvalue()
+
+
+def _to_jsonl(table: dict[str, Any]) -> str:
+    return "\n".join(json.dumps(row, sort_keys=True) for row in _flat_rows(table)) + "\n"
 
 
 def _to_markdown(table: dict[str, Any]) -> str:
@@ -218,6 +320,14 @@ def main() -> int:
     html_path = json_path.with_suffix(".html")
     html_path.write_text(_to_html(table))
     logger.info("Wrote %s", html_path)
+
+    csv_path = json_path.with_suffix(".csv")
+    csv_path.write_text(_to_csv(table))
+    logger.info("Wrote %s", csv_path)
+
+    jsonl_path = json_path.with_suffix(".jsonl")
+    jsonl_path.write_text(_to_jsonl(table))
+    logger.info("Wrote %s", jsonl_path)
 
     print()
     print(_to_markdown(table))
