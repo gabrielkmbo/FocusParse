@@ -38,6 +38,7 @@ class AggregateMetrics(BaseModel):
     tool_calls_mean: float
     tokens_in_mean: float
     tokens_out_mean: float
+    latency_ms_mean: float = 0.0
     usd_total: float
     usd_per_correct: float | None
     # 95% bootstrap CIs (lo, hi). Empty tuples on n < 2 — bootstrap is
@@ -130,6 +131,7 @@ def aggregate(
             tool_calls_mean=0.0,
             tokens_in_mean=0.0,
             tokens_out_mean=0.0,
+            latency_ms_mean=0.0,
             usd_total=0.0,
             usd_per_correct=None,
         )
@@ -158,6 +160,7 @@ def aggregate(
         tool_calls_mean=mean(col("tool_calls")),
         tokens_in_mean=mean(col("tokens_in")),
         tokens_out_mean=mean(col("tokens_out")),
+        latency_ms_mean=mean(col("latency_ms")),
         usd_total=usd_total,
         usd_per_correct=(usd_total / n_correct) if n_correct else None,
         accuracy_ci=accuracy_ci,

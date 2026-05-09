@@ -189,6 +189,7 @@ def _build_headline_table(
             "by_domain": {
               "datasheet": {"n": 100, "accuracy": 0.50, "accuracy_ci": [.39, .60],
                             "usd_per_correct": 0.011, "usd_per_correct_ci": [.009, .015],
+                            "latency_ms_mean": 3200.0,
                             "bbox_iou": 0.38, "page_recall": 0.94},
               "finance":   {...},
               "_overall":  {...}
@@ -225,6 +226,7 @@ def _build_headline_table(
                         "accuracy_ci": m.get("accuracy_ci") or [0.0, 0.0],
                         "usd_per_correct": m.get("usd_per_correct"),
                         "usd_per_correct_ci": m.get("usd_per_correct_ci"),
+                        "latency_ms_mean": m.get("latency_ms_mean", 0.0),
                         "bbox_iou": m.get("bbox_iou_mean", 0.0),
                         "page_recall": m.get("page_recall_mean", 0.0),
                         "usd_total": m.get("usd_total", 0.0),

@@ -43,6 +43,12 @@ def _fmt_cost(value: float | None, ci: list[float] | None) -> str:
     return f"${value:.4f}"
 
 
+def _fmt_latency(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{float(value) / 1000:.2f}s"
+
+
 def _to_markdown(table: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append(f"# Headline table — {table.get('protocol', '?')}")
@@ -50,14 +56,15 @@ def _to_markdown(table: dict[str, Any]) -> str:
     lines.append(f"Generated: {table.get('generated_at', '?')}")
     lines.append("")
 
-    # One-row-per-method × per-domain × accuracy + cost
+    # One-row-per-method × per-domain × accuracy + cost + latency
     header = (
         "| Method | "
         + " | ".join(
             [f"{_DOMAIN_LABELS.get(d, d)} accuracy" for d in _DOMAINS_ORDER if d != "_overall"]
             + [f"{_DOMAIN_LABELS.get(d, d)} $/correct" for d in _DOMAINS_ORDER if d != "_overall"]
+            + [f"{_DOMAIN_LABELS.get(d, d)} latency" for d in _DOMAINS_ORDER if d != "_overall"]
         )
-        + " | Overall accuracy | n |"
+        + " | Overall accuracy | Overall latency | n |"
     )
     sep = "|" + "|".join(["---"] * (header.count("|") - 1)) + "|"
     lines.append(header)
@@ -72,14 +79,17 @@ def _to_markdown(table: dict[str, Any]) -> str:
 
         acc_cells = []
         cost_cells = []
+        latency_cells = []
         for d in _DOMAINS_ORDER:
             if d == "_overall":
                 continue
             m = by_domain.get(d) or {}
             acc_cells.append(_fmt_pct(m.get("accuracy"), m.get("accuracy_ci")))
             cost_cells.append(_fmt_cost(m.get("usd_per_correct"), m.get("usd_per_correct_ci")))
+            latency_cells.append(_fmt_latency(m.get("latency_ms_mean")))
         overall = by_domain.get("_overall") or {}
         overall_acc = _fmt_pct(overall.get("accuracy"), overall.get("accuracy_ci"))
+        overall_latency = _fmt_latency(overall.get("latency_ms_mean"))
         n_total = overall.get("n", row.get("n_total", 0))
 
         lines.append(
@@ -89,7 +99,9 @@ def _to_markdown(table: dict[str, Any]) -> str:
             + " | ".join(acc_cells)
             + " | "
             + " | ".join(cost_cells)
-            + f" | {overall_acc} | {n_total} |"
+            + " | "
+            + " | ".join(latency_cells)
+            + f" | {overall_acc} | {overall_latency} | {n_total} |"
         )
 
     lines.append("")
@@ -106,7 +118,7 @@ def _to_html(table: dict[str, Any]) -> str:
     for row in table.get("rows", []):
         if row.get("missing"):
             rows_html.append(
-                f"<tr><td><b>{row['label']}</b></td><td colspan='5'><i>missing</i></td></tr>"
+                f"<tr><td><b>{row['label']}</b></td><td colspan='9'><i>missing</i></td></tr>"
             )
             continue
         by_domain = row.get("by_domain", {})
@@ -123,8 +135,14 @@ def _to_html(table: dict[str, Any]) -> str:
             cells.append(
                 f"<td>{_fmt_cost(m.get('usd_per_correct'), m.get('usd_per_correct_ci'))}</td>"
             )
+        for d in _DOMAINS_ORDER:
+            if d == "_overall":
+                continue
+            m = by_domain.get(d) or {}
+            cells.append(f"<td>{_fmt_latency(m.get('latency_ms_mean'))}</td>")
         overall = by_domain.get("_overall") or {}
         cells.append(f"<td>{_fmt_pct(overall.get('accuracy'), overall.get('accuracy_ci'))}</td>")
+        cells.append(f"<td>{_fmt_latency(overall.get('latency_ms_mean'))}</td>")
         cells.append(f"<td>{overall.get('n', row.get('n_total', 0))}</td>")
         rows_html.append("<tr>" + "".join(cells) + "</tr>")
 
@@ -141,7 +159,12 @@ def _to_html(table: dict[str, Any]) -> str:
             for d in _DOMAINS_ORDER
             if d != "_overall"
         )
-        + "<th>Overall accuracy</th><th>n</th>"
+        + "".join(
+            f"<th>{_DOMAIN_LABELS.get(d, d)} latency</th>"
+            for d in _DOMAINS_ORDER
+            if d != "_overall"
+        )
+        + "<th>Overall accuracy</th><th>Overall latency</th><th>n</th>"
         + "</tr>"
     )
 
