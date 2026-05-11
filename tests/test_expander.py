@@ -1522,9 +1522,7 @@ async def test_retry_expand_adds_visual_panel_crops_for_large_timing_overview(
     assert (0.5, 0.6333, 0.95, 0.9) in image_bboxes
 
 
-async def test_retry_expand_adds_union_context_window_for_fragmented_targets(
-    tmp_path, monkeypatch
-):
+async def test_retry_expand_adds_union_context_window_for_fragmented_targets(tmp_path, monkeypatch):
     """Verifier retries over same-page fragments get one crop spanning them."""
     calls: list = []
     _install_fake_inspect(monkeypatch, calls=calls)
@@ -1666,9 +1664,7 @@ async def test_retry_visual_zoom_adds_zoomed_crop_for_target_packet(tmp_path, mo
     assert out.packets[1].multi_scale_crops == []
 
 
-async def test_retry_visual_zoom_with_missing_context_continues_to_neighbors(
-    tmp_path, monkeypatch
-):
+async def test_retry_visual_zoom_with_missing_context_continues_to_neighbors(tmp_path, monkeypatch):
     async def _fake_zoom_crop(*, crop_ref, cache_dir, packet_id):
         return "/crops/p0_zoomed.png"
 
@@ -1843,3 +1839,122 @@ async def test_retry_visual_zoom_direct_resize_fallback_when_sandbox_returns_non
     with Image.open(zoom_ref) as zoomed:
         assert zoomed.size == (48, 24)
     assert "expand_context:visual_zoom1_direct" in packet.provenance.args_hash
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 (2026-05-11 harness-growth): per-role relevance thresholds + weights
+# ---------------------------------------------------------------------------
+
+
+async def test_per_role_threshold_keeps_marginal_caption(tmp_path, monkeypatch):
+    """A caption at rel=0.35 (below the default 0.5 uniform threshold) is
+    KEPT under per-role gating because captions have threshold 0.30. This is
+    the canonical win-condition for Phase 3: more useful neighbors attached
+    without lowering the bar for less-useful roles."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.10, 0.20, 0.50, 0.60))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.10, 0.62, 0.50, 0.66),
+                region_type="caption",
+                relevance=0.35,  # below uniform 0.5, above caption-specific 0.30
+            ),
+        ]
+    )
+    out = await expand_context(ev, regions=regions, pdf_path=Path("/fake.pdf"))
+    assert "caption" in out.packets[0].linked_neighbor_types
+
+
+async def test_per_role_threshold_drops_marginal_axis_label(tmp_path, monkeypatch):
+    """An axis_label at rel=0.45 is DROPPED — axis_label keeps the default
+    0.50 threshold. Phase 3 raises the bar (effectively) for roles that
+    are situationally useful but often spatially adjacent."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.10, 0.20, 0.50, 0.60))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.10, 0.62, 0.50, 0.66),
+                region_type="axis_label",
+                relevance=0.45,  # below the 0.5 axis_label threshold
+            ),
+        ]
+    )
+    out = await expand_context(ev, regions=regions, pdf_path=Path("/fake.pdf"))
+    assert "axis_label" not in out.packets[0].linked_neighbor_types
+
+
+async def test_per_role_threshold_drops_marginal_table_cell_lookup(tmp_path, monkeypatch):
+    """A reranker `needed_for=table_cell_lookup` role is in
+    `_RERANK_CONTEXT_ROLES`, so it attaches unconditionally (no relevance
+    gate). This test confirms the per-role threshold change did NOT
+    accidentally remove the context-role bypass."""
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.10, 0.20, 0.50, 0.60))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.10, 0.62, 0.50, 0.66),
+                region_type="caption",  # generic region_type with rerank context role
+                needed_for="table_cell_lookup",
+            ),
+        ]
+    )
+    out = await expand_context(ev, regions=regions, pdf_path=Path("/fake.pdf"))
+    assert len(out.packets[0].linked_neighbor_types) == 1
+
+
+async def test_per_role_weight_caption_beats_axis_label_when_budget_binds(tmp_path, monkeypatch):
+    """Per-role weights bias ranking: a caption at rel=0.5 should beat an
+    axis_label at rel=0.6 because captions empirically anchor more answers.
+
+    Cap the per-packet budget to 1 so the role-weight ordering is the
+    deciding factor.
+    """
+    calls: list = []
+    _install_fake_inspect(monkeypatch, calls=calls)
+    ev = EvidenceEvent(
+        packets=[_packet(packet_id="p0", page=1, bbox_norm=(0.10, 0.20, 0.50, 0.60))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            # Place the caption slightly farther vertically so the *vertical
+            # distance* tiebreaker can't carry the day — the role weight
+            # must be doing the work.
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.10, 0.62, 0.50, 0.66),  # 0.02 from packet edge
+                region_type="caption",
+                relevance=0.50,
+            ),
+            _region_with_signals(
+                page=1,
+                bbox_norm=(0.10, 0.61, 0.50, 0.612),  # 0.01 from packet edge
+                region_type="axis_label",
+                relevance=0.60,
+            ),
+        ]
+    )
+    out = await expand_context(
+        ev,
+        regions=regions,
+        pdf_path=Path("/fake.pdf"),
+        max_neighbors_per_packet=1,
+    )
+    types = out.packets[0].linked_neighbor_types
+    assert types == ["caption"], (
+        f"caption (rel=0.5, weight=1.20) should beat axis_label (rel=0.6, weight=0.95), got {types}"
+    )

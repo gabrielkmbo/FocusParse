@@ -113,7 +113,92 @@ _RERANK_CONTEXT_ROLES: frozenset[str] = frozenset(
 # 2026-05-05 (Phase B1.5) after the B1 A/B showed ~20% of packets still
 # attached 3-4 neighbors with relevance just above 0.3. Reasoner image
 # budget is finite; lower relevance scores fail to discriminate.
+#
+# Phase 3 of harness-growth-sprint (2026-05-11): the uniform 0.5 threshold
+# treated all neighbor roles equally, which left
+# mean_irrelevant_tool_call_count (~1.34) > mean_useful_tool_call_count
+# (~1.15) per the PR #2 diagnostics. The kept-but-marginal neighbors were
+# disproportionately axis_label / row_header / column_header — the roles
+# that are often spatially adjacent but rarely the deciding context.
+# `_ROLE_RELEVANCE_THRESHOLDS` lowers the bar for roles that are almost
+# always useful (caption, legend) and raises it for roles that are
+# situationally useful. The default value remains for any role not in the
+# table.
 _DEFAULT_NEIGHBOR_RELEVANCE_THRESHOLD = 0.5
+
+# Per-role thresholds. Keys cover both region_type values (e.g. "caption")
+# and reranker needed_for context roles (e.g. "caption_context"). When the
+# reranker scored a candidate but didn't tag a context role, the
+# candidate's region_type drives the threshold lookup.
+_ROLE_RELEVANCE_THRESHOLDS: dict[str, float] = {
+    # Almost-always-useful annotations: keep marginal candidates.
+    "caption": 0.30,
+    "caption_context": 0.30,
+    "legend": 0.30,
+    "legend_binding": 0.30,
+    # Usually-useful: small reduction from the default 0.5.
+    "footnote": 0.40,
+    "footnote_adjustment": 0.40,
+    "title": 0.45,
+    "section_header": 0.45,
+    "section-header": 0.45,
+    "page-header": 0.45,
+    "page-footer": 0.45,
+    # Situationally useful — apply the default 0.5.
+    "axis_label": 0.50,
+    "axis-label": 0.50,
+    "axis_reading": 0.50,
+    # Often spatially adjacent but rarely cited as the *decisive* context.
+    # Raise the bar so only high-confidence matches attach.
+    "table_cell_lookup": 0.55,
+    "header_disambiguation": 0.55,
+}
+
+# Role weights bias ranking within the relevance bucket. A high-relevance
+# caption should beat a slightly-higher-relevance axis_label when the
+# per-packet budget binds, because captions empirically anchor more
+# answers than axis labels in the rebaseline-v2 traces. Weights are
+# multiplied into the primary sort key (`primary = -relevance * weight`,
+# so a higher weight makes a neighbor rank earlier). Modest spread
+# around 1.0 to avoid drowning out the relevance signal.
+_ROLE_WEIGHTS: dict[str, float] = {
+    "caption": 1.20,
+    "caption_context": 1.20,
+    "legend": 1.15,
+    "legend_binding": 1.15,
+    "footnote": 1.10,
+    "footnote_adjustment": 1.10,
+    # 1.0 — the rest match the relevance signal directly.
+    "axis_label": 0.95,
+    "axis-label": 0.95,
+    "axis_reading": 0.95,
+    "table_cell_lookup": 0.90,
+    "header_disambiguation": 0.90,
+}
+_DEFAULT_ROLE_WEIGHT = 1.0
+
+
+def _role_for_gating(cand: RegionCandidate) -> str:
+    """The role key used for per-role threshold + weight lookup.
+
+    Prefers `cand.needed_for` (reranker role) when set, else falls back to
+    `cand.region_type`. Lower-cased to align with the threshold/weight
+    table keys.
+    """
+    if cand.needed_for:
+        return str(cand.needed_for).lower()
+    return (cand.region_type or "").lower()
+
+
+def _role_relevance_threshold(cand: RegionCandidate) -> float:
+    role = _role_for_gating(cand)
+    return _ROLE_RELEVANCE_THRESHOLDS.get(role, _DEFAULT_NEIGHBOR_RELEVANCE_THRESHOLD)
+
+
+def _role_weight(cand: RegionCandidate) -> float:
+    role = _role_for_gating(cand)
+    return _ROLE_WEIGHTS.get(role, _DEFAULT_ROLE_WEIGHT)
+
 
 # Per-packet neighbor cap. Tightened 4 → 2 on 2026-05-05 (Phase B1.5).
 # B1's max=4 produced too many marginal-relevance neighbors per packet
@@ -676,16 +761,25 @@ def _pick_neighbors(
             continue
 
         # Query-aware relevance gate.
+        # Phase 3 of harness-growth-sprint (2026-05-11): per-role thresholds
+        # + role weights bias selection toward high-yield roles (caption,
+        # legend) over situationally-useful ones (axis_label, row_header).
+        # `relevance_threshold` is still the per-call override (verifier-
+        # directed retries can drop it) — but the per-role override beats
+        # it when the role-specific value is more permissive.
+        role_threshold = _role_relevance_threshold(cand)
+        effective_threshold = min(relevance_threshold, role_threshold)
+        role_weight = _role_weight(cand)
         rerank_bucket: int | None = None
         primary: float = 0.0
         if cand.needed_for and cand.needed_for in _RERANK_CONTEXT_ROLES:
             rerank_bucket = 1
-            primary = -float(cand.relevance or 0.5)  # higher relevance = better
+            primary = -float(cand.relevance or 0.5) * role_weight
         elif cand.relevance is not None:
-            if cand.relevance < relevance_threshold:
+            if cand.relevance < effective_threshold:
                 continue  # reranker scored it but said it's not relevant
             rerank_bucket = 0
-            primary = -float(cand.relevance)
+            primary = -float(cand.relevance) * role_weight
         elif ctype in permitted:
             rerank_bucket = 2
             primary = 0.0
