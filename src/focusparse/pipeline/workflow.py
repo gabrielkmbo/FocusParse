@@ -28,7 +28,7 @@ from focusparse.pipeline.events import (
     VerdictEvent,
 )
 from focusparse.pipeline.expander import expand_context
-from focusparse.pipeline.inspector import inspect_regions
+from focusparse.pipeline.inspector import _FINE_DETAIL_QUESTION_FAMILIES, inspect_regions
 from focusparse.pipeline.localizer import propose_regions
 from focusparse.pipeline.planner import plan_question
 from focusparse.pipeline.reasoner import answer_from_evidence
@@ -76,6 +76,50 @@ _EXPAND_RETRY_FACTOR = 1.5  # multiplied each retry → wider neighbor net
 _MAX_ADJACENCY_PAD = 0.30  # cap so the pad stays meaningful
 _RETRY_SELECTION_CONFIDENCE_MARGIN = 0.15
 _ABSTAIN_OVERRIDE_MIN_CONFIDENCE = 0.45
+
+# Phase 2 of harness-growth-sprint (2026-05-11): hard-case dispatch for the
+# LLM-driven inspector. When `use_react_inspector=True`, the workflow routes
+# through the ReAct inspector ONLY for examples where the deterministic top-N
+# is most likely to miss — fine-detail visual questions, planner-flagged tiny
+# regions, or low-confidence reranks. Other examples stay on the deterministic
+# floor (cheaper + faster). The previous behaviour was binary "always ReAct or
+# never", which burned cost on every easy example.
+_HARD_CASE_RELEVANCE_THRESHOLD = 0.5  # top region rerank below this → "hard"
+_HARD_CASE_BUDGET_CLASSES = frozenset({"highres_tiny"})
+
+
+def _should_use_react_inspector(plan: PlanEvent, regions: RegionsEvent) -> bool:
+    """Return True when the example is "hard" enough to warrant the ReAct
+    inspector — caller still must check `self.use_react_inspector` is on.
+
+    Triggers (any one is sufficient):
+      1. ``plan.budget_class`` is in `_HARD_CASE_BUDGET_CLASSES` (planner-
+         signalled fine-detail / tiny-region case).
+      2. ``plan.question_family`` is in `_FINE_DETAIL_QUESTION_FAMILIES`
+         (the inspector's existing fine-detail family list).
+      3. The top reranked region has `relevance` set AND below
+         `_HARD_CASE_RELEVANCE_THRESHOLD` — the reranker thinks no region
+         is a strong match, so picking by detector score alone is risky.
+
+    Why these:
+      - Fine-detail visual questions are the bottleneck the deterministic
+        top-N misses (the 2026-04-13 diagnostic).
+      - Low rerank confidence is precisely the case the inspector should
+        spend more compute on picking regions rather than blindly inspecting
+        the top-N by detector score.
+    """
+    if (plan.budget_class or "").strip() in _HARD_CASE_BUDGET_CLASSES:
+        return True
+    if (plan.question_family or "").strip() in _FINE_DETAIL_QUESTION_FAMILIES:
+        return True
+    top = regions.candidates[0] if regions.candidates else None
+    return (
+        top is not None
+        and top.relevance is not None
+        and float(top.relevance) < _HARD_CASE_RELEVANCE_THRESHOLD
+    )
+
+
 _VISUAL_READABILITY_RE = re.compile(
     r"\b("
     r"blur(?:ry|red)?|cannot\s+read|can't\s+read|difficult\s+to\s+read|"
@@ -905,8 +949,18 @@ class FocusWorkflow:
         step_counter: _StepCounter,
         retry_attempt: int = 0,
     ) -> EvidenceEvent:
-        # Phase 6 #1 / sprint Phase 1: LLM-driven inspector dispatch.
-        if self.use_react_inspector:
+        # Phase 2 of harness-growth-sprint (2026-05-11): hard-case dispatch.
+        # The flag `use_react_inspector` now means "enable hard-case dispatch"
+        # rather than "always use the ReAct inspector". Easy examples stay on
+        # the deterministic floor; hard ones (fine-detail family,
+        # highres_tiny budget, low rerank confidence) get the LLM dispatcher.
+        inspector_path: str
+        if self.use_react_inspector and _should_use_react_inspector(plan, regions):
+            inspector_path = "react_hard_case"
+        else:
+            inspector_path = "deterministic"
+
+        if inspector_path == "react_hard_case":
             from focusparse.pipeline.inspector_react import react_inspect
 
             inspector_client = self._client_for("inspector_dispatch")
@@ -942,6 +996,7 @@ class FocusWorkflow:
                     action=action,
                     tool="react_inspector",
                     args={
+                        "inspector_path": inspector_path,
                         "n_packets": len(evidence.packets),
                         "n_real_packets": n_real_packets,
                         "plan_size": result.plan_size,
@@ -963,6 +1018,7 @@ class FocusWorkflow:
                 event_type="evidence_packets",
                 retry_attempt=retry_attempt,
                 payload={
+                    "inspector_path": inspector_path,
                     "n_packets": len(evidence.packets),
                     "n_real_packets": n_real_packets,
                     "plan_size": result.plan_size,
@@ -997,6 +1053,7 @@ class FocusWorkflow:
                 action="tool_call",
                 tool="deterministic_inspector",
                 args={
+                    "inspector_path": inspector_path,
                     "n_packets": len(evidence.packets),
                     "n_real_packets": n_real_packets,
                     "chart_to_table_enabled": self.chart_to_table_enabled,
@@ -1011,6 +1068,7 @@ class FocusWorkflow:
             event_type="evidence_packets",
             retry_attempt=retry_attempt,
             payload={
+                "inspector_path": inspector_path,
                 "n_packets": len(evidence.packets),
                 "n_real_packets": n_real_packets,
                 "chart_to_table_enabled": self.chart_to_table_enabled,

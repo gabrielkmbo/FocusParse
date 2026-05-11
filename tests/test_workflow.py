@@ -36,6 +36,7 @@ from focusparse.pipeline.workflow import (
     _is_better_unsupported_answer,
     _page_number_from_filename,
     _should_allow_reasoner_shape_retry,
+    _should_use_react_inspector,
     _verifier_requests_visual_readability_retry,
     _verifier_target_packet_ids,
 )
@@ -1916,16 +1917,124 @@ async def test_workflow_react_inspector_default_off(parser_bench_submodule_prese
     assert inspect_steps[0].tool == "deterministic_inspector"
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 (2026-05-11 harness-growth): hard-case dispatch unit tests
+# ---------------------------------------------------------------------------
+
+
+def _hgs_plan(family: str = "spec_table_cell_retrieval", budget: str = "easy_local"):
+    """Lightweight PlanEvent factory for _should_use_react_inspector tests."""
+    from focusparse.pipeline.events import PlanEvent
+
+    return PlanEvent(
+        question_family=family,
+        evidence_types=["table"],
+        budget_class=budget,
+        routing_policy="text_first",
+        max_tool_calls=8,
+        max_crops=4,
+        max_vlm_calls=2,
+    )
+
+
+def _hgs_regions(*, top_relevance: float | None = None):
+    """Lightweight RegionsEvent factory."""
+    from focusparse.pipeline.events import RegionCandidate, RegionsEvent
+
+    if top_relevance is None:
+        return RegionsEvent(candidates=[])
+    return RegionsEvent(
+        candidates=[
+            RegionCandidate(
+                region_id="r0",
+                page=1,
+                bbox_norm=(0.1, 0.2, 0.3, 0.4),
+                region_type="table",
+                score=0.9,
+                relevance=top_relevance,
+            )
+        ]
+    )
+
+
+def test_should_use_react_inspector_fires_on_fine_detail_family():
+    """Fine-detail families are the primary hard-case trigger — the
+    deterministic top-N tends to pick the wrong region for these."""
+    plan = _hgs_plan(family="axis_value_interpolation")
+    assert _should_use_react_inspector(plan, _hgs_regions()) is True
+
+
+def test_should_use_react_inspector_fires_on_highres_tiny_budget():
+    plan = _hgs_plan(family="spec_table_cell_retrieval", budget="highres_tiny")
+    assert _should_use_react_inspector(plan, _hgs_regions()) is True
+
+
+def test_should_use_react_inspector_fires_on_low_rerank_relevance():
+    """When the top reranked region has relevance < 0.5, no region is a
+    strong match — picking by detector score alone is risky."""
+    plan = _hgs_plan(family="spec_table_cell_retrieval", budget="easy_local")
+    assert _should_use_react_inspector(plan, _hgs_regions(top_relevance=0.3)) is True
+
+
+def test_should_use_react_inspector_skips_on_easy_examples():
+    """Vanilla family + easy_local budget + decent rerank → stay
+    deterministic. This is the cost-saving case."""
+    plan = _hgs_plan(family="spec_table_cell_retrieval", budget="easy_local")
+    assert _should_use_react_inspector(plan, _hgs_regions(top_relevance=0.8)) is False
+
+
+def test_should_use_react_inspector_skips_when_no_rerank_signal():
+    """When the reranker didn't run (relevance=None), don't treat it as
+    "low confidence" — fall through to the other triggers (which also
+    don't fire here)."""
+    plan = _hgs_plan(family="spec_table_cell_retrieval", budget="easy_local")
+    from focusparse.pipeline.events import RegionCandidate, RegionsEvent
+
+    regions = RegionsEvent(
+        candidates=[
+            RegionCandidate(
+                region_id="r0",
+                page=1,
+                bbox_norm=(0.1, 0.2, 0.3, 0.4),
+                region_type="table",
+                score=0.9,
+            )
+        ]
+    )
+    assert _should_use_react_inspector(plan, regions) is False
+
+
+def _hard_case_planner_client(family: str = "min_typ_max_disambiguation") -> _FakeClient:
+    """Planner client returning a fine-detail family so hard-case dispatch
+    fires. Used by Phase 2 (2026-05-11 harness-growth) ReAct inspector tests."""
+    return _FakeClient(
+        '{"question_family": "' + family + '", "evidence_types": ["table", "footnote"], '
+        '"budget_class": "easy_local", "routing_policy": "text_first"}',
+        tokens_in=90,
+        tokens_out=20,
+    )
+
+
 async def test_workflow_react_inspector_falls_back_without_tier_router(
     parser_bench_submodule_present,
 ):
-    """use_react_inspector=True without an inspector_dispatch tier client
-    runs the deterministic fallback inside react_inspect — trace shows
-    `react_inspector` tool with `fallback_used=True`."""
+    """Phase 2 (2026-05-11): with use_react_inspector=True AND a hard-case
+    trigger (fine-detail family) but no inspector_dispatch tier client, the
+    react path runs and falls back to deterministic top-N internally — trace
+    shows `react_inspector` tool with `fallback_used=True` and
+    `inspector_path=react_hard_case`."""
     if not parser_bench_submodule_present:
         pytest.skip("parser-bench submodule required for BenchmarkExample")
     client = _FakeClient('{"answer": "x", "citations": []}')
-    workflow = FocusWorkflow(backend_client=client, use_react_inspector=True)
+    # Planner client emits a fine-detail family so the hard-case dispatcher
+    # fires. Without a planner client, the deterministic fallback returns
+    # `question_family="unknown"` and the dispatcher (correctly) skips ReAct.
+    planner = _hard_case_planner_client()
+    workflow = FocusWorkflow(
+        backend_client=client,
+        tier_router=_FakeTierRouter(planner=planner),
+        use_react_inspector=True,
+    )
     images = [Path("datasheet-A_page_0003_300dpi.png")]
     result = await workflow.run(_make_example(), images, protocol="focus")
     inspect_steps = [s for s in result.trace.steps if s.stage == "inspect"]
@@ -1933,27 +2042,26 @@ async def test_workflow_react_inspector_falls_back_without_tier_router(
     step = inspect_steps[0]
     assert step.tool == "react_inspector"
     assert step.args.get("fallback_used") is True
+    assert step.args.get("inspector_path") == "react_hard_case"
 
 
 async def test_workflow_react_inspector_uses_tier_router_when_present(
     parser_bench_submodule_present,
 ):
-    """When inspector_dispatch tier resolves to a real client, the react
-    inspector dispatches via LLM (tier=mid, action=llm_call)."""
+    """Phase 2: with hard-case trigger AND inspector_dispatch tier resolving to
+    a real client, the react inspector dispatches via LLM (tier=mid,
+    action=llm_call)."""
     if not parser_bench_submodule_present:
         pytest.skip("parser-bench submodule required for BenchmarkExample")
     reasoner = _FakeClient('{"answer": "x", "citations": []}')
     inspector = _FakeClient(
         '{"thought": "pick the chart", "plan": [{"region_idx": 0, "mode": "image"}]}'
     )
-
-    class _Router:
-        def client_for(self, role: str):
-            return inspector if role == "inspector_dispatch" else None
+    planner = _hard_case_planner_client()
 
     workflow = FocusWorkflow(
         backend_client=reasoner,
-        tier_router=_Router(),
+        tier_router=_FakeTierRouter(planner=planner, inspector_dispatch=inspector),
         use_react_inspector=True,
     )
     images = [Path("datasheet-A_page_0003_300dpi.png")]
@@ -1964,4 +2072,47 @@ async def test_workflow_react_inspector_uses_tier_router_when_present(
     assert step.action == "llm_call"
     assert step.tier == "mid"
     assert step.args.get("fallback_used") is False
+    assert step.args.get("inspector_path") == "react_hard_case"
     assert step.tokens_in > 0  # the inspector LLM call was recorded
+
+
+async def test_workflow_react_inspector_skipped_for_easy_examples(
+    parser_bench_submodule_present,
+):
+    """Phase 2 (2026-05-11): with use_react_inspector=True but NO hard-case
+    trigger (vanilla family, easy_local budget, no low rerank), the workflow
+    stays on the deterministic floor. This is the whole point of hard-case
+    dispatch — easy examples don't pay the LLM-inspector cost."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+    reasoner = _FakeClient('{"answer": "x", "citations": []}')
+    # Planner returns a NON-fine-detail family + easy_local budget.
+    planner = _FakeClient(
+        '{"question_family": "spec_table_cell_retrieval", '
+        '"evidence_types": ["table"], '
+        '"budget_class": "easy_local", '
+        '"routing_policy": "text_first"}',
+        tokens_in=80,
+        tokens_out=20,
+    )
+    inspector = _FakeClient(
+        '{"thought": "should not run", "plan": []}',
+        tokens_in=999,
+        tokens_out=999,
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(planner=planner, inspector_dispatch=inspector),
+        use_react_inspector=True,
+    )
+    images = [Path("datasheet-A_page_0003_300dpi.png")]
+    result = await workflow.run(_make_example(), images, protocol="focus")
+    inspect_steps = [s for s in result.trace.steps if s.stage == "inspect"]
+    assert len(inspect_steps) == 1
+    step = inspect_steps[0]
+    # Deterministic path — the LLM-inspector was NOT called even though the flag was on.
+    assert step.tool == "deterministic_inspector"
+    assert step.args.get("inspector_path") == "deterministic"
+    assert inspector.calls == [], (
+        "inspector_dispatch LLM was called on an easy example — hard-case dispatch is over-broad"
+    )
