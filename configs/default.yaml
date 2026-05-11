@@ -24,8 +24,18 @@ roles:
   localizer_rerank: mid
   reasoner: frontier
   verifier: mid
-  # Sprint Phase 1 (2026-05-04): inspector_dispatch is added back in a
-  # follow-on commit AFTER the headline-v1 rebaseline run completes — the
+  # 2026-05-11 (harness-growth-sprint Phase 2): inspector_dispatch is now
+  # used by `_should_use_react_inspector` to LLM-route on hard cases
+  # (fine-detail families, highres_tiny budget, low rerank confidence).
+  # Mid-tier so dispatch is cheap (~$0.005 per affected example × ~30%
+  # of examples = ~+$0.20 per n=148 run). Adding this role changes
+  # `tier_sha8` so sprint runs land under a new namespace and do not
+  # collide with rebaseline-v2's `7d4b816d`. The previous
+  # comment-out (sprint 2026-05-04 Phase 1) was specifically to keep
+  # rebaseline-v2 stable; now that it is stable, the role belongs here.
+  inspector_dispatch: mid
+  # Sprint Phase 1 (2026-05-04): inspector_dispatch was added back in a
+  # follow-on commit AFTER the headline-v1 rebaseline run completed — the
   # tier_sha8 hashes the resolved role map, so adding a role mid-run
   # would split predictions across two namespaces and break the cell
   # aggregation. Re-add via a separate commit before Phase 1 A/B.

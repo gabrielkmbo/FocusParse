@@ -301,7 +301,16 @@ class FocusWorkflow:
         """
         if self.tier_router is None:
             return None
-        return self.tier_router.client_for(role)
+        try:
+            return self.tier_router.client_for(role)
+        except KeyError:
+            # The role isn't configured in `roles:` and no `FOCUSPARSE_TIER_<ROLE>`
+            # env var is set. The stage's caller treats `None` as "no client →
+            # use the deterministic fallback for this stage" (e.g.
+            # `inspector_react` falls back to deterministic top-N). This is
+            # safer than crashing the whole example: an unconfigured optional
+            # role is a config-coverage gap, not a workflow bug.
+            return None
 
     def _layout_endpoint_url(self) -> str | None:
         """Resolve the layout endpoint URL from config, else let the tool default."""
