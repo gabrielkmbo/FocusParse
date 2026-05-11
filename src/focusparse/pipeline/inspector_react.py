@@ -43,7 +43,7 @@ from focusparse.pipeline.events import (
     RegionCandidate,
     RegionsEvent,
 )
-from focusparse.pipeline.inspector import _inspect_one_region
+from focusparse.pipeline.inspector import _CHART_QUESTION_FAMILIES, _inspect_one_region
 
 if TYPE_CHECKING:
     pass
@@ -179,9 +179,11 @@ async def react_inspect(
         # helper's existing logic — it already chooses image/element/region
         # correctly per region type. The LLM's mode pick is ADVISORY for
         # this iteration; phase 1b can plumb it through.
+        # Use the same chart-family gate as the deterministic inspector so
+        # the +4 tool-set's ReAct path doesn't silently use a narrower set.
+        # Expanded 2026-05-11 (harness-growth Phase 1) — see inspector.py.
         chart_active = chart_to_table_enabled and (
-            (plan.question_family or "")
-            in {"axis_value_interpolation", "candlestick_ohlc_extraction"}
+            (plan.question_family or "") in _CHART_QUESTION_FAMILIES
         )
         packet = await _inspect_one_region(
             idx,

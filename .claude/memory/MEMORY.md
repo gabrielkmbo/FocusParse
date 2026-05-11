@@ -131,6 +131,99 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-11 — harness-growth-sprint Phases 0-3 code shipped
+
+Branch `harness-growth-sprint` off `origin/main`, distinct from the six
+existing `codex/*` branches. Six commits implement the four levers
+identified in `docs/research/2026-05-11-recalibration-and-research-state.md`
+§5 ("variance harness", "chart_to_table expansion", "LLM-driven inspector
+hard-case dispatch", "expander per-role gating"). All code-only — integration
+n=148 A/Bs are deferred (see "Phase 4 status" below).
+
+Plan: `~/.claude/plans/clever-sparking-babbage.md` (saved post-approval).
+Recalibration: `docs/research/2026-05-11-recalibration-and-research-state.md`.
+
+**Phase 0 — variance harness (3 commits):**
+
+- `fde2803` `LLMResponseCache` in `src/focusparse/cache/store.py` with content
+  keys over (role, model, prompt sha, system sha, image content sha, schema
+  version). Replayed responses carry `raw["replayed"] = True`.
+- `1d248c5` `CachingModelClient` decorator + `TierRouter` wrap in
+  `src/focusparse/models/tiers.py`. Three modes: `record`, `replay` (strict —
+  raises `LLMReplayMiss` on miss), `record-or-replay` (default day-to-day).
+  Default cached roles: `{planner, localizer_rerank}`. Reasoner/verifier
+  deliberately NOT cached — they are the dependent variable.
+- `4402d5e` `--llm-cache-dir` + `--llm-cache-mode` CLI flags on
+  `scripts/run_hf_eval.py`.
+
+Ship gate (deferred): two n=148 replicates under `record-or-replay` against
+the same cache dir landing within ±0.5pp overall accuracy.
+
+**Phase 1 — `chart_to_table` gate expansion (1 commit):**
+
+- `f6cca78` `_CHART_QUESTION_FAMILIES` in `inspector.py` expanded from
+  `{axis_value_interpolation, candlestick_ohlc_extraction, curve_axis_reading}`
+  to also include `chart_table_cross_ref`, `legend_series_binding`,
+  `multi_chart_comparison`, `chart_caption_fusion`, `chart_footnote_fusion`,
+  `dual_axis_disambiguation`. `inspector_react.py` aligned to import the
+  shared constant (previously had a narrower hardcoded set). The gate is
+  still `chart_extraction_active AND _region_is_chart(region)` so non-chart
+  regions cannot trigger; failures collapse to empty CSV + visual crop.
+
+Ship gate (deferred): A/B with `--chart-to-table` vs Phase 0 rebaseline,
+≥+3pp finance non-overlap CIs → default-on in `configs/default.yaml`.
+
+**Phase 2 — LLM-driven inspector hard-case dispatch (1 commit):**
+
+- `9d7c6b4` `_should_use_react_inspector(plan, regions)` helper in
+  `workflow.py` with three conservative triggers:
+  - `plan.budget_class ∈ {highres_tiny}`
+  - `plan.question_family ∈ _FINE_DETAIL_QUESTION_FAMILIES`
+  - top reranked region's `relevance < 0.5` (when reranker ran)
+    The `use_react_inspector` flag now means "enable hard-case dispatch"
+    rather than "always use ReAct". Telemetry adds
+    `inspector_path ∈ {"deterministic", "react_hard_case"}` per inspect step.
+    2 existing react-inspector tests refactored to thread a fine-detail
+    planner; 5 new unit tests for the helper; 1 new behavior test asserts
+    easy examples stay on the deterministic floor.
+
+Ship gate (deferred): A/B with `--use-react-inspector` vs Phase 1 result;
+mechanism check requires hard-case slice accuracy ≥+10pp over deterministic
+floor on the same slice + `verifier_unsupported_rate` on hard-case slice
+falls ≥10pp.
+
+**Phase 3 — expander per-role relevance scoring (1 commit):**
+
+- `5a42c33` `_ROLE_RELEVANCE_THRESHOLDS` + `_ROLE_WEIGHTS` tables in
+  `expander.py`. Caption/legend at 0.30 threshold + 1.20 weight (almost
+  always useful); footnote at 0.40 + 1.10; axis_label at 0.50 + 0.95;
+  table_cell_lookup / header_disambiguation at 0.55 + 0.90. Effective
+  threshold per candidate is `min(verifier_override, role_threshold)`.
+  Reranker context-role neighbors (`needed_for in _RERANK_CONTEXT_ROLES`)
+  still attach unconditionally — unchanged.
+
+Ship gate (deferred): A/B vs Phase 2 result; ship if accuracy ≥+1pp
+non-overlap OR `mean_irrelevant_tool_call_count < mean_useful_tool_call_count`
+(the explicit mechanism target).
+
+**Phase 4 status — integration runs deferred.**
+
+Phase 4 of the plan is the integration full-stack run (all four levers
+enabled, three replicates at n=148 under variance harness). The code is
+shipped; firing the actual experiments is gated on user confirmation
+because it costs ~$15-25 in API spend and ~60-90 minutes wall clock and
+should not run unsupervised in autonomous mode. The run plan + commands
+are documented in `~/.claude/plans/clever-sparking-babbage.md` under
+"Verification" and the integration results template lives at
+`docs/research/2026-05-12-integration-run-results.md` (skeleton). When
+the user is ready, the runs fill in the template + flip default flags
+in `configs/default.yaml` for any phase that wins ≥+3pp non-overlap CIs.
+
+Verification: 278 cross-section tests pass across cache + tiers + CLI +
+workflow + inspector + inspector_react + expander; ruff clean. One
+pre-existing dataset failure (`test_hf_streaming_yields_examples` — "Bad
+split: dev") is unrelated to this sprint.
+
 ### 2026-05-08 — verifier-action diagnostics + evidence-only retry default
 
 The crop-fallback n=148 follow-up completed at
@@ -168,7 +261,7 @@ remains a true pre-loop baseline.
 Focused verification:
 
 - `tests/test_workflow.py tests/test_focus_harness.py tests/test_hf_eval_cli.py
-  tests/test_stage_metrics.py tests/test_diagnose_predictions.py`: **150
+tests/test_stage_metrics.py tests/test_diagnose_predictions.py`: **150
   passed**, 5 warnings.
 - Ruff check and format-check were clean on touched workflow/harness/CLI/
   diagnostics files.

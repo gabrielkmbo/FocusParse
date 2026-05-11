@@ -369,6 +369,58 @@ def test_argparse_layout_preflight_flags(script_mod, monkeypatch):
     assert args.layout_detect_timeout_s == 45.5
 
 
+def test_argparse_llm_cache_flags(script_mod, monkeypatch, tmp_path):
+    """Phase 0 variance harness: --llm-cache-dir + --llm-cache-mode parse and
+    survive into args."""
+    cache_dir = tmp_path / "llm_cache"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_hf_eval.py",
+            "--protocol",
+            "agentic_multi_page",
+            "--agent",
+            "focus",
+            "--llm-cache-dir",
+            str(cache_dir),
+            "--llm-cache-mode",
+            "replay",
+        ],
+    )
+    args = script_mod._parse_args()
+    assert args.llm_cache_dir == cache_dir
+    assert args.llm_cache_mode == "replay"
+
+
+def test_argparse_llm_cache_defaults(script_mod, monkeypatch):
+    """Defaults: no cache dir → opt-in; mode defaults to record-or-replay."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_hf_eval.py", "--protocol", "agentic_multi_page", "--agent", "focus"],
+    )
+    args = script_mod._parse_args()
+    assert args.llm_cache_dir is None
+    assert args.llm_cache_mode == "record-or-replay"
+
+
+def test_argparse_llm_cache_rejects_unknown_mode(script_mod, monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_hf_eval.py",
+            "--protocol",
+            "agentic_multi_page",
+            "--llm-cache-mode",
+            "bogus",
+        ],
+    )
+    with pytest.raises(SystemExit):
+        script_mod._parse_args()
+
+
 def test_argparse_rejects_unknown_protocol(script_mod, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_hf_eval.py", "--protocol", "bogus"])
     with pytest.raises(SystemExit):

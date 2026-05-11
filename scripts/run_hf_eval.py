@@ -100,6 +100,7 @@ def main() -> int:
         return 2
 
     # Deferred imports so --help works without heavy deps.
+    from focusparse.cache.store import LLMResponseCache
     from focusparse.eval.harness import (
         run_comparator_eval,
         run_focus_eval,
@@ -111,7 +112,15 @@ def main() -> int:
     from focusparse.utils.config import load_config
 
     config = load_config()
-    tier_router = TierRouter(config)
+    llm_cache: LLMResponseCache | None = None
+    if args.llm_cache_dir is not None:
+        llm_cache = LLMResponseCache.at(args.llm_cache_dir)
+        logger.info(
+            "LLM cache enabled: dir=%s mode=%s (planner + localizer_rerank only).",
+            args.llm_cache_dir,
+            args.llm_cache_mode,
+        )
+    tier_router = TierRouter(config, llm_cache=llm_cache, llm_cache_mode=args.llm_cache_mode)
     resolved = _resolve_tiers(config)
     tier_sha8 = _tier_sha8(resolved)
 
@@ -478,6 +487,32 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Override per-page layout detection timeout during focus eval. "
             "Default uses configs/default.yaml endpoints.layout.timeout_s."
+        ),
+    )
+    parser.add_argument(
+        "--llm-cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for the upstream-LLM response cache (planner + region "
+            "reranker). When set, runs share this cache so per-stage A/Bs are "
+            "no longer dominated by upstream sampling noise. Reasoner and "
+            "verifier are NEVER cached (they are the dependent variable). "
+            "Default off; opt-in for variance-harness experiments."
+        ),
+    )
+    parser.add_argument(
+        "--llm-cache-mode",
+        choices=["record", "replay", "record-or-replay"],
+        default="record-or-replay",
+        help=(
+            "Cache mode when --llm-cache-dir is set. `record` always calls "
+            "the backend and writes the cache (fresh recording). `replay` "
+            "only reads the cache and RAISES on miss — strict reproducibility "
+            "from a pinned cache. `record-or-replay` (default) reads the "
+            "cache, falls back to a backend call on miss + records, which is "
+            "the day-to-day mode that lets the first run record and "
+            "subsequent runs replay deterministically."
         ),
     )
     return parser.parse_args()
