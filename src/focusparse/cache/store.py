@@ -13,9 +13,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from focusparse.models.base import ModelResponse
+if TYPE_CHECKING:
+    # Imported lazily at use sites to avoid a circular import:
+    # focusparse.models.__init__ → tiers → cache.store → models.base
+    from focusparse.models.base import ModelResponse
 
 # Bumped when the on-disk cache schema for LLMResponseCache changes in a
 # backward-incompatible way. Included in every cache key so old caches
@@ -177,6 +180,8 @@ class LLMResponseCache:
         system: str | None,
         images: list[Path] | None,
     ) -> ModelResponse | None:
+        from focusparse.models.base import ModelResponse as _ModelResponse
+
         key = llm_cache_key(role=role, model=model, prompt=prompt, system=system, images=images)
         raw = self.store.get_json(key)
         if raw is None:
@@ -184,7 +189,7 @@ class LLMResponseCache:
         payload = raw.get("response") if isinstance(raw, dict) else None
         if not isinstance(payload, dict):
             return None
-        response = ModelResponse.model_validate(payload)
+        response = _ModelResponse.model_validate(payload)
         # Tag the response so downstream telemetry can see this was replayed
         # without changing the recorded tokens / usd / latency_ms.
         existing_raw = response.raw or {}
