@@ -131,6 +131,68 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-11 (afternoon) — Phase 4 slice analysis + Phase 5 trigger tightening
+
+Phase 4 single-run n=148 (`results/hf/sprint-2026-05-11/phase4-run1/`)
+delivered +4.1pp overall and +11.3pp finance vs rebaseline-v2. The slice
+analysis post-merge revealed the gain attribution was MIS-stated in the
+merge commit:
+
+hard-case slice (51 ex, react fires): 47.1% phase4 vs 51.0% rb-v2 (-3.9pp)
+deterministic slice (92 ex): 51.1% phase4 vs 39.1% rb-v2 (+12.0pp)
+
+The +4.1pp overall came entirely from the deterministic slice (Phase 1
+chart_to_table gate + Phase 3 per-role expander gating). The LLM-driven
+dispatcher was NET-NEGATIVE on the slice it fired on.
+
+Failure analysis of the 5 react_hard_case losses:
+2/5 — planner emitted a different question_family vs rebaseline
+(upstream sampling regression flipping trigger B).
+3/5 — same planner output, LLM picked worse regions than the
+deterministic top-N, including a hallucination on
+gold=`unanswerable` (rebaseline correctly abstained).
+
+**Phase 5 ship:** `_should_use_react_inspector` tightened from OR to AND.
+The fine-detail family + low-rerank signals must BOTH hold (or the
+strong single highres_tiny signal). Pending n=148 A/B
+(`results/hf/sprint-2026-05-11/phase5-run1/`).
+
+**Reasoner extraction failure mode (the next bottleneck):**
+
+Of the 77 wrong examples in Phase 4, the breakdown by localization quality is:
+
+| Bucket                             |   n | % wrong |
+| ---------------------------------- | --: | ------: |
+| Right region (IoU≥0.3, recall≥0.5) |  62 |     81% |
+| Localization miss (recall<0.5)     |  11 |     14% |
+| No citations (lazy/early abstain)  |  10 |     13% |
+| Partial localization (IoU<0.3)     |   4 |      5% |
+
+**81% of failures are post-localization: right region, wrong extraction.**
+
+Sub-categorizing the 62 right-region-wrong:
+gold_in_pred (over-extraction, prompt-fixable): 6 ( 9.7%)
+pred_in_gold (truncation, prompt-fixable): 10 (16.1%)
+normalized_match (formatting only): 3 ( 4.8%)
+truly_different (wrong value extracted): 43 (69.4%)
+
+→ ~19 examples (~13pp of overall) are prompt-fixable via better
+answer-format-aware extraction guidance.
+→ 43 are genuine reasoner errors (wrong cell / wrong value despite
+correct region). These need self-consistency, two-stage extraction,
+or a model swap — not prompt tweaks.
+
+**chart_to_table** is now confirmed firing (10.5% rate, 15/148) but
+returns empty CSV every call — the OCR-based pipeline isn't producing
+data on real finance charts. The reasoner falls back to the visual
+crop, so this is "missed opportunity" not "regression". Replacing the
+OCR pipeline with an LLM-based extractor is a candidate Phase 7.
+
+**Variance harness (Phase 0)** code is shipped but not yet validated by
+the planned 2-replicate ship gate. Single Phase 4 + Phase 5 runs are
+within the ~7pp variance floor, so the headline numbers are directional
+not statistically separated.
+
 ### 2026-05-11 — harness-growth-sprint Phases 0-3 code shipped
 
 Branch `harness-growth-sprint` off `origin/main`, distinct from the six
