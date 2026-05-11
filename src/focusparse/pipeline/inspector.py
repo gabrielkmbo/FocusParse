@@ -238,11 +238,34 @@ _QUESTION_STOPWORDS = frozenset(
     }
 )
 
-# Sprint Phase 3 (Phase 6 #7): question families where chart_to_table CSV
-# extraction is worth the cost. Other question types use inspect_region
-# (visual reading) only.
+# Question families where chart_to_table CSV extraction is worth the cost.
+# Other question types use inspect_region (visual reading) only.
+#
+# Initially {axis_value_interpolation, candlestick_ohlc_extraction,
+# curve_axis_reading}. Expanded 2026-05-11 (harness-growth Phase 1) to cover
+# the rest of the planner's chart-bearing families because:
+#
+#   1. The gate is `chart_extraction_active AND _region_is_chart(region)`.
+#      Non-chart regions cannot trigger chart_to_table even if the family is
+#      listed, so expansion is safe for non-chart questions.
+#   2. chart_to_table failures collapse to an empty CSV with the visual crop
+#      preserved, so a low-quality chart never poisons the packet.
+#   3. Finance is the weak domain in the headline (~32-43% vs ~50% datasheets)
+#      and most finance failures are chart-table cross-references — exactly
+#      what chart_to_table was built for.
 _CHART_QUESTION_FAMILIES = frozenset(
-    {"axis_value_interpolation", "candlestick_ohlc_extraction", "curve_axis_reading"}
+    {
+        "axis_value_interpolation",
+        "candlestick_ohlc_extraction",
+        "curve_axis_reading",
+        # Added 2026-05-11 (Phase 1 of harness-growth-sprint):
+        "chart_table_cross_ref",
+        "legend_series_binding",
+        "multi_chart_comparison",
+        "chart_caption_fusion",
+        "chart_footnote_fusion",
+        "dual_axis_disambiguation",
+    }
 )
 _CHART_FIGURE_CLASSES = frozenset({"bar_chart", "line_chart", "candlestick"})
 

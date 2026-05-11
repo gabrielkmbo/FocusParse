@@ -1897,9 +1897,10 @@ async def test_chart_context_crop_dropped_when_target_scale_is_already_visible(
 
 async def test_chart_to_table_fires_only_for_chart_question_families(tmp_path, monkeypatch):
     """chart_to_table runs when (a) the flag is on, (b) plan.question_family ∈
-    {axis_value_interpolation, candlestick_ohlc_extraction, curve_axis_reading}
-    or plan.evidence_types contains chart, and (c) the region has
-    figure_class=bar_chart|line_chart|candlestick (or legacy colon form).
+    `_CHART_QUESTION_FAMILIES` (expanded 2026-05-11 to cover the planner's
+    finance chart-bearing families) or plan.evidence_types contains chart,
+    and (c) the region has figure_class=bar_chart|line_chart|candlestick
+    (or legacy colon form).
 
     All three conditions must hold; otherwise the helper is silent.
     """
@@ -2064,6 +2065,121 @@ async def test_chart_to_table_fires_only_for_chart_question_families(tmp_path, m
     )
     assert chart_calls == []
     assert ev6.packets[0].chart_csv is None
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-11 harness-growth Phase 1: chart_to_table gate expansion
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "family",
+    [
+        # Newly added 2026-05-11 — must fire chart_to_table for these too.
+        "chart_table_cross_ref",
+        "legend_series_binding",
+        "multi_chart_comparison",
+        "chart_caption_fusion",
+        "chart_footnote_fusion",
+        "dual_axis_disambiguation",
+    ],
+)
+async def test_chart_to_table_fires_for_expanded_finance_families(family, tmp_path, monkeypatch):
+    """Phase 1 of harness-growth-sprint expanded `_CHART_QUESTION_FAMILIES`
+    to include the planner's full set of chart-bearing finance families.
+
+    Finance is the weak domain in the headline (32-43% vs 50% datasheets) and
+    most finance failures are chart-table cross-references. The gate stays
+    safe because `_region_is_chart(region)` still has to be true — non-chart
+    regions cannot trigger extraction even if their family is listed.
+    """
+    _install_fake_tools(monkeypatch, inspect_calls=[], text_calls=[])
+
+    chart_calls: list = []
+
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None):
+        from focusparse.tools.chart_to_table import ChartToTableOutput
+
+        chart_calls.append({"crop_ref": inp.crop_ref, "family": family})
+        return ChartToTableOutput(
+            table_csv="x_value,y_value\n0,1\n1,2",
+            confidence=0.6,
+            n_points=2,
+        )
+
+    monkeypatch.setattr(
+        "focusparse.tools.chart_to_table.chart_to_table",
+        _fake_chart_to_table,
+    )
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    chart_region = _region(
+        region_id="chart0",
+        page=1,
+        bbox_norm=(0.10, 0.20, 0.50, 0.60),
+        score=0.9,
+        region_type="picture",
+        supporting_signals=["figure_class=line_chart"],
+    )
+    plan = _plan().model_copy(update={"question_family": family})
+
+    ev = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=[chart_region]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=True,
+    )
+
+    assert len(chart_calls) == 1, f"chart_to_table did not fire for family={family!r}"
+    assert ev.packets[0].chart_csv == "x_value,y_value\n0,1\n1,2"
+
+
+async def test_chart_to_table_skipped_for_non_chart_family_even_with_flag(tmp_path, monkeypatch):
+    """Non-chart families must NOT trigger chart_to_table even when the flag is
+    on. Guards against accidental over-expansion of `_CHART_QUESTION_FAMILIES`."""
+    _install_fake_tools(monkeypatch, inspect_calls=[], text_calls=[])
+    chart_calls: list = []
+
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None):
+        from focusparse.tools.chart_to_table import ChartToTableOutput
+
+        chart_calls.append({"crop_ref": inp.crop_ref})
+        return ChartToTableOutput(table_csv="x,y\n0,0", confidence=0.5, n_points=1)
+
+    monkeypatch.setattr(
+        "focusparse.tools.chart_to_table.chart_to_table",
+        _fake_chart_to_table,
+    )
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    chart_region = _region(
+        region_id="chart0",
+        page=1,
+        bbox_norm=(0.10, 0.20, 0.50, 0.60),
+        score=0.9,
+        region_type="picture",
+        supporting_signals=["figure_class=line_chart"],
+    )
+
+    # `spec_table_cell_retrieval` is a datasheet family with no chart involvement.
+    plan = _plan().model_copy(
+        update={"question_family": "spec_table_cell_retrieval", "evidence_types": ["table"]}
+    )
+
+    ev = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=[chart_region]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=True,
+    )
+    assert chart_calls == [], "chart_to_table fired on a non-chart family — gate was over-expanded"
+    assert ev.packets[0].chart_csv is None
 
 
 # ---------------------------------------------------------------------------
