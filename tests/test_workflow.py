@@ -1957,23 +1957,40 @@ def _hgs_regions(*, top_relevance: float | None = None):
     )
 
 
-def test_should_use_react_inspector_fires_on_fine_detail_family():
-    """Fine-detail families are the primary hard-case trigger — the
-    deterministic top-N tends to pick the wrong region for these."""
-    plan = _hgs_plan(family="axis_value_interpolation")
-    assert _should_use_react_inspector(plan, _hgs_regions()) is True
-
-
 def test_should_use_react_inspector_fires_on_highres_tiny_budget():
+    """Trigger A (Phase 5): highres_tiny budget fires alone — strongest
+    single signal because the planner explicitly flagged tiny-region/fine-
+    detail content."""
     plan = _hgs_plan(family="spec_table_cell_retrieval", budget="highres_tiny")
     assert _should_use_react_inspector(plan, _hgs_regions()) is True
 
 
-def test_should_use_react_inspector_fires_on_low_rerank_relevance():
-    """When the top reranked region has relevance < 0.5, no region is a
-    strong match — picking by detector score alone is risky."""
-    plan = _hgs_plan(family="spec_table_cell_retrieval", budget="easy_local")
+def test_should_use_react_inspector_fires_on_fine_detail_family_AND_low_rerank():
+    """Trigger B (Phase 5): fine-detail family AND low rerank confidence.
+    Both signals must hold — Phase 2 fired on either alone and the slice
+    analysis showed that was net-negative (-3.9pp on the dispatched slice).
+    """
+    plan = _hgs_plan(family="axis_value_interpolation")
+    # AND-gated: family signal + low rerank → fires
     assert _should_use_react_inspector(plan, _hgs_regions(top_relevance=0.3)) is True
+
+
+def test_should_use_react_inspector_skips_fine_detail_family_when_rerank_is_high():
+    """Phase 5 tightening: fine-detail family alone is NOT enough.
+    Previously (Phase 2 OR-gated) this would have fired and lost on the
+    dispatcher slice. Now stays deterministic when the reranker has
+    confidence in a region."""
+    plan = _hgs_plan(family="axis_value_interpolation")
+    assert _should_use_react_inspector(plan, _hgs_regions(top_relevance=0.8)) is False
+
+
+def test_should_use_react_inspector_skips_low_rerank_when_family_is_not_fine_detail():
+    """Phase 5 tightening: low rerank alone is NOT enough. A vanilla
+    family like spec_table_cell_retrieval with low rerank confidence
+    stays on the deterministic path — Phase 4 showed those examples
+    didn't benefit from the LLM dispatcher."""
+    plan = _hgs_plan(family="spec_table_cell_retrieval", budget="easy_local")
+    assert _should_use_react_inspector(plan, _hgs_regions(top_relevance=0.3)) is False
 
 
 def test_should_use_react_inspector_skips_on_easy_examples():
@@ -1983,11 +2000,11 @@ def test_should_use_react_inspector_skips_on_easy_examples():
     assert _should_use_react_inspector(plan, _hgs_regions(top_relevance=0.8)) is False
 
 
-def test_should_use_react_inspector_skips_when_no_rerank_signal():
-    """When the reranker didn't run (relevance=None), don't treat it as
-    "low confidence" — fall through to the other triggers (which also
-    don't fire here)."""
-    plan = _hgs_plan(family="spec_table_cell_retrieval", budget="easy_local")
+def test_should_use_react_inspector_skips_fine_detail_family_when_no_rerank_signal():
+    """Phase 5: fine-detail family alone WITHOUT a rerank signal does
+    NOT fire. The AND gate requires both signals; missing one (either
+    direction) skips."""
+    plan = _hgs_plan(family="axis_value_interpolation", budget="easy_local")
     from focusparse.pipeline.events import RegionCandidate, RegionsEvent
 
     regions = RegionsEvent(
@@ -1996,8 +2013,9 @@ def test_should_use_react_inspector_skips_when_no_rerank_signal():
                 region_id="r0",
                 page=1,
                 bbox_norm=(0.1, 0.2, 0.3, 0.4),
-                region_type="table",
+                region_type="picture",
                 score=0.9,
+                relevance=None,  # reranker didn't run
             )
         ]
     )
@@ -2005,11 +2023,18 @@ def test_should_use_react_inspector_skips_when_no_rerank_signal():
 
 
 def _hard_case_planner_client(family: str = "min_typ_max_disambiguation") -> _FakeClient:
-    """Planner client returning a fine-detail family so hard-case dispatch
-    fires. Used by Phase 2 (2026-05-11 harness-growth) ReAct inspector tests."""
+    """Planner client returning the highres_tiny budget so the Phase 5
+    AND-gated dispatcher fires on the strongest single signal (trigger A)
+    without needing a reranker tier wired into the test harness.
+
+    Phase 5 (2026-05-11 evening) tightened the trigger from OR to AND for
+    the family+rerank pair. The family alone is no longer sufficient; tests
+    that want the react path now use highres_tiny so they don't have to
+    also mock a reranker emitting low-relevance regions.
+    """
     return _FakeClient(
         '{"question_family": "' + family + '", "evidence_types": ["table", "footnote"], '
-        '"budget_class": "easy_local", "routing_policy": "text_first"}',
+        '"budget_class": "highres_tiny", "routing_policy": "text_first"}',
         tokens_in=90,
         tokens_out=20,
     )
