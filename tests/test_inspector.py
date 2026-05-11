@@ -1547,7 +1547,7 @@ async def test_chart_extraction_adds_chart_context_crop_without_multi_scale(tmp_
 
     chart_calls: list = []
 
-    async def _fake_chart_to_table(inp, *, crop_cache_dir=None):
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None, backend_client=None):
         from focusparse.tools.chart_to_table import ChartToTableOutput
 
         chart_calls.append({"crop_ref": inp.crop_ref})
@@ -1616,7 +1616,7 @@ async def test_chart_question_adds_context_crop_without_chart_to_table(tmp_path,
 
     chart_calls: list = []
 
-    async def _fake_chart_to_table(inp, *, crop_cache_dir=None):
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None, backend_client=None):
         chart_calls.append({"crop_ref": inp.crop_ref})
         raise AssertionError("chart_to_table should stay disabled")
 
@@ -1843,7 +1843,7 @@ async def test_chart_context_crop_dropped_when_target_scale_is_already_visible(
         ),
     )
 
-    async def _fake_chart_to_table(inp, *, crop_cache_dir=None):
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None, backend_client=None):
         from focusparse.tools.chart_to_table import ChartToTableOutput
 
         return ChartToTableOutput(table_csv="", confidence=0.0, n_points=0)
@@ -1924,7 +1924,7 @@ async def test_chart_to_table_fires_only_for_chart_question_families(tmp_path, m
         "n_points": 2,
     }
 
-    async def _fake_chart_to_table(inp, *, crop_cache_dir=None):
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None, backend_client=None):
         from focusparse.tools.chart_to_table import ChartToTableOutput
 
         chart_calls.append({"crop_ref": inp.crop_ref})
@@ -2097,7 +2097,7 @@ async def test_chart_to_table_fires_for_expanded_finance_families(family, tmp_pa
 
     chart_calls: list = []
 
-    async def _fake_chart_to_table(inp, *, crop_cache_dir=None):
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None, backend_client=None):
         from focusparse.tools.chart_to_table import ChartToTableOutput
 
         chart_calls.append({"crop_ref": inp.crop_ref, "family": family})
@@ -2143,7 +2143,7 @@ async def test_chart_to_table_skipped_for_non_chart_family_even_with_flag(tmp_pa
     _install_fake_tools(monkeypatch, inspect_calls=[], text_calls=[])
     chart_calls: list = []
 
-    async def _fake_chart_to_table(inp, *, crop_cache_dir=None):
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None, backend_client=None):
         from focusparse.tools.chart_to_table import ChartToTableOutput
 
         chart_calls.append({"crop_ref": inp.crop_ref})

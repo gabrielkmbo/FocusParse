@@ -34,11 +34,49 @@ don't hit it.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+if TYPE_CHECKING:
+    from focusparse.models.base import ModelClient
+
 logger = logging.getLogger(__name__)
+
+# Phase 7 (2026-05-11): the OCR-based extraction pipeline below is robust
+# on synthetic-fixture charts but the Phase 4 n=148 diagnostic showed it
+# returns empty CSV on every real chart it saw (10.5% attempt rate, 0%
+# success). Real finance charts (axis-padded, irregular gridlines, mixed
+# fonts) defeat the heuristic plot-detection + tick-OCR pipeline.
+#
+# `chart_to_table_llm` swaps in a vision-LLM call that reads the chart
+# image directly and emits a CSV. Reuses the mid-tier reranker model so
+# we don't pay a frontier-tier rate on every chart.
+_LLM_CHART_SYSTEM_PROMPT = (
+    "You are a chart-to-data extractor. Given an image of a chart, return "
+    "STRICT JSON with these fields (no markdown, no prose outside the JSON):\n"
+    '  {"csv": "x_value,y_value\\n0.0,5.0\\n1.0,10.0", '
+    '"series_names": ["..."], "x_unit": "...", "y_unit": "...", '
+    '"confidence": 0.85, "n_points": 2}\n'
+    "\n"
+    "Rules:\n"
+    "1. `csv` is a CSV literal with a single header row 'x_value,y_value' "
+    "and one data row per readable data point. Use '.' as decimal "
+    "separator. If the chart has multiple series, emit them concatenated "
+    "with a 'series' column and list names in `series_names`.\n"
+    "2. If you cannot reliably read at least 2 data points from the chart, "
+    "return an empty `csv` (empty string) and confidence=0.0. Do NOT "
+    "hallucinate values.\n"
+    "3. `x_unit` / `y_unit` are the unit strings from axis labels (e.g. "
+    "'V', '%', '2024', 'million'). null when no unit is shown.\n"
+    "4. `confidence` is your self-rated reliability in [0, 1] based on "
+    "chart legibility and your certainty about value extraction.\n"
+    "5. `n_points` is the count of data rows in `csv` (excluding header)."
+)
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
 class ChartToTableInput(BaseModel):
@@ -78,10 +116,123 @@ class ChartToTableOutput(BaseModel):
     n_points: int = Field(default=0, description="Number of (x, y) rows in the CSV.")
 
 
+async def chart_to_table_llm(
+    inp: ChartToTableInput,
+    *,
+    backend_client: ModelClient,
+    crop_cache_dir: Path | None = None,
+) -> ChartToTableOutput:
+    """LLM-based chart-to-table extraction (Phase 7).
+
+    Replaces the OCR-based `chart_to_table` for real charts where the
+    heuristic pipeline collapses (Phase 4 n=148: 10.5% attempt rate, 0%
+    success). Sends the chart image to a vision model with a strict-JSON
+    extraction prompt; falls back gracefully (empty CSV + confidence=0.0)
+    on malformed responses, missing images, or backend errors.
+
+    Args:
+        inp: ChartToTableInput with crop_ref pointing at a chart PNG.
+        backend_client: vision-capable ModelClient. Typically the
+            mid-tier reranker (claude-haiku) — cheap enough at ~$0.005
+            per chart and capable enough to read most chart types.
+        crop_cache_dir: reserved for future cache key.
+
+    Returns:
+        ChartToTableOutput with table_csv populated when the LLM
+        successfully read the chart, empty string otherwise. Never
+        raises (caller treats as advisory).
+    """
+    del crop_cache_dir  # reserved for future cache key
+
+    crop_path = Path(inp.crop_ref)
+    if not crop_path.is_file():
+        logger.warning("chart_to_table_llm: crop_ref does not exist: %s", crop_path)
+        return ChartToTableOutput(table_csv="", confidence=0.0)
+
+    user_prompt = (
+        "Extract this chart's data as CSV. Follow the format described in the system prompt."
+    )
+    if inp.expected_x_axis:
+        user_prompt += (
+            f"\nPlanner hint: x-axis is '{inp.expected_x_axis}' "
+            "(time / numeric / category). Format x_value accordingly."
+        )
+
+    try:
+        response = await backend_client.predict(
+            prompt=user_prompt,
+            images=[crop_path],
+            system=_LLM_CHART_SYSTEM_PROMPT,
+        )
+    except Exception as exc:  # noqa: BLE001 — advisory, never raise
+        logger.warning("chart_to_table_llm: backend call failed (%s)", exc)
+        return ChartToTableOutput(table_csv="", confidence=0.0)
+
+    return _parse_llm_chart_response(response.text or "")
+
+
+def _parse_llm_chart_response(text: str) -> ChartToTableOutput:
+    """Parse the LLM's strict-JSON response. Tolerant of fenced output."""
+    import json
+
+    if not text:
+        return ChartToTableOutput(table_csv="", confidence=0.0)
+    candidate = text.strip()
+    fence = _JSON_FENCE_RE.search(candidate)
+    if fence:
+        candidate = fence.group(1)
+    else:
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = candidate[start : end + 1]
+    try:
+        obj = json.loads(candidate)
+    except json.JSONDecodeError:
+        logger.debug("chart_to_table_llm: JSON parse failed on %r", text[:120])
+        return ChartToTableOutput(table_csv="", confidence=0.0)
+    if not isinstance(obj, dict):
+        return ChartToTableOutput(table_csv="", confidence=0.0)
+
+    csv = obj.get("csv")
+    if not isinstance(csv, str):
+        csv = ""
+    series_names = obj.get("series_names")
+    if not isinstance(series_names, list) or not all(isinstance(s, str) for s in series_names):
+        series_names = []
+    x_unit = obj.get("x_unit")
+    if not isinstance(x_unit, str):
+        x_unit = None
+    y_unit = obj.get("y_unit")
+    if not isinstance(y_unit, str):
+        y_unit = None
+    raw_conf = obj.get("confidence", 0.5)
+    try:
+        confidence = float(raw_conf)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    raw_n = obj.get("n_points", 0)
+    try:
+        n_points = int(raw_n)
+    except (TypeError, ValueError):
+        # Fall back to counting newlines minus the header.
+        n_points = max(0, csv.count("\n") - 1) if csv else 0
+    return ChartToTableOutput(
+        table_csv=csv,
+        series_names=series_names,
+        x_unit=x_unit,
+        y_unit=y_unit,
+        confidence=confidence,
+        n_points=n_points,
+    )
+
+
 async def chart_to_table(
     inp: ChartToTableInput,
     *,
     crop_cache_dir: Path | None = None,
+    backend_client: ModelClient | None = None,
 ) -> ChartToTableOutput:
     """Extract tabular data from a chart crop.
 
@@ -89,7 +240,19 @@ async def chart_to_table(
     table_csv when any pipeline stage fails. Never raises (caller treats
     as advisory). When pytesseract / numpy / PIL is missing, confidence
     drops to 0.0; the deterministic pixel pipeline still tries.
+
+    Phase 7 (2026-05-11): when `backend_client` is supplied, the LLM-based
+    extractor (`chart_to_table_llm`) is called instead of the OCR pipeline.
+    The OCR path is preserved for callers without a vision LLM wired —
+    the Phase 4 diagnostic showed real finance charts always returned
+    empty CSV under the OCR heuristic.
     """
+    if backend_client is not None:
+        return await chart_to_table_llm(
+            inp,
+            backend_client=backend_client,
+            crop_cache_dir=crop_cache_dir,
+        )
     del crop_cache_dir  # reserved for future cache key
 
     try:
