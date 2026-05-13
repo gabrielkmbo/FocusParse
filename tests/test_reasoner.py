@@ -456,6 +456,26 @@ def test_exact_match_format_hint_phase6a_tightening_rules_present() -> None:
     assert "[15:14]=b00" in hint
 
 
+def test_exact_match_format_hint_keeps_explanatory_questions_complete() -> None:
+    hint = _format_hint(
+        "exact_match",
+        question_text=(
+            "Which country had the lowest Composite PMI value, and what is "
+            "that value? Briefly explain how you distinguish it from the "
+            "nearby rows."
+        ),
+    )
+
+    assert "do NOT answer with only a bare label" in hint
+    assert "one concise sentence" in hint
+
+
+def test_exact_match_format_hint_does_not_expand_plain_lookup_questions() -> None:
+    hint = _format_hint("exact_match", question_text="Which register contains HIVECS?")
+
+    assert "do NOT answer with only a bare label" not in hint
+
+
 def test_parse_reasoner_response_canonicalizes_bit_assignments() -> None:
     answer, citations, confidence = _parse_reasoner_response(
         (
@@ -468,6 +488,60 @@ def test_parse_reasoner_response_canonicalizes_bit_assignments() -> None:
     assert answer == "[15:14]=b00, [8:5]=b1111, [4:3]=b11"
     assert citations == ["pkt_000"]
     assert confidence == 0.98
+
+
+def test_parse_reasoner_response_canonicalizes_ppt_when_question_requests_percent() -> None:
+    answer, citations, confidence = _parse_reasoner_response(
+        '{"answer":"0ppt","citations":["pkt_000"],"confidence":0.8}',
+        valid_packet_ids={"pkt_000"},
+        question_text="What incorrect numeric percentage value might you report?",
+    )
+
+    assert answer == "0%"
+    assert citations == ["pkt_000"]
+    assert confidence == 0.8
+
+
+def test_parse_reasoner_response_preserves_ppt_when_question_requests_points() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        '{"answer":"2ppt","citations":[],"confidence":0.8}',
+        valid_packet_ids=set(),
+        question_text="What is the difference in percentage points?",
+    )
+
+    assert answer == "2ppt"
+
+
+def test_parse_reasoner_response_adds_country_value_separator() -> None:
+    answer, citations, confidence = _parse_reasoner_response(
+        '{"answer":"France 49.9","citations":["pkt_000"],"confidence":0.96}',
+        valid_packet_ids={"pkt_000"},
+        question_text="Which country had the lowest PMI value, and what is that value?",
+    )
+
+    assert answer == "France, 49.9"
+    assert citations == ["pkt_000"]
+    assert confidence == 0.96
+
+
+def test_parse_reasoner_response_adds_page_number_phrase() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        '{"answer":"Balance Sheets 52","citations":[],"confidence":0.9}',
+        valid_packet_ids=set(),
+        question_text="Which financial statement and corresponding page number are shown?",
+    )
+
+    assert answer == "Balance Sheets, page 52"
+
+
+def test_parse_reasoner_response_does_not_repunctuate_plain_section_labels() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        '{"answer":"Section 25.2","citations":[],"confidence":0.9}',
+        valid_packet_ids=set(),
+        question_text="Which section contains the EMIF clock control description?",
+    )
+
+    assert answer == "Section 25.2"
 
 
 def test_parse_reasoner_response_keeps_verbose_bit_prose_unchanged() -> None:

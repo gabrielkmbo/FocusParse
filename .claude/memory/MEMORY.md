@@ -131,6 +131,37 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-13 — answer-shape retry + canonicalization smoke
+
+Branch `codex/harness-60-accuracy` adds a narrow answer-shape controller for
+post-localization failures where evidence is correct but the final answer is
+scorer-wrong. `pipeline/reasoner.py` now makes exact-match prompts
+question-aware: bare labels stay preferred for plain lookups, but questions
+that ask for explanation/comparison/support/distinction request a concise
+answer sentence with the minimal supporting relationship/value. The reasoner
+parser also canonicalizes two scorer-shape patterns using only question text:
+`ppt`/`pp`/`percentage points` → `%` when the question asks for percent, and
+missing separators in pair answers such as `France 49.9` →
+`France, 49.9` or `Balance Sheets 52` → `Balance Sheets, page 52`.
+
+`pipeline/workflow.py` now allows a bounded `escalate_reasoner` retry under
+the default evidence-retry budget for two answer-shape cases that do not need
+new evidence: false abstentions where the verifier says cited packets contain
+the answer, and multi-value/raw-table outputs where the verifier says the
+answer did not address the actual question. Retry answer selection now prefers
+a labeled value over a bare value when the question asks for both entity and
+value, e.g. `France, 49.9` over `49.9` even with slightly lower confidence.
+
+Validation: `uv run pytest tests/test_reasoner.py tests/test_workflow.py -q`
+passed (122 tests). Targeted live smokes on HF revision
+`3774c67f8b814392b6d04c939e904f749a3f52eb`:
+`fin-10-K-0008` scored correct via `0ppt` → `0%`, and
+`fin-jpm_gtm_us_daily-0014` scored correct via labeled-value selection +
+canonicalization (`France 49.9` → `France, 49.9`). Offline replay over prior
+full-run outputs estimates a deterministic +2 examples on both
+`evidence-text-run1` and `phase4-run1`; prompt/retry effects need a fresh
+n=148 run before claiming total lift.
+
 ### 2026-05-11 (afternoon) — Phase 4 slice analysis + Phase 5 trigger tightening
 
 Phase 4 single-run n=148 (`results/hf/sprint-2026-05-11/phase4-run1/`)

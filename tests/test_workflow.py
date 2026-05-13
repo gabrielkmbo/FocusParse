@@ -351,6 +351,20 @@ def test_retry_answer_selector_prefers_variable_over_descriptive_fragment():
     )
 
 
+def test_retry_answer_selector_prefers_labeled_value_over_bare_value():
+    incumbent = AnswerEvent(answer="49.9", citations=["pkt_000"], confidence=0.99)
+    candidate = AnswerEvent(answer="France, 49.9", citations=["pkt_000"], confidence=0.96)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Which country within the Developed section had the lowest Composite "
+            "PMI value in the February 2026 column, and what is that value?"
+        ),
+    )
+
+
 def test_variable_question_allows_reasoner_shape_retry():
     verdict = VerdictEvent(
         supported=False,
@@ -369,6 +383,67 @@ def test_variable_question_allows_reasoner_shape_retry():
     question = QuestionEvent(
         example_id="ex",
         question="Which Y-axis variable, VRECT or IOUT, should be used?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
+def test_false_abstention_allows_reasoner_shape_retry_when_evidence_contains_answer():
+    verdict = VerdictEvent(
+        supported=False,
+        reason=(
+            "The cited packets contain the table rows needed to answer the "
+            "question, but the reasoner incorrectly abstained."
+        ),
+        next_action="escalate_reasoner",
+        confidence=0.75,
+    )
+    answer = AnswerEvent(
+        answer="Unanswerable",
+        citations=["pkt_002", "pkt_003"],
+        confidence=0.38,
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="What incorrect numeric percentage value might you report?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
+def test_raw_table_values_allow_reasoner_shape_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason=("The reasoner provided raw table values instead of answering the actual question."),
+        next_action="escalate_reasoner",
+        confidence=0.75,
+    )
+    answer = AnswerEvent(
+        answer="3% 3% 0ppt",
+        citations=["pkt_001"],
+        confidence=0.91,
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="What incorrect numeric percentage value might you report?",
         doc_id="doc",
         pages_available=1,
         answer_type="exact_match",
@@ -1482,6 +1557,51 @@ async def test_loop_allows_single_entity_shape_retry(tmp_path, parser_bench_subm
     answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
     assert len(answer_steps) == 2
     assert "Keep the answer field concise" in reasoner.calls[1]["prompt"]
+
+
+async def test_loop_retries_false_abstention_when_verifier_finds_answer(
+    tmp_path, parser_bench_submodule_present
+):
+    """A cited abstention gets one hinted reasoner retry when evidence is present."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "Unanswerable", "citations": ["pkt_000"], "confidence": 0.38}',
+            '{"answer": "0%", "citations": ["pkt_000"], "confidence": 0.77}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="escalate_reasoner",
+                reason="The cited packet contains the needed percentage value.",
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+    example = _make_example().model_copy(
+        update={
+            "question": "What incorrect numeric percentage value might you report?",
+            "answer_type": "exact_match",
+        }
+    )
+
+    result = await workflow.run(
+        example, [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "0%"
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["evidence_retries_used"] == 0
+    answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
+    assert len(answer_steps) == 2
+    assert "Your previous answer was rejected" in reasoner.calls[1]["prompt"]
 
 
 async def test_loop_abstain_terminates_with_unanswerable(tmp_path, parser_bench_submodule_present):

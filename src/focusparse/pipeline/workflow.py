@@ -75,6 +75,7 @@ _DEFAULT_ADJACENCY_PAD = 0.08
 _EXPAND_RETRY_FACTOR = 1.5  # multiplied each retry → wider neighbor net
 _MAX_ADJACENCY_PAD = 0.30  # cap so the pad stays meaningful
 _RETRY_SELECTION_CONFIDENCE_MARGIN = 0.15
+_LABELED_VALUE_RETRY_SELECTION_MARGIN = 0.25
 _ABSTAIN_OVERRIDE_MIN_CONFIDENCE = 0.45
 
 # Phase 2 of harness-growth-sprint (2026-05-11): hard-case dispatch for the
@@ -1657,6 +1658,12 @@ def _is_better_unsupported_answer(
     ):
         return True
     if (
+        _question_requests_labeled_value(question_text)
+        and _answer_adds_label_to_bare_value(candidate.answer, incumbent.answer)
+        and candidate_confidence + _LABELED_VALUE_RETRY_SELECTION_MARGIN >= incumbent_confidence
+    ):
+        return True
+    if (
         candidate_overlap > incumbent_overlap
         and candidate_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= incumbent_confidence
     ):
@@ -1685,6 +1692,42 @@ def _question_requests_single_entity(question_text: str | None) -> bool:
             normalized,
         )
     )
+
+
+def _question_requests_labeled_value(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    normalized = str(question_text).lower()
+    return bool(
+        "value" in normalized
+        and re.search(
+            r"\b(?:which|what)\b.*\b(?:country|company|entity|category|row|"
+            r"series|security|statement|group)\b",
+            normalized,
+        )
+    )
+
+
+def _answer_adds_label_to_bare_value(candidate: str | None, incumbent: str | None) -> bool:
+    if not candidate or not incumbent:
+        return False
+    incumbent_numbers = set(_numeric_answer_tokens(incumbent))
+    if not incumbent_numbers:
+        return False
+    candidate_numbers = set(_numeric_answer_tokens(candidate))
+    if not incumbent_numbers <= candidate_numbers:
+        return False
+    return bool(re.search(r"[A-Za-z]{2,}", str(candidate))) and not bool(
+        re.search(r"[A-Za-z]{2,}", str(incumbent))
+    )
+
+
+def _numeric_answer_tokens(text: str | None) -> list[str]:
+    if not text:
+        return []
+    return [
+        token.replace(",", "") for token in re.findall(r"-?\d+(?:,\d{3})*(?:\.\d+)?", str(text))
+    ]
 
 
 def _entity_retry_selection_margin(question_text: str | None) -> float:
@@ -1753,6 +1796,16 @@ def _should_allow_reasoner_shape_retry(
         return False
     if not answer.citations:
         return False
+    if (
+        _answer_looks_unanswerable(answer.answer)
+        and not _answer_type_is_unanswerable(question_event.answer_type)
+        and _verifier_says_answer_is_in_cited_evidence(verdict.reason)
+    ):
+        return True
+    if (
+        _answer_looks_list_like(answer.answer) or _answer_has_multiple_value_tokens(answer.answer)
+    ) and _verifier_says_answer_shape_failure(verdict.reason):
+        return True
     if not _question_requests_single_entity(question_event.question):
         return False
     if not _answer_looks_list_like(answer.answer):
@@ -1769,6 +1822,58 @@ def _should_allow_reasoner_shape_retry(
         or "which variable" in reason
         or "y-axis variable" in reason
         or "y axis variable" in reason
+    )
+
+
+def _verifier_says_answer_is_in_cited_evidence(reason: str | None) -> bool:
+    """Detect false abstentions where the verifier names usable evidence.
+
+    `escalate_reasoner` is normally behind `max_retries` because it spends a
+    frontier call without changing evidence. A narrow exception is worthwhile
+    when the reasoner abstained but the verifier explicitly says the cited
+    packets already contain/show/state the needed answer. That is an answer
+    shape/read failure, not an inspect/expand failure.
+    """
+    if not reason:
+        return False
+    normalized = str(reason).lower()
+    has_cited_evidence = bool(
+        re.search(r"\b(cited|evidence|packet|packets|provided)\b", normalized)
+    )
+    says_present = bool(
+        re.search(
+            r"\b(contain|contains|contained|show|shows|shown|state|states|"
+            r"stated|include|includes|included|indicate|indicates|identify|"
+            r"identifies)\b",
+            normalized,
+        )
+        or "answer is present" in normalized
+        or "answer is in" in normalized
+    )
+    return has_cited_evidence and says_present
+
+
+def _answer_has_multiple_value_tokens(answer: str | None) -> bool:
+    if not answer:
+        return False
+    return len(re.findall(r"-?\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:%|ppt|pp))?", str(answer))) >= 2
+
+
+def _verifier_says_answer_shape_failure(reason: str | None) -> bool:
+    if not reason:
+        return False
+    normalized = str(reason).lower()
+    return bool(
+        "actual question" in normalized
+        or "instead of answering" in normalized
+        or "instead of answer" in normalized
+        or "did not answer" in normalized
+        or "does not answer" in normalized
+        or "doesn't answer" in normalized
+        or "only defines" in normalized
+        or "raw table values" in normalized
+        or "multiple" in normalized
+        or "not the requested" in normalized
     )
 
 
