@@ -123,6 +123,7 @@ async def react_inspect(
     auto_zoom: bool = False,
     multi_scale: bool = False,
     chart_to_table_enabled: bool = False,
+    chart_to_table_backend: ModelClient | None = None,
 ) -> ReActInspectorResult:
     """LLM-driven inspector dispatch.
 
@@ -195,6 +196,7 @@ async def react_inspect(
             auto_zoom=auto_zoom,
             multi_scale=multi_scale,
             chart_extraction_active=chart_active,
+            chart_to_table_backend=chart_to_table_backend,
             question_family=plan.question_family,
         )
         packets.append(packet)

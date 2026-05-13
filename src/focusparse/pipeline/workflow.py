@@ -1007,6 +1007,7 @@ class FocusWorkflow:
                 auto_zoom=self.auto_zoom,
                 multi_scale=self.multi_scale_packets,
                 chart_to_table_enabled=self.chart_to_table_enabled,
+                chart_to_table_backend=self._client_for("localizer_rerank"),
             )
             evidence = result.evidence
             n_real_packets = sum(
@@ -1071,6 +1072,12 @@ class FocusWorkflow:
             auto_zoom=self.auto_zoom,
             multi_scale=self.multi_scale_packets,
             chart_to_table_enabled=self.chart_to_table_enabled,
+            # Phase 7 (2026-05-11): swap the OCR-based chart extractor for
+            # a vision-LLM call. localizer_rerank tier is mid (claude-haiku),
+            # cheap enough at ~$0.005/chart and capable enough to read most
+            # finance charts where the OCR pipeline returned empty CSV on
+            # 100% of Phase 4 attempts.
+            chart_to_table_backend=self._client_for("localizer_rerank"),
         )
         n_real_packets = sum(
             1 for p in evidence.packets if p.provenance.tool != "skeleton_inspector_fallback"

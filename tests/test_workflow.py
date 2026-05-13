@@ -648,11 +648,21 @@ async def test_focus_workflow_routes_planner_through_tier_router(
     ]
     result = await workflow.run(example, images, protocol="focus")
 
-    # Router was consulted for every role-scoped stage (planner + rerank +
-    # verifier — `rerank` was added in item 4 and asks for `localizer_rerank`).
+    # Router was consulted for every role-scoped stage:
+    #   - planner (item 1)
+    #   - localizer_rerank (item 4 rerank stage)
+    #   - localizer_rerank again (Phase 7 chart_to_table_backend — even
+    #     when chart extraction doesn't actually fire, the client_for
+    #     resolution happens before the inspector check)
+    #   - verifier
     # Verifier client + rerank client both return None here → those stages
     # stay deterministic; only the planner routes through to a real client.
-    assert tier_router.calls == ["planner", "localizer_rerank", "verifier"]
+    assert tier_router.calls == [
+        "planner",
+        "localizer_rerank",
+        "localizer_rerank",
+        "verifier",
+    ]
     assert len(planner_client.calls) == 1
     plan_steps = [s for s in result.trace.steps if s.stage == "plan"]
     assert len(plan_steps) == 1

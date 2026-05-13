@@ -33,6 +33,7 @@ import hashlib
 import logging
 import re
 from pathlib import Path
+from typing import Any
 
 from focusparse.evidence.packet import CropRef, EvidencePacket, PacketProvenance
 from focusparse.pipeline.events import (
@@ -319,6 +320,7 @@ async def inspect_regions(
     auto_zoom: bool = False,
     multi_scale: bool = False,
     chart_to_table_enabled: bool = False,
+    chart_to_table_backend: Any = None,
 ) -> EvidenceEvent:
     """Produce real `EvidencePacket`s via the tool belt.
 
@@ -376,6 +378,7 @@ async def inspect_regions(
             auto_zoom=auto_zoom,
             multi_scale=multi_scale,
             chart_extraction_active=chart_extraction_active,
+            chart_to_table_backend=chart_to_table_backend,
             chart_context_active=wants_chart,
             question_family=plan.question_family,
             question_text=question.question,
@@ -402,6 +405,7 @@ async def _inspect_one_region(
     auto_zoom: bool = False,
     multi_scale: bool = False,
     chart_extraction_active: bool = False,
+    chart_to_table_backend: Any = None,
     chart_context_active: bool = False,
     question_family: str | None = None,
     question_text: str | None = None,
@@ -723,6 +727,7 @@ async def _inspect_one_region(
             chart_out = await chart_to_table(
                 ChartToTableInput(crop_ref=crop_ref),
                 crop_cache_dir=crop_cache_dir,
+                backend_client=chart_to_table_backend,
             )
             if chart_out.table_csv:
                 chart_csv = chart_out.table_csv

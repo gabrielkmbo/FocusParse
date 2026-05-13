@@ -199,3 +199,134 @@ async def test_chart_to_table_never_raises(tmp_path: Path) -> None:
     out = await chart_to_table(ChartToTableInput(crop_ref=str(bad)))
     assert out.confidence == 0.0
     assert out.table_csv == ""
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 (2026-05-11): LLM-based chart_to_table
+# ---------------------------------------------------------------------------
+
+
+class _StubChartClient:
+    """Records predict() calls + returns a configurable JSON payload."""
+
+    def __init__(self, payload: str) -> None:
+        self.payload = payload
+        self.calls: list[dict] = []
+
+    async def predict(self, prompt, images=None, system=None, max_tokens=None):
+        from focusparse.models.base import ModelResponse
+
+        self.calls.append(
+            {"prompt": prompt, "n_images": len(images or []), "system_len": len(system or "")}
+        )
+        return ModelResponse(
+            text=self.payload, tokens_in=100, tokens_out=20, usd=0.005, latency_ms=300
+        )
+
+
+async def test_chart_to_table_llm_happy_path(tmp_path: Path) -> None:
+    """LLM returns valid JSON → ChartToTableOutput populated correctly."""
+    from focusparse.tools.chart_to_table import chart_to_table_llm
+
+    crop = tmp_path / "chart.png"
+    Image.new("RGB", (200, 200), (255, 255, 255)).save(crop)
+
+    payload = (
+        '{"csv": "x_value,y_value\\n2024,5.2\\n2025,7.1", '
+        '"series_names": ["US"], "x_unit": "year", "y_unit": "%", '
+        '"confidence": 0.82, "n_points": 2}'
+    )
+    client = _StubChartClient(payload)
+    out = await chart_to_table_llm(ChartToTableInput(crop_ref=str(crop)), backend_client=client)
+    assert out.table_csv == "x_value,y_value\n2024,5.2\n2025,7.1"
+    assert out.series_names == ["US"]
+    assert out.x_unit == "year"
+    assert out.y_unit == "%"
+    assert abs(out.confidence - 0.82) < 1e-6
+    assert out.n_points == 2
+    # Backend was called with the image attached
+    assert len(client.calls) == 1
+    assert client.calls[0]["n_images"] == 1
+
+
+async def test_chart_to_table_llm_handles_json_fence(tmp_path: Path) -> None:
+    """LLM wraps JSON in a ```json fence → parser strips it cleanly."""
+    from focusparse.tools.chart_to_table import chart_to_table_llm
+
+    crop = tmp_path / "chart.png"
+    Image.new("RGB", (200, 200), (255, 255, 255)).save(crop)
+
+    payload = '```json\n{"csv": "x_value,y_value\\n0,1", "confidence": 0.5, "n_points": 1}\n```'
+    client = _StubChartClient(payload)
+    out = await chart_to_table_llm(ChartToTableInput(crop_ref=str(crop)), backend_client=client)
+    assert out.table_csv == "x_value,y_value\n0,1"
+    assert out.confidence == 0.5
+
+
+async def test_chart_to_table_llm_handles_malformed_response(tmp_path: Path) -> None:
+    """LLM returns garbage → empty CSV, confidence 0, no crash."""
+    from focusparse.tools.chart_to_table import chart_to_table_llm
+
+    crop = tmp_path / "chart.png"
+    Image.new("RGB", (200, 200), (255, 255, 255)).save(crop)
+
+    client = _StubChartClient("not even close to JSON")
+    out = await chart_to_table_llm(ChartToTableInput(crop_ref=str(crop)), backend_client=client)
+    assert out.table_csv == ""
+    assert out.confidence == 0.0
+
+
+async def test_chart_to_table_llm_handles_backend_exception(tmp_path: Path) -> None:
+    """Backend raises → never propagates; collapses to empty CSV."""
+    from focusparse.tools.chart_to_table import chart_to_table_llm
+
+    class _BrokenClient:
+        async def predict(self, *args, **kwargs):
+            raise RuntimeError("network failure")
+
+    crop = tmp_path / "chart.png"
+    Image.new("RGB", (200, 200), (255, 255, 255)).save(crop)
+
+    out = await chart_to_table_llm(
+        ChartToTableInput(crop_ref=str(crop)), backend_client=_BrokenClient()
+    )
+    assert out.table_csv == ""
+    assert out.confidence == 0.0
+
+
+async def test_chart_to_table_llm_missing_image_returns_empty(tmp_path: Path) -> None:
+    """No image on disk → no backend call, empty output."""
+    from focusparse.tools.chart_to_table import chart_to_table_llm
+
+    client = _StubChartClient('{"csv":"x,y\\n0,0","confidence":0.5,"n_points":1}')
+    out = await chart_to_table_llm(
+        ChartToTableInput(crop_ref=str(tmp_path / "missing.png")), backend_client=client
+    )
+    assert out.table_csv == ""
+    assert out.confidence == 0.0
+    assert client.calls == []  # backend NOT called
+
+
+async def test_chart_to_table_dispatches_to_llm_when_backend_provided(tmp_path: Path) -> None:
+    """The public chart_to_table() routes to chart_to_table_llm when a
+    backend is supplied. The OCR pipeline is skipped entirely."""
+    crop = tmp_path / "chart.png"
+    Image.new("RGB", (200, 200), (255, 255, 255)).save(crop)
+
+    payload = '{"csv":"x_value,y_value\\n0,5","confidence":0.9,"n_points":1}'
+    client = _StubChartClient(payload)
+    out = await chart_to_table(ChartToTableInput(crop_ref=str(crop)), backend_client=client)
+    assert out.table_csv == "x_value,y_value\n0,5"
+    assert client.calls == [client.calls[0]]  # exactly one LLM call
+
+
+async def test_chart_to_table_falls_back_to_ocr_without_backend(tmp_path: Path) -> None:
+    """When no backend_client is provided, the existing OCR pipeline runs.
+    Backward compatibility check — no regression on the historical path."""
+    crop = tmp_path / "chart.png"
+    Image.new("RGB", (200, 200), (255, 255, 255)).save(crop)
+
+    out = await chart_to_table(ChartToTableInput(crop_ref=str(crop)))
+    # OCR may or may not find anything; the contract is "never raises, returns shape".
+    assert isinstance(out.table_csv, str)
+    assert 0.0 <= out.confidence <= 1.0
