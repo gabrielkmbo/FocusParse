@@ -37,6 +37,11 @@ _DEFAULT_REPO = "gabrielbo/parser-bench"
 # HF "validation" == parser-bench "test" (our paper benchmark). See
 # parser-bench's scripts/push_to_hf.py SPLIT_MAP.
 _DEFAULT_SPLIT = "validation"
+_HF_REQUEST_SPLIT_ALIASES = {
+    "dev": "train",
+    "test": "validation",
+    "holdout": "test",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +82,7 @@ def materialize_split(
     # environments that don't have `datasets` installed.
     from datasets import load_dataset
 
+    split = _HF_REQUEST_SPLIT_ALIASES.get(split, split)
     staging_root = Path(staging_root)
     staging_root.mkdir(parents=True, exist_ok=True)
     processed_root = staging_root / "data" / "processed"

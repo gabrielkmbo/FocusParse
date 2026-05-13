@@ -164,6 +164,39 @@ changed rows (`dat-Arm_EE382N_4-0049`,
 slice; this still needs a fresh live run before being claimed as current
 accuracy.
 
+Follow-up on the same branch: `FocusWorkflow._run_expand` now dynamically gates
+the initial `expand_context` call for `tool_set="full"`. +4 still exposes
+`expand_context`/`run_python`, but first-pass expansion requires both
+planner/context intent and a concrete context-region signal; reranker context
+roles alone are recorded as
+`dynamic_initial_expand_signal_without_plan_intent` and passed through. This
+keeps the technique general (no example-id rules) while avoiding the old pattern
+where +4 forced every extra tool. Verifier-directed `expand_context` retries are
+exempt and still run when the controller asks for missing context or visual
+repair.
+
+Live eval caveat: the shared HF layout endpoint was paused
+(`400 BAD_REQUEST: endpoint is paused`) during the fresh limit-12 check, so the
+run could not complete beyond cached rows. Two cached single-example smokes
+validated the policy shape: `dynamic-initial-expand-single-dat0001-run1` scored
+`dat-Arm_EE382N_4-0001` correct with initial expand skipped and verifier
+expansion used later; `dynamic-initial-expand-single-dat0014-run1` scored
+`dat-Arm_EE382N_4-0014` correct with only `inspect_region` selected. Targeted
+verification: `uv run pytest tests/test_workflow.py tests/test_focus_harness.py
+tests/test_inspector.py tests/test_reasoner.py -q` => **221 passed**; Ruff
+check/format clean for the touched workflow/test plus prior sprint files.
+
+The same pass surfaced a live HF split drift: `BenchmarkLoader.iter_split("dev")`
+was requesting an HF split named `dev`, but the Hub now exposes
+`train`/`validation`/`test` (local `dev` == HF `train`). Added request-side
+split aliases in `dataset/loader.py` and `eval/hf_loader.py`; limited streaming
+reads now request finite slices such as `train[:3]` to avoid dangling HF
+background reads. Full verification after the alias fix: `uv run pytest -q` =>
+**890 passed, 1 skipped**. Broad repo Ruff remains blocked by pre-existing
+unrelated findings in `src/focusparse/cli/focus.py`,
+`scripts/rescore_predictions.py`, and `src/focusparse/eval/scoring.py`; targeted
+Ruff for changed files is clean.
+
 ### 2026-05-13 — no-loop full run regression + extraction-gated recovery
 
 Fresh no-loop n=148 run on HF revision

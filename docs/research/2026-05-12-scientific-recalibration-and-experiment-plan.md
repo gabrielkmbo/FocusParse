@@ -186,6 +186,34 @@ only records `expand_context` when it actually adds neighbors or zoomed crops.
 This keeps the thesis aligned with controlled tool use rather than raw tool
 count.
 
+Follow-up orchestration patch: +4 now also treats first-pass `expand_context` as
+a dynamic decision instead of a mandatory stage. The initial expansion gate
+requires two independent signals before adding neighbor crops: planner/context
+intent (`caption`, `footnote`, `legend`, `header`, a context-fusion family,
+etc.) and an actual context-region signal from rerank/layout. Reranker context
+roles alone are not enough, because the matched +2/+4 audit showed broad
+neighbor fanout causing abstentions and wrong answers on schematic and timing
+examples. Verifier-directed `expand_context` retries bypass this gate, so the
+tool remains available when the controller explicitly asks for missing context
+or visual repair.
+
+Endpoint caveat: the HF layout endpoint was paused on 2026-05-13, so the fresh
+limit-12 run could not complete cleanly. A cache-backed partial run aborted
+after two saved predictions and one verifier timeout. Two cached single-example
+checks do provide a narrow mechanism smoke:
+
+- `dynamic-initial-expand-single-dat0001-run1`: `dat-Arm_EE382N_4-0001` scored
+  correct (`60%` under tolerance), skipped initial expansion with
+  `dynamic_initial_expand_signal_without_plan_intent`, then used
+  verifier-directed `expand_context`.
+- `dynamic-initial-expand-single-dat0014-run1`: `dat-Arm_EE382N_4-0014` scored
+  correct (`2 outputs`) and used only `inspect_region`; `expand_context` was
+  available but not selected.
+
+This is not a full accuracy claim. It is a scientific guardrail result: the +4
+condition can now be measured as "tool availability plus policy-controlled use"
+rather than "always spend all extra tools."
+
 ### Latest-Run Interpretation
 
 The recent full-stack branch increases the mechanism signal:

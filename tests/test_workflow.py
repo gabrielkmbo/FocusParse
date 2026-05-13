@@ -25,7 +25,15 @@ import pytest
 
 from focusparse.evidence.packet import EvidencePacket, PacketProvenance
 from focusparse.models.base import ModelResponse
-from focusparse.pipeline.events import AnswerEvent, EvidenceEvent, QuestionEvent, VerdictEvent
+from focusparse.pipeline.events import (
+    AnswerEvent,
+    EvidenceEvent,
+    PlanEvent,
+    QuestionEvent,
+    RegionCandidate,
+    RegionsEvent,
+    VerdictEvent,
+)
 from focusparse.pipeline.workflow import (
     FocusWorkflow,
     SimpleBaselineAgent,
@@ -34,13 +42,16 @@ from focusparse.pipeline.workflow import (
     _focused_retry_evidence,
     _images_by_page,
     _infer_doc_id,
+    _initial_expand_decision,
     _is_better_unsupported_answer,
     _page_number_from_filename,
     _should_allow_reasoner_shape_retry,
     _should_use_react_inspector,
+    _StepCounter,
     _verifier_requests_visual_readability_retry,
     _verifier_target_packet_ids,
 )
+from focusparse.traces.recorder import TrajectoryRecorder
 
 # ---------------------------------------------------------------------------
 # Import-graph sanity (cheap regression catches)
@@ -2110,6 +2121,108 @@ async def test_simple_agent_prompt_includes_boolean_hint(tmp_path, parser_bench_
 # ---------------------------------------------------------------------------
 
 
+def _plan_event(
+    *,
+    question_family: str = "schematic_value_lookup",
+    evidence_types: list[str] | None = None,
+) -> PlanEvent:
+    return PlanEvent(
+        question_family=question_family,
+        evidence_types=evidence_types or ["image"],
+        budget_class="multi_region",
+        routing_policy="hybrid",
+        max_tool_calls=4,
+        max_crops=8,
+        max_vlm_calls=1,
+    )
+
+
+def _region_candidate(
+    *,
+    region_id: str = "r0",
+    region_type: str | None = "picture",
+    bbox: tuple[float, float, float, float] = (0.1, 0.1, 0.4, 0.4),
+    relevance: float | None = None,
+    needed_for: str | None = None,
+    expansion_hints: list[str] | None = None,
+) -> RegionCandidate:
+    return RegionCandidate(
+        region_id=region_id,
+        page=1,
+        bbox_norm=bbox,
+        region_type=region_type,
+        score=0.9,
+        relevance=relevance,
+        needed_for=needed_for,
+        expansion_hints=expansion_hints or [],
+    )
+
+
+def test_initial_expand_decision_skips_without_context_signal():
+    decision = _initial_expand_decision(
+        _plan_event(question_family="schematic_value_lookup", evidence_types=["image"]),
+        RegionsEvent(
+            candidates=[
+                _region_candidate(relevance=0.95, needed_for="primary"),
+                _region_candidate(
+                    region_id="r1",
+                    region_type="text",
+                    bbox=(0.5, 0.1, 0.8, 0.2),
+                    relevance=0.9,
+                ),
+            ]
+        ),
+    )
+
+    assert decision.should_expand is False
+    assert decision.reason == "dynamic_initial_expand_not_needed"
+
+
+def test_initial_expand_decision_runs_on_context_signal():
+    decision = _initial_expand_decision(
+        _plan_event(
+            question_family="figure_caption_cross_ref", evidence_types=["figure", "caption"]
+        ),
+        RegionsEvent(
+            candidates=[
+                _region_candidate(relevance=0.95, needed_for="primary"),
+                _region_candidate(
+                    region_id="r_caption",
+                    region_type="caption",
+                    bbox=(0.1, 0.42, 0.4, 0.48),
+                    relevance=0.82,
+                ),
+            ]
+        ),
+    )
+
+    assert decision.should_expand is True
+    assert decision.reason == "dynamic_initial_expand_context_signal"
+    assert decision.plan_context_types == ("caption",)
+    assert decision.n_scored_context_regions == 1
+
+
+def test_initial_expand_decision_skips_context_signal_without_plan_intent():
+    decision = _initial_expand_decision(
+        _plan_event(question_family="axis_value_interpolation", evidence_types=["figure"]),
+        RegionsEvent(
+            candidates=[
+                _region_candidate(relevance=0.95, needed_for="primary"),
+                _region_candidate(
+                    region_id="r_caption",
+                    region_type="caption",
+                    bbox=(0.1, 0.42, 0.4, 0.48),
+                    relevance=0.82,
+                    needed_for="caption_context",
+                ),
+            ]
+        ),
+    )
+
+    assert decision.should_expand is False
+    assert decision.reason == "dynamic_initial_expand_signal_without_plan_intent"
+
+
 async def test_workflow_rejects_unknown_tool_set(parser_bench_submodule_present):
     """Defensive: tool_set outside {minimal, full} fails fast at construction."""
     if not parser_bench_submodule_present:
@@ -2141,8 +2254,10 @@ async def test_workflow_minimal_tool_set_skips_expand_context(
     assert step.args.get("reason") == "tool_set=minimal"
 
 
-async def test_workflow_full_tool_set_runs_expand_context(tmp_path, parser_bench_submodule_present):
-    """tool_set=full (default) runs the real expand_context with deterministic tier."""
+async def test_workflow_full_tool_set_skips_initial_expand_when_not_needed(
+    tmp_path, parser_bench_submodule_present
+):
+    """tool_set=full exposes +4 tools, but initial expand_context is dynamic."""
     if not parser_bench_submodule_present:
         pytest.skip("parser-bench submodule required for BenchmarkExample")
 
@@ -2161,8 +2276,104 @@ async def test_workflow_full_tool_set_runs_expand_context(tmp_path, parser_bench
     expand_steps = [s for s in result.trace.steps if s.stage == "expand_context"]
     assert len(expand_steps) == 1
     step = expand_steps[0]
-    assert step.tier in ("deterministic", "skeleton")
-    assert step.action != "passthrough"
+    assert step.tier == "skipped"
+    assert step.action == "passthrough"
+    assert step.args.get("reason") == "dynamic_initial_expand_not_needed"
+    assert step.args.get("dynamic_tool_selection") is True
+
+
+async def test_workflow_full_tool_set_runs_initial_expand_on_context_signal(
+    monkeypatch,
+):
+    client = _FakeClient('{"answer": "x", "citations": []}')
+    workflow = FocusWorkflow(backend_client=client, tool_set="full")
+    evidence = EvidenceEvent(
+        packets=[_make_packet(packet_id="pkt_000", page=1, bbox=(0.1, 0.1, 0.4, 0.4))]
+    )
+    regions = RegionsEvent(
+        candidates=[
+            _region_candidate(relevance=0.95, needed_for="primary"),
+            _region_candidate(
+                region_id="r_caption",
+                region_type="caption",
+                bbox=(0.1, 0.42, 0.4, 0.48),
+                relevance=0.82,
+            ),
+        ]
+    )
+
+    async def fake_expand_context(event: EvidenceEvent, **_kwargs: Any) -> EvidenceEvent:
+        packet = event.packets[0].model_copy(
+            update={
+                "linked_crop_refs": ["/tmp/context.png"],
+                "linked_neighbor_types": ["caption"],
+            }
+        )
+        return EvidenceEvent(packets=[packet])
+
+    monkeypatch.setattr("focusparse.pipeline.workflow.expand_context", fake_expand_context)
+    recorder = TrajectoryRecorder(example_id="ex-1", question="q")
+    out = await workflow._run_expand(
+        evidence,
+        regions=regions,
+        pdf_path=None,
+        images_by_page={},
+        adjacency_pad=0.08,
+        recorder=recorder,
+        step_counter=_StepCounter(),
+        plan=_plan_event(
+            question_family="figure_caption_cross_ref",
+            evidence_types=["figure", "caption"],
+        ),
+    )
+
+    assert out.packets[0].linked_neighbor_types == ["caption"]
+    step = recorder.finalize(answer=None).steps[0]
+    assert step.action == "deterministic"
+    assert step.args["dynamic_tool_selection"] is True
+    assert step.args["dynamic_expand_reason"] == "dynamic_initial_expand_context_signal"
+
+
+async def test_workflow_full_tool_set_verifier_retry_can_expand_without_initial_signal(
+    monkeypatch,
+):
+    client = _FakeClient('{"answer": "x", "citations": []}')
+    workflow = FocusWorkflow(backend_client=client, tool_set="full")
+    evidence = EvidenceEvent(
+        packets=[_make_packet(packet_id="pkt_000", page=1, bbox=(0.1, 0.1, 0.4, 0.4))]
+    )
+    regions = RegionsEvent(candidates=[_region_candidate(relevance=0.95, needed_for="primary")])
+
+    async def fake_expand_context(event: EvidenceEvent, **_kwargs: Any) -> EvidenceEvent:
+        packet = event.packets[0].model_copy(
+            update={
+                "linked_crop_refs": ["/tmp/context.png"],
+                "linked_neighbor_types": ["footnote"],
+            }
+        )
+        return EvidenceEvent(packets=[packet])
+
+    monkeypatch.setattr("focusparse.pipeline.workflow.expand_context", fake_expand_context)
+    recorder = TrajectoryRecorder(example_id="ex-1", question="q")
+    out = await workflow._run_expand(
+        evidence,
+        regions=regions,
+        pdf_path=None,
+        images_by_page={},
+        adjacency_pad=0.12,
+        recorder=recorder,
+        step_counter=_StepCounter(),
+        plan=_plan_event(question_family="schematic_value_lookup", evidence_types=["image"]),
+        verifier_reason="missing footnote context",
+        verifier_missing_context=["footnote"],
+        target_packet_ids=["pkt_000"],
+    )
+
+    assert out.packets[0].linked_neighbor_types == ["footnote"]
+    step = recorder.finalize(answer=None).steps[0]
+    assert step.action == "deterministic"
+    assert step.args["dynamic_tool_selection"] is False
+    assert step.args["verifier_missing_context"] == ["footnote"]
 
 
 async def test_workflow_minimal_tool_set_forces_auto_zoom_off(

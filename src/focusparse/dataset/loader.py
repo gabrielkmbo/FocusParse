@@ -15,11 +15,19 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from focusparse._parser_bench import BenchmarkExample
+
+
+_HF_REQUEST_SPLIT_ALIASES = {
+    "dev": "train",
+    "test": "validation",
+    "holdout": "test",
+}
 
 
 class BenchmarkLoader:
@@ -74,18 +82,26 @@ class BenchmarkLoader:
         # Deferred import so `focus status` doesn't pull `datasets` when offline.
         from datasets import load_dataset
 
+        hf_split = _HF_REQUEST_SPLIT_ALIASES.get(split, split)
+        if limit is not None:
+            ds = load_dataset(
+                self.hf_repo,
+                split=f"{hf_split}[:{limit}]",
+                revision=self.revision,
+                streaming=False,
+            )
+            for row in ds:
+                yield _row_to_example(row)
+            return
+
         ds = load_dataset(
             self.hf_repo,
-            split=split,
+            split=hf_split,
             revision=self.revision,
             streaming=True,
         )
-        count = 0
         for row in ds:
             yield _row_to_example(row)
-            count += 1
-            if limit is not None and count >= limit:
-                return
 
     # --- local disk ------------------------------------------------------
 
@@ -138,8 +154,19 @@ def _row_to_example(row: dict[str, Any]) -> BenchmarkExample:
     ):
         value = normalized.get(field_name)
         if isinstance(value, str):
-            try:
+            with suppress(json.JSONDecodeError):
                 normalized[field_name] = json.loads(value)
-            except json.JSONDecodeError:
-                pass
+    page_images = normalized.get("page_images")
+    if isinstance(page_images, list):
+        normalized["page_images"] = [
+            image if isinstance(image, str) else f"hf_embedded_page_{idx:04d}.png"
+            for idx, image in enumerate(page_images)
+            if image is not None
+        ]
+    if "difficulty" not in normalized:
+        normalized["difficulty"] = {
+            "visual": int(normalized.get("difficulty_visual", 1) or 1),
+            "reasoning": int(normalized.get("difficulty_reasoning", 1) or 1),
+            "localization": int(normalized.get("difficulty_localization", 1) or 1),
+        }
     return _BE.model_validate(normalized)

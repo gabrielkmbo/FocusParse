@@ -65,6 +65,70 @@ _DEFAULT_MAX_EVIDENCE_RETRIES = 1
 # inspect/expand packets, so it stays behind the explicit full-loop budget.
 _EVIDENCE_RETRY_ACTIONS = frozenset({"expand_context"})
 
+# +4 should mean "the richer tool belt is available", not "always force
+# every extra tool." The rebaseline-v2 matched +2/+4 slice showed that
+# unconditional first-pass expansion can drown the reasoner in nearby but
+# non-decisive context. These broad signal vocabularies gate only the
+# pre-answer expand_context call; verifier-directed expansion remains
+# available whenever the controller asks for it.
+_EXPAND_CONTEXT_EVIDENCE_TYPES = frozenset(
+    {
+        "axis",
+        "axis_label",
+        "caption",
+        "column_header",
+        "continuation",
+        "footnote",
+        "footer",
+        "header",
+        "legend",
+        "row_header",
+        "section_header",
+        "title",
+        "unit",
+        "x_axis",
+        "y_axis",
+    }
+)
+_EXPAND_CONTEXT_QUESTION_FAMILIES = frozenset(
+    {
+        "chart_caption_fusion",
+        "chart_footnote_fusion",
+        "chart_table_cross_ref",
+        "condition_footnote_fusion",
+        "cross_page_continuation",
+        "figure_caption_cross_ref",
+        "footnote_critical",
+        "legend_series_binding",
+        "table_note_fusion",
+    }
+)
+_EXPAND_CONTEXT_RERANK_ROLES = frozenset(
+    {
+        "axis_reading",
+        "caption_context",
+        "footnote_adjustment",
+        "header_disambiguation",
+        "legend_binding",
+        "table_cell_lookup",
+    }
+)
+_EXPAND_CONTEXT_REGION_TYPES = frozenset(
+    {
+        "axis-label",
+        "axis_label",
+        "caption",
+        "footnote",
+        "legend",
+        "page-footer",
+        "page-header",
+        "section-header",
+        "section_header",
+        "title",
+    }
+)
+_EXPAND_CONTEXT_RERANK_RELEVANCE_THRESHOLD = 0.55
+
 # Knobs the retry loop tweaks per action. Values match (and float as)
 # the localizer's / expander's defaults — initial passes use these,
 # retries tighten or widen them.
@@ -87,6 +151,121 @@ _ABSTAIN_OVERRIDE_MIN_CONFIDENCE = 0.45
 # never", which burned cost on every easy example.
 _HARD_CASE_RELEVANCE_THRESHOLD = 0.5  # top region rerank below this → "hard"
 _HARD_CASE_BUDGET_CLASSES = frozenset({"highres_tiny"})
+
+
+@dataclass(frozen=True)
+class _ExpandDecision:
+    should_expand: bool
+    reason: str
+    plan_context_types: tuple[str, ...]
+    n_context_roles: int = 0
+    n_context_hints: int = 0
+    n_context_regions: int = 0
+    n_scored_context_regions: int = 0
+
+
+def _initial_expand_decision(
+    plan: PlanEvent | None,
+    regions: RegionsEvent,
+) -> _ExpandDecision:
+    """Decide whether the +4 belt should spend initial expand_context.
+
+    This is deliberately signal-based instead of benchmark-id based:
+    planner says the question needs contextual artifacts, or the reranker
+    identifies actual context-bearing regions. Otherwise +4 keeps the tool
+    available for verifier retries but answers from the inspected packets.
+    """
+    if plan is None:
+        plan_context_types: tuple[str, ...] = ()
+        family = ""
+    else:
+        plan_context_types = tuple(
+            sorted(
+                {
+                    item.strip().lower()
+                    for item in plan.evidence_types
+                    if isinstance(item, str)
+                    and item.strip().lower() in _EXPAND_CONTEXT_EVIDENCE_TYPES
+                }
+            )
+        )
+        family = (plan.question_family or "").strip()
+
+    n_context_roles = 0
+    n_context_hints = 0
+    n_context_regions = 0
+    n_scored_context_regions = 0
+    for region in regions.candidates:
+        needed_for = (region.needed_for or "").strip().lower()
+        if needed_for in _EXPAND_CONTEXT_RERANK_ROLES:
+            n_context_roles += 1
+        hints = {
+            hint.strip().lower()
+            for hint in region.expansion_hints
+            if isinstance(hint, str) and hint.strip()
+        }
+        if hints & (_EXPAND_CONTEXT_EVIDENCE_TYPES | _EXPAND_CONTEXT_RERANK_ROLES):
+            n_context_hints += 1
+        region_type = (region.region_type or "").strip().lower()
+        if region_type in _EXPAND_CONTEXT_REGION_TYPES:
+            n_context_regions += 1
+            if (
+                region.relevance is not None
+                and float(region.relevance) >= _EXPAND_CONTEXT_RERANK_RELEVANCE_THRESHOLD
+            ):
+                n_scored_context_regions += 1
+
+    has_plan_context_intent = (
+        bool(plan_context_types) or family in _EXPAND_CONTEXT_QUESTION_FAMILIES
+    )
+    has_region_context_signal = (
+        n_context_roles > 0 or n_context_hints > 0 or n_scored_context_regions > 0
+    )
+    if has_plan_context_intent and has_region_context_signal:
+        return _ExpandDecision(
+            should_expand=True,
+            reason="dynamic_initial_expand_context_signal",
+            plan_context_types=plan_context_types,
+            n_context_roles=n_context_roles,
+            n_context_hints=n_context_hints,
+            n_context_regions=n_context_regions,
+            n_scored_context_regions=n_scored_context_regions,
+        )
+    if has_plan_context_intent and not regions.candidates:
+        return _ExpandDecision(
+            should_expand=False,
+            reason="dynamic_initial_expand_no_regions",
+            plan_context_types=plan_context_types,
+        )
+    if has_region_context_signal:
+        return _ExpandDecision(
+            should_expand=False,
+            reason="dynamic_initial_expand_signal_without_plan_intent",
+            plan_context_types=plan_context_types,
+            n_context_roles=n_context_roles,
+            n_context_hints=n_context_hints,
+            n_context_regions=n_context_regions,
+            n_scored_context_regions=n_scored_context_regions,
+        )
+    if has_plan_context_intent:
+        return _ExpandDecision(
+            should_expand=False,
+            reason="dynamic_initial_expand_no_region_context_signal",
+            plan_context_types=plan_context_types,
+            n_context_roles=n_context_roles,
+            n_context_hints=n_context_hints,
+            n_context_regions=n_context_regions,
+            n_scored_context_regions=n_scored_context_regions,
+        )
+    return _ExpandDecision(
+        should_expand=False,
+        reason="dynamic_initial_expand_not_needed",
+        plan_context_types=plan_context_types,
+        n_context_roles=n_context_roles,
+        n_context_hints=n_context_hints,
+        n_context_regions=n_context_regions,
+        n_scored_context_regions=n_scored_context_regions,
+    )
 
 
 def _should_use_react_inspector(plan: PlanEvent, regions: RegionsEvent) -> bool:
@@ -1165,6 +1344,56 @@ class FocusWorkflow:
                 },
             )
             return evidence
+        initial_dynamic_expand = (
+            verifier_reason is None
+            and verifier_missing_context is None
+            and target_packet_ids is None
+            and not retry_visual_zoom
+        )
+        expand_decision: _ExpandDecision | None = None
+        if initial_dynamic_expand:
+            decision = _initial_expand_decision(plan, regions)
+            expand_decision = decision
+            if not decision.should_expand:
+                recorder.record(
+                    TrajectoryStep(
+                        step_index=step_counter.next(),
+                        stage="expand_context",
+                        tier="skipped",
+                        action="passthrough",
+                        args={
+                            "n_packets": len(evidence.packets),
+                            "reason": decision.reason,
+                            "retry_attempt": retry_attempt,
+                            "adjacency_pad": adjacency_pad,
+                            "plan_context_types": list(decision.plan_context_types),
+                            "n_context_roles": decision.n_context_roles,
+                            "n_context_hints": decision.n_context_hints,
+                            "n_context_regions": decision.n_context_regions,
+                            "n_scored_context_regions": decision.n_scored_context_regions,
+                            "dynamic_tool_selection": True,
+                        },
+                    )
+                )
+                _add_debug_event(
+                    recorder,
+                    stage="expand_context",
+                    event_type="evidence_packets",
+                    retry_attempt=retry_attempt,
+                    payload={
+                        "n_packets": len(evidence.packets),
+                        "reason": decision.reason,
+                        "adjacency_pad": adjacency_pad,
+                        "plan_context_types": list(decision.plan_context_types),
+                        "n_context_roles": decision.n_context_roles,
+                        "n_context_hints": decision.n_context_hints,
+                        "n_context_regions": decision.n_context_regions,
+                        "n_scored_context_regions": decision.n_scored_context_regions,
+                        "dynamic_tool_selection": True,
+                        "packets": [_packet_to_debug(p) for p in evidence.packets],
+                    },
+                )
+                return evidence
         expanded = await expand_context(
             evidence,
             regions=regions,
@@ -1220,6 +1449,15 @@ class FocusWorkflow:
                     "verifier_missing_context": verifier_missing_context or [],
                     "target_packet_ids": target_packet_ids or [],
                     "visual_readability_retry": retry_visual_zoom,
+                    "dynamic_tool_selection": initial_dynamic_expand,
+                    "dynamic_expand_reason": (
+                        expand_decision.reason if expand_decision is not None else None
+                    ),
+                    "plan_context_types": (
+                        list(expand_decision.plan_context_types)
+                        if expand_decision is not None
+                        else []
+                    ),
                 },
             )
         )
@@ -1241,6 +1479,13 @@ class FocusWorkflow:
                 "verifier_missing_context": verifier_missing_context or [],
                 "target_packet_ids": target_packet_ids or [],
                 "visual_readability_retry": retry_visual_zoom,
+                "dynamic_tool_selection": initial_dynamic_expand,
+                "dynamic_expand_reason": (
+                    expand_decision.reason if expand_decision is not None else None
+                ),
+                "plan_context_types": (
+                    list(expand_decision.plan_context_types) if expand_decision is not None else []
+                ),
                 "packets": [_packet_to_debug(p) for p in expanded.packets],
             },
         )
