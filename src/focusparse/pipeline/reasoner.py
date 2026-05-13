@@ -694,6 +694,11 @@ def _canonicalize_question_specific_answer_shape(
         if field:
             return field
 
+    if _question_requests_pipeline_stage_order(question):
+        stage_order = _canonicalize_pipeline_stage_order(cleaned)
+        if stage_order:
+            return stage_order
+
     if _question_requests_exact_section_title(question):
         section_title = _canonicalize_exact_section_title(cleaned)
         if section_title:
@@ -783,6 +788,15 @@ def _question_requests_configuration_value(question: str) -> bool:
 def _question_requests_single_field(question: str) -> bool:
     return "which field" in question and (
         "adjacent" in question or "lower bit" in question or "bit side" in question
+    )
+
+
+def _question_requests_pipeline_stage_order(question: str) -> bool:
+    return (
+        "pipeline stage" in question
+        and "execute" in question
+        and "write" in question
+        and ("order" in question or "relative" in question)
     )
 
 
@@ -982,6 +996,19 @@ def _canonicalize_single_field_answer(answer: str) -> str | None:
     if match:
         return match.group("field")
     return None
+
+
+def _canonicalize_pipeline_stage_order(answer: str) -> str | None:
+    stage_tokens = re.findall(r"\b[A-Z][A-Z0-9_]{2,}\b", answer.upper())
+    if "EXECUTE" not in stage_tokens or "WRITE" not in stage_tokens:
+        return None
+    target_stages = [
+        token for token in stage_tokens if token not in {"EXECUTE", "WRITE", "ARM9TDMI", "ARM7TDMI"}
+    ]
+    unique_targets = list(dict.fromkeys(target_stages))
+    if len(unique_targets) != 1:
+        return None
+    return f"{unique_targets[0]}; it occurs after EXECUTE and before WRITE"
 
 
 def _canonicalize_exact_section_title(answer: str) -> str | None:

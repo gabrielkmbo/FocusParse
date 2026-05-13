@@ -1114,6 +1114,7 @@ def _env_snapshot() -> dict[str, Any]:
             os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         ),
         "has_hf_token": bool(os.environ.get("HF_TOKEN")),
+        "has_layout_modal_token": bool(os.environ.get("LAYOUT_EXTRACTION_V3_MODAL_TOKEN")),
         "tier_overrides": {k: v for k, v in os.environ.items() if k.startswith("FOCUSPARSE_TIER_")},
     }
 

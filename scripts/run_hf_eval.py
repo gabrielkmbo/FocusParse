@@ -446,7 +446,7 @@ def _parse_args() -> argparse.Namespace:
         default=False,
         help=(
             "Skip the focus-agent layout endpoint health check. By default, "
-            "focus evals probe the shared HF layout endpoint once before any "
+            "focus evals probe the configured layout endpoint once before any "
             "model calls so a 503/stub outage cannot produce a misleading "
             "skeleton-region A/B."
         ),
@@ -457,7 +457,7 @@ def _parse_args() -> argparse.Namespace:
         default=False,
         help=(
             "Allow the focus agent to continue with full-page skeleton regions "
-            "when the layout endpoint fails mid-run. Default is strict for HF "
+            "when the layout endpoint fails mid-run. Default is strict for "
             "research evals so endpoint outages abort instead of contaminating "
             "headline numbers."
         ),
@@ -543,7 +543,7 @@ async def _preflight_layout_endpoint(
     timeout_s: float = 30.0,
     detect_layout_func=None,
 ) -> None:
-    """Probe the shared layout endpoint before a focus eval starts.
+    """Probe the configured layout endpoint before a focus eval starts.
 
     Focus accuracy is not comparable when `localizer` falls back to skeleton
     full-page regions. This intentionally bypasses the layout cache so it tests

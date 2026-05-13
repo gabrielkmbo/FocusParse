@@ -91,7 +91,7 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 ## Environment keys (actually used in .env)
 
-- `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` (note: not `GOOGLE_API_KEY`), `HF_TOKEN`, `TESSERACT_CMD`, `VLLM_API_KEY`.
+- `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` (note: not `GOOGLE_API_KEY`), `HF_TOKEN`, `LAYOUT_EXTRACTION_V3_MODAL_TOKEN`, `TESSERACT_CMD`, `VLLM_API_KEY`.
 - `VLLM_API_KEY` exists for self-hosted vLLM / sglang OSS model serving. Use via `openai` backend + `base_url` when we wire OSS models in Phase 5.
 
 ## Training plan (tracked here; not built here)
@@ -114,22 +114,46 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 ## Known sharp edges
 
-- Layout HF endpoint (`jqkx3k3gn4ciymvi…`) returns a **single full-page bbox stub** on failure.
-  Signal: "whole page crops only". Check `HF_TOKEN` + backoff logs first; `tools/layout_detect.py` must raise on stub, not succeed silently.
+- Modal layout endpoint (`llamaindex--layout-v3-triton-layoutv3triton-serve.modal.run`) can return a **single full-page bbox stub** on failure.
+  Signal: "whole page crops only". Check `LAYOUT_EXTRACTION_V3_MODAL_TOKEN` + backoff logs first; `tools/layout_detect.py` must raise on stub, not succeed silently.
 - NFS path uses SSH alias `llama-nfs` — must exist in `~/.ssh/config`. macOS `openrsync` needs `shlex.quote`'d remote paths (lift from parser-bench `scripts/run_generate.py` `_rsync`).
 - HF dataset revision is **not** pinned yet (plan §8.4 deferred). Benchmark is still being hardened (contact-sheet bbox fix + 300 dpi oracle crops per parser-bench slide deck 2026-04-13). Re-run baselines whenever the dataset advances; note advances here with the new revision SHA.
-- Layout endpoint is **shared** with parser-bench. Rate-limit to ≤ 2 req/s; cache layout output on disk under `cache/layout/<doc_sha>.json` so eval sweeps don't burn shared quota.
+- Layout endpoint sweeps should remain polite. Rate-limit to ≤ 2 req/s; cache layout output on disk under `cache/layout/<doc_sha>.json`.
 
 ## Standing decisions (from plan §8)
 
 - **8.1 parser-bench schema dep**: git submodule at `third_party/parser-bench/`.
 - **8.2 visual rerank**: skipped in v1 — FTS-only router. `visual_rerank.py` is a stub seam.
-- **8.3 layout endpoint**: cache-on-disk + rate-limited fallback to shared parser-bench endpoint.
+- **8.3 layout endpoint**: Modal layout-v3 Triton endpoint + cache-on-disk + rate-limited fallback handling.
 - **8.4 HF revision pin**: deferred; `FOCUSPARSE_DATASET_REVISION` env var wired for one-line flip later.
 
 ## Changelog
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
+
+### 2026-05-13 — layout endpoint migrated from HF to Modal
+
+The live layout service moved from the paused HF endpoint
+`jqkx3k3gn4ciymvi.us-east-1.aws.endpoints.huggingface.cloud` to the Modal
+layout-v3 Triton endpoint
+`https://llamaindex--layout-v3-triton-layoutv3triton-serve.modal.run`.
+Runtime config now defaults to the Modal URL and `detect_layout` prefers
+`LAYOUT_EXTRACTION_V3_MODAL_TOKEN`, with `HF_TOKEN` retained only as a temporary
+legacy fallback for older local environments. Keep layout preflight strict for
+research evals so endpoint outages still abort before model calls.
+
+Fresh Modal fixed-slice run:
+`results/hf/sprint-2026-05-13/dynamic-initial-expand-modal-limit12-run1/`
+completed at **50.0%** (6/12), **$0.125** total, **$0.0208/correct**, mean
+latency **2.97s**, page recall **66.7%**, bbox IoU **62.0%**, lazy **16.7%**.
+This is below the cached **58.3%** generalized-dynamic checkpoint. Failure
+mix: verifier timeout on `dat-Arm_EE382N_4-0006`, false abstention on
+`dat-Arm_EE382N_4-0025`, over-answer on stage-order row
+`dat-Arm_EE382N_4-0028`, and value drift on `dat-Arm_EE382N_4-0001`.
+Question-gated parser fix now canonicalizes raw pipeline-stage sequences when
+the question asks for a stage's order relative to `EXECUTE`/`WRITE`; offline
+post-parse scoring of the Modal run moves **6/12 -> 7/12** with exactly one
+changed row (`dat-Arm_EE382N_4-0028`) and no observed other answer changes.
 
 ### 2026-05-13 — generalized tool-orchestration checkpoint, anti-cherry-pick slice
 

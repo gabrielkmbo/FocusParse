@@ -197,10 +197,35 @@ examples. Verifier-directed `expand_context` retries bypass this gate, so the
 tool remains available when the controller explicitly asks for missing context
 or visual repair.
 
-Endpoint caveat: the HF layout endpoint was paused on 2026-05-13, so the fresh
-limit-12 run could not complete cleanly. A cache-backed partial run aborted
-after two saved predictions and one verifier timeout. Two cached single-example
-checks do provide a narrow mechanism smoke:
+Endpoint update: the old HF layout endpoint was paused on 2026-05-13, so the
+operational default moved to the Modal layout-v3 Triton endpoint
+(`LAYOUT_EXTRACTION_V3_MODAL_TOKEN`). Fresh Modal preflight succeeded, and
+`results/hf/sprint-2026-05-13/dynamic-initial-expand-modal-limit12-run1/`
+completed the same fixed first-12 slice at **50.0%** (6/12), **$0.125** total
+cost, **$0.0208/correct**, mean latency **2.97s**, page recall **66.7%**,
+bbox IoU **62.0%**, lazy rate **16.7%**, and tool calls **0.92/example**.
+That is below the cached **58.3%** checkpoint and should be treated as the
+current live number.
+
+The live Modal regression is mixed-cause, not one endpoint story:
+
+- `dat-Arm_EE382N_4-0006` failed through a verifier timeout.
+- `dat-Arm_EE382N_4-0028` had right evidence but over-returned a stage sequence
+  (`MEMORY, EXECUTE, WRITE`) instead of the requested stage plus order.
+- `dat-Arm_EE382N_4-0025` false-abstained on the sign-bit chart/caption.
+- `dat-Arm_EE382N_4-0001` regressed from a tolerated `60%` cached answer to
+  `50%` against gold `70%`.
+
+A follow-up, question-gated parser fix now canonicalizes raw pipeline-stage
+sequences when the question asks for the stage and its order relative to
+`EXECUTE`/`WRITE`. Offline post-parse scoring of the Modal run moves **6/12 ->
+7/12** with exactly one changed row (`dat-Arm_EE382N_4-0028`) and no observed
+other answer changes. This restores the fixed-slice expectation to **58.3%**
+if rerun, but remains deterministic post-processing evidence until a fresh live
+rerun completes.
+
+Earlier cache-backed single-example checks still provide a narrow mechanism
+smoke:
 
 - `dynamic-initial-expand-single-dat0001-run1`: `dat-Arm_EE382N_4-0001` scored
   correct (`60%` under tolerance), skipped initial expansion with

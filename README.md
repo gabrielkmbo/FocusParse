@@ -32,7 +32,8 @@ uv sync --extra dev
 
 # 3. Secrets
 cp .env.example .env
-# Fill in: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, HF_TOKEN
+# Fill in: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY,
+# HF_TOKEN, LAYOUT_EXTRACTION_V3_MODAL_TOKEN
 
 # 4. Smoke test — reproduce parser-bench's single-shot baseline
 uv run focus status                                         # print tier + env

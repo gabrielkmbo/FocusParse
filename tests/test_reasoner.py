@@ -757,6 +757,20 @@ def test_parse_reasoner_response_canonicalizes_single_field_answer() -> None:
     assert answer == "CRn"
 
 
+def test_parse_reasoner_response_canonicalizes_pipeline_stage_order() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        '{"answer":"MEMORY, EXECUTE, WRITE","citations":[],"confidence":0.8}',
+        valid_packet_ids=set(),
+        question_text=(
+            "Based on the provided captions, which pipeline stage appears in ARM9TDMI "
+            "but not in ARM7TDMI, and in which order does it occur relative to the "
+            "EXECUTE and WRITE stages?"
+        ),
+    )
+
+    assert answer == "MEMORY; it occurs after EXECUTE and before WRITE"
+
+
 def test_parse_reasoner_response_canonicalizes_exact_section_title() -> None:
     answer, _citations, _confidence = _parse_reasoner_response(
         (
