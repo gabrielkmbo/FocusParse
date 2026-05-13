@@ -171,6 +171,12 @@ fixed first-12 canonical validation smoke with no retries:
   **7739**, total cost **$0.109** vs **$0.121**, and cost/correct **$0.0156**
   vs **$0.0201** relative to `shape-canonicalization-noloop-full-run1` on those
   rows.
+- Offline answer-shape rescore of that accepted run moves **7/12 -> 9/12** by
+  two question-gated canonicalizers: branch-instruction `normal use` answers
+  drop an extra condition alias before the table's normal-use phrase, and
+  firmware file+size answers truncate trailing initialization prose after the
+  requested filename and size. This is deterministic post-processing evidence,
+  not a fresh live accuracy claim.
 
 The kept orchestration change is deliberately modest: default +4 runs only add
 `chart_context` crops when chart extraction is actually active, rather than for

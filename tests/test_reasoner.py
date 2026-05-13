@@ -610,6 +610,35 @@ def test_parse_reasoner_response_canonicalizes_branch_instruction_use_separator(
     assert answer == "BLE; Signed integer comparison gave less than or equal"
 
 
+def test_parse_reasoner_response_drops_branch_condition_alias_before_normal_use() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"BLE ; Less or equal ; Signed integer comparison gave less than or equal",'
+            '"citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text="Which ARM branch instruction is used, and what is its normal use?",
+    )
+
+    assert answer == "BLE; Signed integer comparison gave less than or equal"
+
+
+def test_parse_reasoner_response_canonicalizes_firmware_file_size() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"ADRV9040_FW.bin, 641 kb; Arm and stream binaries are downloaded next.",'
+            '"citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text=(
+            "Which firmware file must be loaded first, and what is the listed size "
+            "of this firmware file?"
+        ),
+    )
+
+    assert answer == "ADRV9040_FW.bin, 641 kb"
+
+
 def test_parse_reasoner_response_canonicalizes_shared_page_reference() -> None:
     answer, _citations, _confidence = _parse_reasoner_response(
         (

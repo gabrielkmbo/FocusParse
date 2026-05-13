@@ -156,7 +156,13 @@ Validation after rollback: fixed-prefix smoke
 for the older May 7 high-water on that slice. Mean input tokens improved
 **7739 -> 6962**, total cost **$0.121 -> $0.109**, and cost/correct
 **$0.0201 -> $0.0156** versus the prior full-run artifact. This is a
-directional checkpoint, not a full-run claim.
+directional checkpoint, not a full-run claim. A follow-up question-gated answer
+shape patch for branch `normal use` answers and firmware file+size answers
+rescored the same generated answers **7/12 -> 9/12** offline with exactly two
+changed rows (`dat-Arm_EE382N_4-0049`,
+`dat-adrv9040-reference-manual-ug-2192-0032`) and no observed regressions in the
+slice; this still needs a fresh live run before being claimed as current
+accuracy.
 
 ### 2026-05-13 — no-loop full run regression + extraction-gated recovery
 

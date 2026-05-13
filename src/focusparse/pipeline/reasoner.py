@@ -651,6 +651,11 @@ def _canonicalize_question_specific_answer_shape(
         if branch_use:
             return branch_use
 
+    if _question_requests_firmware_file_size(question):
+        firmware = _canonicalize_firmware_file_size(cleaned)
+        if firmware:
+            return firmware
+
     if _question_requests_shared_page_reference(question):
         shared_page = _canonicalize_shared_page_reference(cleaned)
         if shared_page:
@@ -733,6 +738,10 @@ def _question_requests_register_binary_address(question: str) -> bool:
 
 def _question_requests_branch_instruction_use(question: str) -> bool:
     return "branch instruction" in question and "normal use" in question
+
+
+def _question_requests_firmware_file_size(question: str) -> bool:
+    return "firmware file" in question and ("listed size" in question or "size of" in question)
 
 
 def _question_requests_shared_page_reference(question: str) -> bool:
@@ -848,13 +857,31 @@ def _canonicalize_register_binary_address(answer: str) -> str | None:
 
 def _canonicalize_branch_instruction_use(answer: str) -> str | None:
     match = re.match(
-        r"^\s*(?P<instr>[A-Z][A-Z0-9]{1,6})\s*(?:[-—:]\s*)"
+        r"^\s*(?P<instr>[A-Z][A-Z0-9]{1,6})\s*(?:[-—:;]\s*)"
         r"(?P<use>[A-Z].+?)\s*$",
         answer,
     )
     if not match:
         return None
-    return f"{match.group('instr')}; {match.group('use').strip()}"
+    use = re.sub(r"\s*;\s*", "; ", match.group("use").strip())
+    parts = [part.strip() for part in use.split(";") if part.strip()]
+    if len(parts) >= 2:
+        for part in parts[1:]:
+            if re.search(r"\b(?:signed|unsigned)\s+integer\s+comparison\b", part, re.IGNORECASE):
+                use = part
+                break
+    return f"{match.group('instr')}; {use}"
+
+
+def _canonicalize_firmware_file_size(answer: str) -> str | None:
+    match = re.search(
+        r"\b(?P<file>[A-Za-z0-9_.-]+\.bin)\b\s*,?\s*"
+        r"(?P<size>\d+(?:\.\d+)?)\s*(?P<unit>kB|KB|kb|MB|mb)\b",
+        answer,
+    )
+    if not match:
+        return None
+    return f"{match.group('file')}, {match.group('size')} {match.group('unit').lower()}"
 
 
 def _canonicalize_shared_page_reference(answer: str) -> str | None:
