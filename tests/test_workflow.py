@@ -17,6 +17,7 @@ Two layers of coverage:
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -397,6 +398,38 @@ def test_variable_question_allows_reasoner_shape_retry():
     )
 
 
+def test_expand_context_shape_failure_allows_answer_only_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason=(
+            "The question asks for one exact title, but the answer lists multiple "
+            "section headers instead of the requested title."
+        ),
+        next_action="expand_context",
+        confidence=0.75,
+    )
+    answer = AnswerEvent(
+        answer="5 Device Comparison Table; 6 Pin Configuration and Functions",
+        citations=["pkt_000"],
+        confidence=0.86,
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="What is the exact title of the table that compares device specifications?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="expand_context",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
 def test_false_abstention_allows_reasoner_shape_retry_when_evidence_contains_answer():
     verdict = VerdictEvent(
         supported=False,
@@ -415,6 +448,34 @@ def test_false_abstention_allows_reasoner_shape_retry_when_evidence_contains_ans
     question = QuestionEvent(
         example_id="ex",
         question="What incorrect numeric percentage value might you report?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
+def test_uncited_false_abstention_allows_retry_when_verifier_says_evidence_available():
+    verdict = VerdictEvent(
+        supported=False,
+        reason=(
+            "The reasoner declined to answer despite sufficient evidence being available "
+            "in the packets. Pkt_001 clearly specifies bits [15:14]."
+        ),
+        next_action="escalate_reasoner",
+        confidence=0.75,
+    )
+    answer = AnswerEvent(answer="Unanswerable", citations=[], confidence=0.16)
+    question = QuestionEvent(
+        example_id="ex",
+        question="Which values should you program into bits [15:14], [8:5], and [4:3]?",
         doc_id="doc",
         pages_available=1,
         answer_type="exact_match",
@@ -1559,6 +1620,56 @@ async def test_loop_allows_single_entity_shape_retry(tmp_path, parser_bench_subm
     assert "Keep the answer field concise" in reasoner.calls[1]["prompt"]
 
 
+async def test_loop_reroutes_expand_context_shape_failure_to_answer_only_retry(
+    tmp_path, parser_bench_submodule_present
+):
+    """Shape failures should not widen context and add more noise."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "UK and US", "citations": ["pkt_000"], "confidence": 0.86}',
+            '{"answer": "Germany", "citations": ["pkt_000"], "confidence": 0.74}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="expand_context",
+                reason=(
+                    "The question asks for a single country, but the answer lists "
+                    "multiple countries instead of the requested country."
+                ),
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+    example = _make_example().model_copy(
+        update={
+            "question": "Which country's 10-year government bond yield changed least?",
+            "answer": "Germany",
+            "answer_type": "exact_match",
+        }
+    )
+
+    result = await workflow.run(
+        example, [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "Germany"
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["evidence_retries_used"] == 0
+    stage_counts = Counter(s.stage for s in result.trace.steps)
+    assert stage_counts["expand_context"] == 1
+    assert stage_counts["answer"] == 2
+    assert "Your previous answer was rejected" in reasoner.calls[1]["prompt"]
+
+
 async def test_loop_retries_false_abstention_when_verifier_finds_answer(
     tmp_path, parser_bench_submodule_present
 ):
@@ -1602,6 +1713,56 @@ async def test_loop_retries_false_abstention_when_verifier_finds_answer(
     answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
     assert len(answer_steps) == 2
     assert "Your previous answer was rejected" in reasoner.calls[1]["prompt"]
+
+
+async def test_loop_retries_uncited_false_abstention_when_verifier_finds_answer(
+    tmp_path, parser_bench_submodule_present
+):
+    """An uncited abstention can retry when verifier says packets contain the answer."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "Unanswerable", "citations": [], "confidence": 0.16}',
+            (
+                '{"answer": "[15:14] b00 = Secure or Non-secure world. '
+                '[8:5] b1111. [4:3] b11.", "citations": ["pkt_000"], "confidence": 0.78}'
+            ),
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="escalate_reasoner",
+                reason=(
+                    "The reasoner declined to answer despite sufficient evidence being "
+                    "available in the packets. Pkt_000 clearly specifies the fields."
+                ),
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+    example = _make_example().model_copy(
+        update={
+            "question": "Which values should you program into bits [15:14], [8:5], and [4:3]?",
+            "answer": "[15:14]=b00, [8:5]=b1111, [4:3]=b11",
+            "answer_type": "exact_match",
+        }
+    )
+
+    result = await workflow.run(
+        example, [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "[15:14]=b00, [8:5]=b1111, [4:3]=b11"
+    assert result.telemetry["retries_used"] == 1
+    answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
+    assert len(answer_steps) == 2
 
 
 async def test_loop_abstain_terminates_with_unanswerable(tmp_path, parser_bench_submodule_present):

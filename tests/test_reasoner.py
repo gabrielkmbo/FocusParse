@@ -556,6 +556,244 @@ def test_parse_reasoner_response_keeps_verbose_bit_prose_unchanged() -> None:
     assert "because" in answer
 
 
+def test_parse_reasoner_response_canonicalizes_bit_value_mentions_for_bit_questions() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"[15:14] b00 = Watchpoint matches in Secure or Non-secure world. '
+            '[8:5] b1111. [4:3] b11.","citations":[],"confidence":0.9}'
+        ),
+        valid_packet_ids=set(),
+        question_text=(
+            "Which values should you program into bits [15:14], [8:5], and [4:3] of the WCR?"
+        ),
+    )
+
+    assert answer == "[15:14]=b00, [8:5]=b1111, [4:3]=b11"
+
+
+def test_parse_reasoner_response_canonicalizes_bit_field_lookup_to_range() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        '{"answer":"[31:16] - Reserved. RAZ.","citations":[],"confidence":0.8}',
+        valid_packet_ids=set(),
+        question_text=(
+            "Which bit fields in the Auxiliary Feature Register 0 are guaranteed "
+            "to always read as zero?"
+        ),
+    )
+
+    assert answer == "[31:16]"
+
+
+def test_parse_reasoner_response_canonicalizes_register_binary_address() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        '{"answer":"DSMCR — b000, b1011","citations":[],"confidence":0.8}',
+        valid_packet_ids=set(),
+        question_text=(
+            "What is the abbreviation of the register, and what binary address "
+            "(Opcode_2 and CRm) would you use to access it? Provide both."
+        ),
+    )
+
+    assert answer == "DSMCR, Opcode_2: b000, CRm: b1011"
+
+
+def test_parse_reasoner_response_canonicalizes_branch_instruction_use_separator() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"BLE — Signed integer comparison gave less than or equal",'
+            '"citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text="Which ARM branch instruction is used, and what is its normal use?",
+    )
+
+    assert answer == "BLE; Signed integer comparison gave less than or equal"
+
+
+def test_parse_reasoner_response_canonicalizes_shared_page_reference() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"Cache type register — Cache type register on page B3-10; '
+            'Tightly Coupled Memory (TCM) type register — TCM type register on page B3-10",'
+            '"citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text="Which two register types share the same page reference?",
+    )
+
+    assert (
+        answer == "Cache type register and Tightly Coupled Memory (TCM) type register; page B3-10"
+    )
+
+
+def test_parse_reasoner_response_canonicalizes_trading_symbol_parentheses() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"Class A Common Stock, $0.001 par value — GOOGL",'
+            '"citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text="Which row appears first and what is its trading symbol?",
+    )
+
+    assert answer == "Class A Common Stock, $0.001 par value (GOOGL)"
+
+
+def test_parse_reasoner_response_canonicalizes_terminal_toc_page_number() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"25.2.1 EMIF Clock Control................................2806",'
+            '"citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text="Which page number should you refer to for EMIF Clock Control?",
+    )
+
+    assert answer == "2806"
+
+
+def test_parse_reasoner_response_canonicalizes_difference_hex_value() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"When HIVECS is 0 the vector is 0x00000000, and when HIVECS '
+            'is 1 the vector is 0xFFFF0000. The difference is 0xFFFF0000.",'
+            '"citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text="What is the difference in the Prefetch vector address?",
+    )
+
+    assert answer == "0xFFFF0000"
+
+
+def test_parse_reasoner_response_canonicalizes_single_returned_hex_value() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        '{"answer":"Return the manufacturer ID number : 0x00h","citations":[],"confidence":0.8}',
+        valid_packet_ids=set(),
+        question_text="What value will be returned by the MANUFACTURER_ID register?",
+    )
+
+    assert answer == "0x00h"
+
+
+def test_parse_reasoner_response_canonicalizes_difference_hex_without_is() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"VCR[0]=1, HIVECS 0 0x00000000, HIVECS 1 0xFFFF0000, '
+            'difference 0xFFFF0000.","citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text="What is the difference in the Prefetch vector address?",
+    )
+
+    assert answer == "0xFFFF0000"
+
+
+def test_parse_reasoner_response_canonicalizes_panel_asset_class_answer() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"C. FX bonds, because its VIX coefficient is closest to zero.",'
+            '"citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text="Which asset class would exhibit the smallest estimated change?",
+    )
+
+    assert answer == "FX bonds"
+
+
+def test_parse_reasoner_response_canonicalizes_configuration_value() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"Push-Pull Driver; SCKOR Output Push-Pull Driver, '
+            'WSOR Output Push-Pull Driver","citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text="Which configuration value from the table should you use?",
+    )
+
+    assert answer == "Push-Pull Driver"
+
+
+def test_parse_reasoner_response_canonicalizes_single_field_answer() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"CRn, with CRm and opcode2 providing additional register decode.",'
+            '"citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text="Which field is immediately adjacent to the L field on its lower bit side?",
+    )
+
+    assert answer == "CRn"
+
+
+def test_parse_reasoner_response_canonicalizes_exact_section_title() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"5 Device Comparison Table; 6 Pin Configuration and Functions; '
+            'Pin Functions","citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text="What is the exact title of the table that compares device specifications?",
+    )
+
+    assert answer == "5 Device Comparison Table"
+
+
+def test_parse_reasoner_response_canonicalizes_stock_class_par_value() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"Class A Common Stock, $0.001 par value GOOGL Nasdaq Stock Market LLC",'
+            '"citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text=(
+            "Which class of Alphabet Inc. stock is listed under the symbol GOOGL, "
+            "and what is its par value?"
+        ),
+    )
+
+    assert answer == "Class A Common Stock, $0.001 par value"
+
+
+def test_parse_reasoner_response_canonicalizes_gain_abbreviation() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        '{"answer":"G = 24","citations":[],"confidence":0.8}',
+        valid_packet_ids=set(),
+        question_text="For which gain setting does the device exhibit the highest maximum?",
+    )
+
+    assert answer == "Gain = 24"
+
+
+def test_parse_reasoner_response_canonicalizes_accounting_parentheses() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        '{"answer":"$(40) million","citations":[],"confidence":0.8}',
+        valid_packet_ids=set(),
+        question_text="What is the net impact on income if you combine the two amounts?",
+    )
+
+    assert answer == "-40"
+
+
+def test_parse_reasoner_response_canonicalizes_requested_toc_page_number() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"25.2.1 EMIF Clock Control........................2806; '
+            '26.3.2 CLB Input Selection........................2879",'
+            '"citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text=(
+            "Which page number should you refer to if you want information specifically "
+            "about 'EMIF Clock Control'?"
+        ),
+    )
+
+    assert answer == "2806"
+
+
 # ---------------------------------------------------------------------------
 # Path A: linked_neighbor_types appear in the descriptor
 # ---------------------------------------------------------------------------

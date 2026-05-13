@@ -116,6 +116,46 @@ newer `run.json` identifies as `tier_sha8`, not a pinned HF dataset revision.
 `per_example.jsonl`, so it should be treated as incomplete and excluded from
 claims.
 
+### 3.1 May 13 No-Loop Regression And Extraction Recovery
+
+The follow-up no-loop n=148 run on the pinned HF revision
+`3774c67f8b814392b6d04c939e904f749a3f52eb` landed at:
+
+- Artifact: `results/hf/sprint-2026-05-13/shape-canonicalization-noloop-full-run1/`
+- Overall accuracy: **41.9%** (62/148)
+- Datasheet accuracy: **47.5%**
+- Finance accuracy: **33.3%**
+- Page recall: **88.2%**
+- Bbox IoU: **84.8%**
+- Lazy rate: **7.4%**
+- Total cost: **$2.193**
+- Cost/correct: **$0.035**
+- Mean latency: **3.80s**
+
+This is a negative result. It underperforms both the May 7 strict evidence-text
+high-water (52.7%) and the May 11 phase4/phase5 runs. The optimistic replay
+hypothesis that no-loop plus answer-shape canonicalization would reach 60% is
+not supported by a fresh live run.
+
+The mechanism analysis is still useful: most wrong rows did not fail because
+the harness never found the relevant page/region. They failed after good
+localization, when the answerer copied too much nearby evidence, included panel
+letters or explanations, preserved accounting notation the numeric scorer does
+not accept, or merged similar table-of-contents lines. A question-gated
+extraction patch over the completed run's generated answers recovers **+12
+examples with 0 offline regressions**, moving the same answers from **62/148
+to 74/148 (50.0%)** under the current scorer. This is deterministic
+post-processing evidence, not a fresh live result.
+
+The next experiment should therefore test the patched extraction path in a
+fresh run and separately test smarter tool orchestration for the remaining
+errors: chart/table rows that still need `chart_to_table`, `run_python`
+auto-zoom, or a fixed-evidence reasoner retry instead of broad context
+expansion. The current branch implements the first orchestration correction:
+when the verifier asks for `expand_context` but its reason says the failure is
+answer shape/listing rather than missing evidence, the workflow reroutes to an
+answer-only retry over the same packets.
+
 ### Latest-Run Interpretation
 
 The recent full-stack branch increases the mechanism signal:

@@ -625,19 +625,22 @@ class FocusWorkflow:
             # can't retry, surface the current answer + flag exhaustion so
             # the trace shows the verifier wasn't satisfied.
             retry_budget = self._retry_budget_for_action(action)
-            if _should_allow_reasoner_shape_retry(
+            answer_only_shape_retry = _should_allow_reasoner_shape_retry(
                 action=action,
                 answer=answer_event,
                 verdict=verdict,
                 question_event=question_event,
                 max_evidence_retries=self.max_evidence_retries,
-            ):
+            )
+            if answer_only_shape_retry:
                 retry_budget = max(retry_budget, self.max_evidence_retries)
             if retries_used >= retry_budget:
                 loop_terminated = "exhausted"
                 break
 
             retries_used += 1
+            if answer_only_shape_retry:
+                action = "escalate_reasoner"
             if action in _EVIDENCE_RETRY_ACTIONS:
                 evidence_retries_used += 1
 
@@ -1790,11 +1793,9 @@ def _should_allow_reasoner_shape_retry(
     question asks for one entity, and the answer is list-like; the verifier
     hint usually fixes that without another inspect/expand mutation.
     """
-    if max_evidence_retries <= 0 or action != "escalate_reasoner":
+    if max_evidence_retries <= 0 or action not in {"escalate_reasoner", "expand_context"}:
         return False
     if verdict.supported:
-        return False
-    if not answer.citations:
         return False
     if (
         _answer_looks_unanswerable(answer.answer)
@@ -1802,6 +1803,8 @@ def _should_allow_reasoner_shape_retry(
         and _verifier_says_answer_is_in_cited_evidence(verdict.reason)
     ):
         return True
+    if not answer.citations:
+        return False
     if (
         _answer_looks_list_like(answer.answer) or _answer_has_multiple_value_tokens(answer.answer)
     ) and _verifier_says_answer_shape_failure(verdict.reason):
@@ -1844,11 +1847,13 @@ def _verifier_says_answer_is_in_cited_evidence(reason: str | None) -> bool:
         re.search(
             r"\b(contain|contains|contained|show|shows|shown|state|states|"
             r"stated|include|includes|included|indicate|indicates|identify|"
-            r"identifies)\b",
+            r"identifies|specify|specifies|specified)\b",
             normalized,
         )
         or "answer is present" in normalized
         or "answer is in" in normalized
+        or "sufficient evidence" in normalized
+        or "evidence being available" in normalized
     )
     return has_cited_evidence and says_present
 

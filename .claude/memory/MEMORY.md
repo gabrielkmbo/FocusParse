@@ -131,6 +131,41 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-13 — no-loop full run regression + extraction-gated recovery
+
+Fresh no-loop n=148 run on HF revision
+`3774c67f8b814392b6d04c939e904f749a3f52eb` completed at
+`results/hf/sprint-2026-05-13/shape-canonicalization-noloop-full-run1/`:
+overall **41.9%** (62/148), datasheet **47.5%**, finance **33.3%**,
+page_recall **88.2%**, bbox_iou **84.8%**, lazy **7.4%**, total cost
+**$2.193**, **$0.035/correct**, mean latency **3.80s**. This is a negative
+result versus the 2026-05-07 strict evidence-text high-water (**52.7%**,
+**$1.525**, **$0.0195/correct**) and falsifies the optimistic "no-loop +
+existing canonicalizers reaches 60%" hypothesis as a fresh live claim.
+
+Mechanism: the degradation is mostly downstream of localization. Among wrong
+rows, most still cite the right page/region; failures cluster around broad
+answer extraction, over-copied neighbor context, panel letters/explanations,
+accounting notation, TOC multi-line answers, and verifier timeouts. The run
+also showed the selected tool sequence collapsing to `inspect_region ->
+expand_context`, while hidden subtool evidence was not enough to prevent
+answer-shape drift.
+
+Patch on branch `codex/harness-60-accuracy`: re-applied the missing
+question-gated reasoner canonicalizers and added current-run shapes for
+asset-class panel labels, configuration values, single bit fields, exact
+section/table titles, stock class + par value, gain abbreviation, accounting
+parentheses, requested TOC page number, and hex differences without "is".
+Also restored the uncited false-abstention retry allowance when the verifier
+says sufficient evidence is already present, and reroutes verifier
+`expand_context` actions to answer-only retry when the verifier reason is
+actually an answer-shape failure. Offline rescore of the completed run's
+generated answers moves **62/148 -> 74/148 (50.0%)**, **+12 examples,
+0 regressions**; this is deterministic post-processing evidence, not a fresh
+live eval. Validation: `uv run pytest tests/test_reasoner.py
+tests/test_workflow.py -q` passed (144 tests), ruff check passed, and ruff
+format check passed on the touched files.
+
 ### 2026-05-13 — answer-shape retry + canonicalization smoke
 
 Branch `codex/harness-60-accuracy` adds a narrow answer-shape controller for
