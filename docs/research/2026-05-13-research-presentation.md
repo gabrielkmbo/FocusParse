@@ -6,8 +6,11 @@ a single benchmark revision (`3774c67`), and a single agentic protocol
 (`agentic_multi_page`).
 
 Date: 2026-05-13
-Status: results assembled from the harness-growth sprint (`main` HEAD + the
-Phase 4–6a branches). Single-replicate runs; variance discussion in §10.
+Status: results assembled from the harness-growth sprint. Cross-method numbers
+(Slide 5–14) are from `results/hf/headline-v1-rebaseline-v2/` on `main` HEAD.
+Within-harness ablation (Slide 15) covers Phases 4 / 5 / 6a / 7 single-run
+A/Bs plus the main-stack (all phases on, n=148, `results/hf/sprint-2026-05-13/
+main-stack-run1/`). Single-replicate; variance discussion in Slide 16.
 
 ---
 
@@ -532,26 +535,53 @@ The harness-growth sprint tested four mechanism-targeted changes against
 the rebaseline harness +4 (43.9% overall). All ran on the same n=148
 revision with the same reasoner model.
 
-| Run                                                          | Overall acc | Datasheet |   Finance | Note                                                 |
-| ------------------------------------------------------------ | ----------: | --------: | --------: | ---------------------------------------------------- |
-| rebaseline-v2 harness +4                                     |       43.9% |     49.5% |     31.9% | baseline                                             |
-| Phase 4 (chart_gate + per-role expander + ReAct-dispatch on) |   **48.0%** |     52.5% | **43.2%** | +4.1pp overall, +11.3pp finance                      |
-| Phase 5 (Phase 4 + AND-gated dispatcher)                     |       45.3% |     50.5% |     41.9% | -2.7pp from P4 (within noise)                        |
-| Phase 6a (Phase 4 + exact-match prompt tightening)           |       48.6% | **59.8%** |     31.8% | +0.6pp overall but +7.3pp datasheet, -11.4pp finance |
+| Run                                                          | Overall acc | Datasheet | Finance | $/correct | Note                                                 |
+| ------------------------------------------------------------ | ----------: | --------: | ------: | --------: | ---------------------------------------------------- |
+| rebaseline-v2 harness +4                                     |       43.9% |     49.5% |   31.9% |   $0.0176 | baseline                                             |
+| Phase 4 (chart_gate + per-role expander + ReAct-dispatch on) |       48.0% |     52.5% |   43.2% |   $0.0249 | +4.1pp overall, +11.3pp finance                      |
+| Phase 5 (Phase 4 + AND-gated dispatcher)                     |       45.3% |     50.5% |   41.9% |   $0.0266 | -2.7pp from P4 (within noise)                        |
+| Phase 6a (Phase 4 + exact-match prompt tightening)           |       48.6% | **59.8%** |   31.8% |   $0.0243 | +0.6pp overall but +7.3pp datasheet, -11.4pp finance |
+| **Main stack (P4 + P5 + P6a + P7 LLM chart)**                |   **49.3%** |     56.7% |   40.9% |   $0.0259 | **+5.4pp vs rebaseline; +1.3pp vs P4**               |
 
-Two findings worth emphasizing:
+Mechanism check on the main stack:
 
-1. **The Phase 4 stack** (gate expansion + per-role expander gating
-   - LLM dispatcher) is the strongest single-run harness configuration
-     we have, +4.1pp overall and +11.3pp finance over rebaseline.
+- Dispatcher fires on 7/148 examples (4.7%) — Phase 5 AND-gating
+  successfully tightened from Phase 4's 34.5% firing rate.
+- `chart_csv` populated on **97/148 examples (66%)** — Phase 7's
+  LLM-based chart extractor works on real finance charts, where the
+  OCR pipeline produced 0/148 in Phase 4.
+- Pairwise vs Phase 4: helped 11 examples, hurt 9, net +2.
+- Pairwise vs rebaseline-v2: helped 19 examples, hurt 11, net +8.
+
+Three findings worth emphasizing:
+
+1. **The main stack is the strongest single-run harness configuration we
+   have**: 49.3% overall, 56.7% datasheet, 40.9% finance, +5.4pp vs
+   rebaseline. The stack composes Phase 6a's datasheet gain (+7.3pp)
+   with Phase 7's chart_csv-driven finance recovery, landing midway
+   between Phase 4 (43.2% fin) and Phase 6a (31.8% fin) on finance and
+   between Phase 4 (52.5% ds) and Phase 6a (59.8% ds) on datasheets.
+
 2. **Phase 6a is a striking domain-divergent result.** Tightening the
    reasoner's exact-match prompt produced **+7.3pp on datasheets**
    (52.5% → 59.8%) and **−11.4pp on finance** (43.2% → 31.8%). The
-   same prompt change helps one domain and hurts the other. This
-   suggests two different bottlenecks per domain (datasheets have
-   more scoring-format failures; finance has more reasoning failures)
-   — and that a single global prompt cannot optimize both at once.
-   Per-domain prompt routing is a candidate next experiment.
+   same prompt change helps one domain and hurts the other. The stack
+   shows finance partially recovers when Phase 7's chart_csv is
+   present, but the prompt rule is still net-negative for finance
+   tables/charts. This suggests two different bottlenecks per domain
+   (datasheets have more scoring-format failures; finance has more
+   reasoning-on-charts failures) — and that a single global prompt
+   cannot optimize both at once. **Per-domain prompt routing** is the
+   clean candidate next experiment.
+
+3. **Phase 7 (chart_to_table LLM swap) is mechanism-decisive.** Going
+   from 0/148 → 97/148 `chart_csv` populated is the largest single
+   mechanism-instrument move of the sprint. The accuracy lift is more
+   modest (~+1pp over Phase 4) because chart extraction matters most
+   on the ~30 finance chart-bearing examples, and several of those
+   recover the reasoning even without CSV — but on examples where the
+   reasoner cannot read the chart visually, CSV grounding is the
+   difference between right and "Unanswerable".
 
 These within-harness results are **mechanism evidence** for the thesis:
 even when the architecture is held constant and only one prompt or
