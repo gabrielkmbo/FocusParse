@@ -95,14 +95,44 @@ def _format_hint(answer_type: str | None) -> str:
             "or extra units beyond what the question asks for."
         )
     if stem == "exact_match":
+        # 2026-05-11 (Phase 6a): the Phase 4 failure analysis showed 19 of
+        # 62 right-region-wrong examples are prompt-fixable extraction
+        # format issues. Three concrete patterns from sampled traces:
+        #   - over-extraction with leading labels:
+        #       gold "180,683; typical" vs pred "Gross margin 180,683, typical"
+        #   - truncation of multi-part answers joined by punctuation:
+        #       gold "BLE; Signed integer comparison gave less than or equal"
+        #       vs pred "BLE; Less or equal; Signed integer comparison..."
+        #   - returning conditional/alternative branches instead of one value:
+        #       gold "0xFFFF0000" vs pred "HIVECS=0, 0x00000000; HIVECS=1, 0xFF..."
+        # Each rule below addresses one of those patterns. The instructions
+        # are deliberately concrete (with bracket-and-bit-field exceptions
+        # preserved from the previous version).
         return (
             "Answer with the exact label, identifier, or phrase from the document. "
             "Quote the document verbatim — do not paraphrase, abbreviate, or add "
             "explanation text that isn't present in the document. Match the "
-            "document's exact punctuation. Even if the question asks for an "
-            "explanation, put only the final exact answer in the `answer` field. "
+            "document's exact punctuation, case, and spacing. Even if the question "
+            "asks for an explanation, put only the final exact answer in the "
+            "`answer` field.\n\n"
+            "Formatting rules (Phase 6a tightening):\n"
+            "1. Output ONLY the answer span. Do NOT prefix the value with a "
+            "label or category name from the document (e.g., if the gold "
+            "answer is '180,683; typical', do not write 'Gross margin "
+            "180,683, typical').\n"
+            "2. Do NOT append a description, definition, or trailing context "
+            "after the value (e.g., if the gold answer is '[31:16]', do not "
+            "write '[31:16] - Reserved. RAZ.').\n"
+            "3. When the answer is a multi-part phrase joined by punctuation "
+            "(e.g., 'A; B' or 'A and B'), include ALL parts in the exact "
+            "form they appear in the document — do not truncate to the first "
+            "part and do not reorder the parts.\n"
+            "4. Do NOT return alternative or conditional answers ('if X then "
+            "A; if Y then B'). Select the single value that matches the "
+            "question's specified condition.\n\n"
             "For register bit-field assignments, omit spaces around '=' and "
-            "separate assignments with comma+space, e.g. [15:14]=b00, [8:5]=b1111."
+            "separate assignments with comma+space, e.g. [15:14]=b00, "
+            "[8:5]=b1111."
         )
     if stem == "boolean":
         return "Answer 'yes' or 'no'."
@@ -484,6 +514,4 @@ def _canonicalize_bit_field_assignments(answer: str) -> str:
     residual = re.sub(r"[\s,;]+", "", residual)
     if residual:
         return answer
-    return ", ".join(
-        f"[{match.group('bits')}]={match.group('value').lower()}" for match in matches
-    )
+    return ", ".join(f"[{match.group('bits')}]={match.group('value').lower()}" for match in matches)

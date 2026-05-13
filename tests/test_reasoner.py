@@ -439,6 +439,23 @@ def test_exact_match_format_hint_overrides_explain_wording() -> None:
     assert "omit spaces around '='" in hint
 
 
+def test_exact_match_format_hint_phase6a_tightening_rules_present() -> None:
+    """Phase 6a (2026-05-11 evening): four extraction-format rules added
+    based on the Phase 4 failure analysis. Each rule maps to a sampled
+    failure pattern in the n=148 right-region-wrong bucket."""
+    hint = _format_hint("exact_match")
+    # Rule 1: no leading labels (Gross margin example)
+    assert "Gross margin" in hint
+    # Rule 2: no trailing descriptions (Reserved. RAZ. example)
+    assert "Reserved" in hint
+    # Rule 3: include all parts of multi-part answers (BLE / semicolons)
+    assert "multi-part" in hint or "all parts" in hint.lower()
+    # Rule 4: no conditional/alternative branches (HIVECS example)
+    assert "conditional" in hint.lower() or "alternative" in hint.lower()
+    # Existing bit-field rule preserved
+    assert "[15:14]=b00" in hint
+
+
 def test_parse_reasoner_response_canonicalizes_bit_assignments() -> None:
     answer, citations, confidence = _parse_reasoner_response(
         (
