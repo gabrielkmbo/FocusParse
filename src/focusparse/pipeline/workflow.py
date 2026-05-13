@@ -92,32 +92,54 @@ def _should_use_react_inspector(plan: PlanEvent, regions: RegionsEvent) -> bool:
     """Return True when the example is "hard" enough to warrant the ReAct
     inspector — caller still must check `self.use_react_inspector` is on.
 
-    Triggers (any one is sufficient):
-      1. ``plan.budget_class`` is in `_HARD_CASE_BUDGET_CLASSES` (planner-
-         signalled fine-detail / tiny-region case).
-      2. ``plan.question_family`` is in `_FINE_DETAIL_QUESTION_FAMILIES`
-         (the inspector's existing fine-detail family list).
-      3. The top reranked region has `relevance` set AND below
-         `_HARD_CASE_RELEVANCE_THRESHOLD` — the reranker thinks no region
-         is a strong match, so picking by detector score alone is risky.
+    Triggers (Phase 5 of harness-growth-sprint, 2026-05-11 evening):
+      A. ``plan.budget_class == "highres_tiny"`` — the strongest single
+         signal (planner explicitly flagged tiny-region / fine-detail).
+         Fires alone.
+      B. ``plan.question_family`` is in `_FINE_DETAIL_QUESTION_FAMILIES`
+         AND the top reranked region's ``relevance`` is below
+         ``_HARD_CASE_RELEVANCE_THRESHOLD``. Both must hold.
 
-    Why these:
-      - Fine-detail visual questions are the bottleneck the deterministic
-        top-N misses (the 2026-04-13 diagnostic).
-      - Low rerank confidence is precisely the case the inspector should
-        spend more compute on picking regions rather than blindly inspecting
-        the top-N by detector score.
+    Phase 2 (the original) fired on ANY of three triggers (highres_tiny
+    OR fine-detail family OR low rerank confidence). The Phase 4 result
+    slice analysis showed the trigger was over-firing:
+
+      - hard-case slice (51 ex, fired): 47.1% acc vs 51.0% rebaseline (-3.9pp)
+      - deterministic slice (92 ex):     51.1% acc vs 39.1% rebaseline (+12.0pp)
+
+    The dispatcher was net-negative on the slice it fires on; the Phase 4
+    +4.1pp overall gain came entirely from the deterministic slice (Phase
+    1 chart_to_table gate + Phase 3 per-role expander gating).
+
+    Failure analysis of the 5 react-path losses surfaced two patterns:
+      - 2/5 were planner regressions (the planner emitted a different
+        ``question_family`` from rebaseline, which flipped trigger B).
+      - 3/5 were genuine over-firing — same planner output, but the
+        LLM-driven inspector picked different (worse) regions than the
+        deterministic top-N would have, including one hallucination on
+        a true-``unanswerable`` example.
+
+    Trigger B becomes AND-gated (was OR) to require BOTH the fine-detail
+    family signal AND the low-rerank-confidence signal before firing.
+    This eliminates the false positives on examples where the planner
+    family is fine-detail but the reranker has high confidence (the
+    deterministic top-N is already correct on those).
+
+    Predicted firing rate: ~5-15% (vs Phase 2's 35%). The goal is to
+    keep only the truly-hard examples where the LLM dispatcher could
+    plausibly outperform deterministic top-N.
     """
     if (plan.budget_class or "").strip() in _HARD_CASE_BUDGET_CLASSES:
         return True
-    if (plan.question_family or "").strip() in _FINE_DETAIL_QUESTION_FAMILIES:
-        return True
+    family_is_fine_detail = (plan.question_family or "").strip() in _FINE_DETAIL_QUESTION_FAMILIES
     top = regions.candidates[0] if regions.candidates else None
-    return (
+    rerank_is_low = (
         top is not None
         and top.relevance is not None
         and float(top.relevance) < _HARD_CASE_RELEVANCE_THRESHOLD
     )
+    # Phase 5: BOTH signals required (was: either signal sufficient).
+    return family_is_fine_detail and rerank_is_low
 
 
 _VISUAL_READABILITY_RE = re.compile(
