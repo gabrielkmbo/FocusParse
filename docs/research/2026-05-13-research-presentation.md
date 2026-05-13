@@ -54,7 +54,179 @@ a secondary axis to show "more tools" is _not_ the explanation.
 
 ---
 
-## Slide 3 — The Seven Cells
+## Slide 3 — Background: where this work fits
+
+**Project framing.** FocusParse is the agentic-pipeline arm of a broader
+program called _Localized Parsing of Complex Documents_: a
+query-conditioned, budget-aware evidence-localization system for medium-to-
+hard finance charts and technical datasheets. The end-state plan is to
+distill the agentic policy into an OSS small model (Qwen3-VL-4B) under
+SFT + GRPO, with rewards that combine answer correctness, evidence box
+hit, valid structured output, and budget discipline. This presentation
+covers the harness phase; the distillation phase is downstream.
+
+**The field's consensus this work builds on.** Recent work converges on
+one insight: evidence localization, not OCR fidelity, is the bottleneck
+for document QA at frontier accuracy. Feeding a full page into the
+reasoner wastes attention on irrelevant content and compresses the tiny
+regions (axis ticks, table cells, footnotes) that actually answer the
+question. Three lines of work directly shaped FocusParse's design:
+
+1. **AgenticOCR — _Parsing Only What You Need for Efficient RAG_** (Cao et al., 2025).
+   Frames query-conditioned parsing as a new layer in the visual-RAG
+   stack, alongside embedding and reranking. Wraps zoom + OCR into a
+   single primitive (`image_zoom_and_ocr_tool`) with three semantic
+   modes (image-only, element, region). Trains an 8B agent end-to-end:
+   teacher traces filtered by a dual recall+IoU threshold, hard
+   negatives constructed by removing the gold page and reranking with a
+   visual reranker, SFT with loss masked to assistant reasoning + tool-
+   call tokens only, then GRPO with a reward that penalizes spurious
+   boxes, redundant overlap, and **lazy full-page parsing fallback**.
+   Reports 66.4% on MMLongBench-Doc (above the 65.8% human baseline)
+   and 78.6% on FinRAGBench-V. Known weakness: partial-table crops that
+   miss headers / surrounding context.
+
+2. **DocLens — _Tool-Augmented Multi-Agent Long-Doc VQA_** (Allen
+   Institute, 2025). Decomposes long-doc QA into a Lens module (page
+   navigator + element localizer) and a Reasoning module (answer
+   sampler + adjudicator). The page navigator samples multiple
+   candidate page-sets and **takes the union for recall**; the element
+   localizer crops typed visual elements (chart, legend, axis label,
+   caption) using a layout detector; the answer adjudicator compares
+   multiple reasoning samples and picks the most consistent one. Reports
+   +10.9pp on chart questions and +4.2pp on table questions over an
+   OCR-only Gemini-2.5-Pro baseline. 97.3% evidence-page recall on
+   MMLongBench-Doc.
+
+3. **Gemini 3 Agentic Vision** (Google blog post, 2026). Frames image
+   understanding as a `think → act → observe` loop with **code as a
+   vision tool** — the model writes Python to crop, rotate, annotate,
+   count, and compute on the image as an explicit scratchpad, then
+   inspects the result before continuing. Reports +5-10pp across vision
+   benchmarks vs single-shot inference. The active-investigation
+   framing is what motivated FocusParse's `run_python` sandboxed
+   primitive.
+
+**Adjacent benchmarks and parsing systems** that shaped what FocusParse
+measures and what it compares against:
+
+| Work                           | What it provides                                                      | How `parser-bench` extends it                                    |
+| ------------------------------ | --------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| FinMME / ChartQAPro / PlotQA   | finance + general chart QA, open-vocab answers with tolerance         | cross-region linking (legend→series, footnote→chart) is explicit |
+| DocVQA / PDFVQA / SlideVQA     | single- and multi-page doc VQA with ANLS scoring                      | mandatory citations; multi-page evidence graphs                  |
+| OmniDocBench / olmOCR(-Bench)  | end-to-end parsing fidelity (text edit dist, table TEDS, formula CDM) | we measure QA accuracy, not parsing fidelity                     |
+| FinChart-Bench / FinRAGBench-V | finance chart QA with visual-citation evaluation                      | explicit difficulty taxonomy (visual / reasoning / localization) |
+| DocLayNet / M6Doc              | layout detection benchmarks                                           | we use RT-DETRv2 trained on these as a _stage_, not the product  |
+| dots.ocr / Qwen3-VL-4B         | single-VLM open-weight baselines                                      | comparator baseline + planned distillation target                |
+| DePlot / ChartOCR              | chart → linearized table translation                                  | candidate replacement for the OCR-based `chart_to_table`         |
+
+`gabrielbo/parser-bench` was built specifically to expose the cross-
+region linking failures and difficulty axes that the existing
+benchmarks fold into a single accuracy number — see the difficulty
+field `{visual, reasoning, localization}` per example.
+
+---
+
+## Slide 4 — What FocusParse takes, and where it diverges
+
+### Direct borrowings
+
+**From AgenticOCR.** Query-conditioned crop philosophy — parse on
+demand, package evidence sparsely, never default to full-page fallback.
+Implemented in `expand_context`'s relevance-gated neighbor selection
+(harness-growth Phases B1.5 + 3). The anti-lazy-fallback reward shape
+is on the roadmap for the OSS distillation pass (Qwen3-VL-4B SFT +
+GRPO), not in the current agentic harness.
+
+**From DocLens.** Hierarchical page → element decomposition.
+FocusParse's `route_pages → localize → rerank → inspect → expand_context`
+mirrors DocLens's Lens module almost exactly. We also kept its
+multi-protocol evaluation idea (full-doc / oracle-page / oracle-crop)
+in `parser-bench`'s schema so failures can be attributed to retrieval
+vs reasoning.
+
+**From Gemini Agentic Vision.** The `run_python` sandboxed tool
+(subprocess + `resource.setrlimit` + import allowlist) used today for
+auto-zoom on fine-detail question families. The think-act-observe
+shape is the underlying motivation for the verifier-directed retry
+loop (§Slide 6) — the verifier emits a `next_action` and the workflow
+acts on it, rather than the reasoner deciding everything in one pass.
+
+### What FocusParse adds that none of them have
+
+1. **Typed evidence packets as a load-bearing data contract.**
+   `EvidencePacket` carries `local_crop_ref`, optional `multi_scale_crops`
+   with named scales (`tight` / `context` / `chart_context` / `zoomed`),
+   `linked_crop_refs` annotated with `linked_neighbor_types` (caption,
+   footnote, legend, axis_label, section_header, …), and optional
+   `chart_csv` for extracted chart data. AgenticOCR and DocLens treat
+   evidence as flat page+crop bundles; FocusParse explicitly models
+   **cross-region links** (legend↔series, footnote↔chart, caption↔figure)
+   so the reasoner is told "these crops are linked because the
+   document references them together" rather than guessing from spatial
+   adjacency.
+
+2. **Verifier as controller, not just adjudicator.** DocLens's
+   adjudicator picks the most consistent of K reasoning samples; it
+   filters answers but does not direct repair. FocusParse's verifier
+   emits a structured `next_action ∈ {accept, retry_localization,
+expand_context, abstain, escalate_reasoner}` along with `missing_context`
+   hints and target packet IDs. The workflow forwards that signal back
+   to the right repair stage — a verifier-directed retry loop, not
+   answer-only filtering. The Phase 4 diagnostics show the verifier
+   takes one of those repair actions on ~62% of unsupported answers,
+   and answers flip on ~17% of examples post-retry.
+
+3. **Per-stage tier routing.** Cheap (`gemini-2.5-flash`) handles
+   planning + page routing, mid (`claude-haiku-4-5`) handles region
+   reranking + verification, frontier (`gpt-5.4`) only does the
+   reasoner step over focused crops. Other approaches run one model
+   end-to-end. The cost-efficiency claim on Slide 4 — $0.015 per
+   correct vs ReAct's $0.24 — is largely this routing.
+
+4. **Query-aware `expand_context` that addresses AgenticOCR's
+   documented table-context weakness.** Our expander attaches role-
+   labeled neighbors (caption, footnote, axis_label, …) only when the
+   planner's `evidence_types` and the reranker's `needed_for` agree
+   they're relevant. The Phase B1.5 tightening (relevance threshold
+   raised to 0.5, per-role gating in Phase 3) cut neighbor count from
+   ~13/example to ~2/example without losing the useful neighbors. This
+   directly targets the chart-caption-fusion and chart-footnote-fusion
+   question families that AgenticOCR and DocLens both leave on the
+   table.
+
+5. **Explicit mechanism instrumentation.** Every spec emits IoU, page
+   recall, lazy rate, abstain rate, useful-vs-irrelevant tool calls,
+   answer-changed-after-tool rate, and a per-stage failure-mode
+   breakdown alongside accuracy. The qualitative wins on Slides 10-12
+   below are reproducible because the diagnostics tell us _which_
+   stage carried the win.
+
+### What FocusParse explicitly does _not_ have yet (next-phase work)
+
+- **No learned crop policy.** We use deterministic rerank + LLM-driven
+  dispatch on hard cases. AgenticOCR trains an 8B agent end-to-end;
+  FocusParse defers distillation until the agentic pipeline is stable.
+- **No self-consistency / K=2 sampling on the reasoner.** DocLens
+  samples K answers and adjudicates. FocusParse uses one reasoner
+  sample + verifier escalation. The 43-of-77 "right region, wrong
+  value" failure bucket (Slide 14) is exactly where self-consistency
+  would help; it's the candidate Phase 6b experiment.
+- **No multi-turn ReAct inspector.** Phase 2 of the harness-growth
+  sprint shipped a single-shot LLM dispatcher behind `use_react_inspector`.
+  A multi-turn variant (turn 1 picks regions, turn 2 refines based on
+  verifier feedback) is deferred until Phase 2's slice-analysis result
+  is replicated under the variance harness.
+
+These gaps define the next 2-3 sprint phases. The headline claim — that
+agent architecture is the load-bearing axis — is supported by the n=148
+numbers in §Slide 5 even without these extensions; the extensions are
+about closing the gap to the oracle-crop upper bound (parser-bench
+slide deck: ~59% on GPT-5.4 oracle_crop).
+
+---
+
+## Slide 5 — The Seven Cells
 
 All numbers are single-run n=148 on the same revision.
 
@@ -74,7 +246,7 @@ lowest cost and the lowest latency.
 
 ---
 
-## Slide 4 — Pareto frontier on cost × accuracy
+## Slide 6 — Pareto frontier on cost × accuracy
 
 Plotting overall accuracy against cost-per-correct, the harness is the only
 method on the Pareto frontier:
@@ -105,7 +277,7 @@ accuracy ↑
 
 ---
 
-## Slide 5 — Pareto frontier on latency × accuracy
+## Slide 7 — Pareto frontier on latency × accuracy
 
 | Method            | Mean latency | Accuracy |
 | ----------------- | -----------: | -------: |
@@ -135,7 +307,7 @@ committing.
 
 ---
 
-## Slide 6 — Why? Mechanism #1: localization-first ordering
+## Slide 8 — Why? Mechanism #1: localization-first ordering
 
 Region citation IoU is the cleanest single signal for "did the model
 ground in the right piece of the document?"
@@ -171,7 +343,7 @@ observation transcript.
 
 ---
 
-## Slide 7 — Why? Mechanism #2: discipline
+## Slide 9 — Why? Mechanism #2: discipline
 
 | Method                   | Lazy rate (no tool call) | Abstain rate ("Unanswerable") |
 | ------------------------ | -----------------------: | ----------------------------: |
@@ -206,7 +378,7 @@ efficiency story (fewer wasted retries) and a research-claim story
 
 ---
 
-## Slide 8 — Qualitative example: datasheet diagram counting
+## Slide 10 — Qualitative example: datasheet diagram counting
 
 `dat-adrv9040-reference-manual-ug-2192-0030`. Datasheet,
 `axis_value_interpolation` family, difficulty
@@ -241,7 +413,7 @@ disambiguation in 5 free-form steps.**
 
 ---
 
-## Slide 9 — Qualitative example: finance visual table
+## Slide 11 — Qualitative example: finance visual table
 
 `fin-vis-jpm_gtm_us_daily-0126`. Finance, `visual_table`,
 `requires_visual=True`.
@@ -267,7 +439,7 @@ prompt. Same model, same data, different scaffolding.
 
 ---
 
-## Slide 10 — Qualitative example: finance chart-table cross-ref
+## Slide 12 — Qualitative example: finance chart-table cross-ref
 
 `fin-goog-20251231-0006`. Finance, `chart_table_cross_ref`,
 `requires_visual=True`, difficulty
@@ -295,7 +467,7 @@ or split.
 
 ---
 
-## Slide 11 — Held-constant axis: tool count alone does not move the needle
+## Slide 13 — Held-constant axis: tool count alone does not move the needle
 
 Tool count is the second axis of the table. For each agent type, what does
 going from +2 to +4 tools buy?
@@ -320,7 +492,7 @@ is within the variance noise floor (§13).
 
 ---
 
-## Slide 12 — Failure mode shift (mechanism inside the harness)
+## Slide 14 — Failure mode shift (mechanism inside the harness)
 
 When the harness is wrong (n=77 of 148), where does the failure live?
 
@@ -354,7 +526,7 @@ ablation target:
 
 ---
 
-## Slide 13 — Within-harness ablation (single-replicate; see variance caveat)
+## Slide 15 — Within-harness ablation (single-replicate; see variance caveat)
 
 The harness-growth sprint tested four mechanism-targeted changes against
 the rebaseline harness +4 (43.9% overall). All ran on the same n=148
@@ -388,7 +560,7 @@ ways. That is how you know the architecture is doing real work.
 
 ---
 
-## Slide 14 — Honest assessment
+## Slide 16 — Honest assessment
 
 What this set of experiments _can_ claim:
 
@@ -424,7 +596,7 @@ What this set of experiments _cannot_ yet claim:
 
 ---
 
-## Slide 15 — Conclusion + the next experiment
+## Slide 17 — Conclusion + the next experiment
 
 **Restated thesis.** Agent architecture — not raw VLM strength, not
 tool count, not loop discipline alone — drives both accuracy and cost
