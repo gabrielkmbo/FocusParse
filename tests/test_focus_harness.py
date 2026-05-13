@@ -146,8 +146,8 @@ async def test_run_focus_eval_records_focus_metrics(tmp_path, parser_bench_submo
         "expand_context",
         "run_python",
     ]
-    assert per["selected_tools"] == ["inspect_region", "expand_context"]
-    assert per["tool_call_sequence"] == ["inspect_region", "expand_context"]
+    assert per["selected_tools"] == ["inspect_region"]
+    assert per["tool_call_sequence"] == ["inspect_region"]
     assert per["failed_tool_call_count"] == 0
     assert per["telemetry"]["available_tools"] == per["available_tools"]
     assert per["telemetry"]["tool_call_sequence"] == per["tool_call_sequence"]

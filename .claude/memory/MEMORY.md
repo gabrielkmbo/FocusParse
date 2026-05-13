@@ -131,6 +131,33 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-13 — generalized tool-orchestration checkpoint, anti-cherry-pick slice
+
+Branch `codex/harness-60-accuracy` keeps the accuracy fix narrow after an
+anti-cherry-pick smoke caught an overfit visual-mix experiment. Rejected
+experiment:
+`results/hf/sprint-2026-05-13/generalized-dynamic-limit12-run1/` scored
+**33.3%** (4/12) on the fixed first-12 canonical validation rows, below the
+prior full-run artifact's **50.0%** (6/12) on the same ids. That visual packet
+mixing rule was backed out.
+
+Kept patch: `inspector.inspect_regions` now enables `chart_context` crops only
+when chart extraction is actually active (`chart_to_table_enabled && wants_chart`)
+instead of for every chart-looking question. This prevents default +4 runs from
+feeding wider chart crops when `chart_to_table` is off. Tool diagnostics are
+also now dynamic: +4 still reports four tools available, but
+`selected_tools` records `expand_context` only when it added neighbors or zoomed
+crops; skeleton/no-op expansion is no longer counted as a selected tool.
+
+Validation after rollback: fixed-prefix smoke
+`results/hf/sprint-2026-05-13/generalized-dynamic-limit12-run2/` scored
+**58.3%** (7/12), versus **50.0%** (6/12) for
+`shape-canonicalization-noloop-full-run1` on the same ids and **66.7%** (8/12)
+for the older May 7 high-water on that slice. Mean input tokens improved
+**7739 -> 6962**, total cost **$0.121 -> $0.109**, and cost/correct
+**$0.0201 -> $0.0156** versus the prior full-run artifact. This is a
+directional checkpoint, not a full-run claim.
+
 ### 2026-05-13 — no-loop full run regression + extraction-gated recovery
 
 Fresh no-loop n=148 run on HF revision

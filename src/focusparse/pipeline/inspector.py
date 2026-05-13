@@ -379,7 +379,7 @@ async def inspect_regions(
             multi_scale=multi_scale,
             chart_extraction_active=chart_extraction_active,
             chart_to_table_backend=chart_to_table_backend,
-            chart_context_active=wants_chart,
+            chart_context_active=chart_extraction_active,
             question_family=plan.question_family,
             question_text=question.question,
         )

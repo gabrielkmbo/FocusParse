@@ -1011,6 +1011,12 @@ def _tool_diagnostics_from_trace(
             sequence.append(_canonical_tool_name(step.tool or step.stage))
             continue
         if step.stage == "expand_context" and step.action != "passthrough":
+            args = step.args or {}
+            expanded = (args.get("n_neighbors_added") or 0) > 0 or (
+                args.get("n_zoomed_added") or 0
+            ) > 0
+            if not expanded:
+                continue
             sequence.append("expand_context")
 
     selected_tools = list(dict.fromkeys(sequence))

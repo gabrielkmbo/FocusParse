@@ -156,6 +156,30 @@ when the verifier asks for `expand_context` but its reason says the failure is
 answer shape/listing rather than missing evidence, the workflow reroutes to an
 answer-only retry over the same packets.
 
+### 2026-05-13 Tool-Orchestration Checkpoint
+
+To avoid cherry-picking around `dat-Arm_EE382N_4-0001`, the current branch ran a
+fixed first-12 canonical validation smoke with no retries:
+
+- Rejected visual-mix experiment:
+  `results/hf/sprint-2026-05-13/generalized-dynamic-limit12-run1/` scored
+  **33.3%** (4/12), below the prior full-run artifact's **50.0%** (6/12) on the
+  same ids. That rule was backed out.
+- Narrow kept patch:
+  `results/hf/sprint-2026-05-13/generalized-dynamic-limit12-run2/` scored
+  **58.3%** (7/12) on the same fixed ids, with mean input tokens **6962** vs
+  **7739**, total cost **$0.109** vs **$0.121**, and cost/correct **$0.0156**
+  vs **$0.0201** relative to `shape-canonicalization-noloop-full-run1` on those
+  rows.
+
+The kept orchestration change is deliberately modest: default +4 runs only add
+`chart_context` crops when chart extraction is actually active, rather than for
+every chart-looking question. Separately, tool diagnostics now distinguish
+availability from use: +4 can list four available tools while `selected_tools`
+only records `expand_context` when it actually adds neighbors or zoomed crops.
+This keeps the thesis aligned with controlled tool use rather than raw tool
+count.
+
 ### Latest-Run Interpretation
 
 The recent full-stack branch increases the mechanism signal:

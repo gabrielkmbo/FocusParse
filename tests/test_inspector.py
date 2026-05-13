@@ -1607,9 +1607,10 @@ async def test_chart_extraction_adds_chart_context_crop_without_multi_scale(tmp_
     )
 
 
-async def test_chart_question_adds_context_crop_without_chart_to_table(tmp_path, monkeypatch):
-    """The lightweight chart-context crop is useful even when the heavier
-    chart_to_table helper is disabled for the headline +4 path."""
+async def test_chart_question_does_not_add_chart_context_without_chart_to_table(
+    tmp_path, monkeypatch
+):
+    """Keep the default chart path single-scale unless chart extraction is active."""
     inspect_calls: list = []
     text_calls: list = []
     _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
@@ -1654,10 +1655,8 @@ async def test_chart_question_adds_context_crop_without_chart_to_table(tmp_path,
 
     pkt = ev.packets[0]
     assert chart_calls == []
-    assert len(pkt.multi_scale_crops) == 2
-    assert pkt.multi_scale_crops[0].scale == "tight"
-    assert pkt.multi_scale_crops[1].scale == "chart_context"
-    assert "inspect_region:chart_context" in pkt.provenance.args_hash
+    assert pkt.multi_scale_crops == []
+    assert "inspect_region:chart_context" not in pkt.provenance.args_hash
     assert "chart_to_table:attempt" not in pkt.provenance.args_hash
 
 
@@ -1749,8 +1748,8 @@ async def test_multi_chart_context_crops_are_limited_to_top_visual_packets(tmp_p
 
     assert [bool(p.multi_scale_crops) for p in ev.packets] == [True, True, False]
     assert [p.multi_scale_crops[-1].scale if p.multi_scale_crops else None for p in ev.packets] == [
-        "chart_context",
-        "chart_context",
+        "context",
+        "context",
         None,
     ]
 
