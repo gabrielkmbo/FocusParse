@@ -2050,6 +2050,12 @@ def _should_allow_reasoner_shape_retry(
         return True
     if not answer.citations:
         return False
+    if _verifier_says_partial_comparison_failure(verdict.reason):
+        return True
+    if _question_requests_counted_category(question_event.question) and _verifier_says_counting_fix(
+        verdict.reason
+    ):
+        return True
     if (
         _answer_looks_list_like(answer.answer) or _answer_has_multiple_value_tokens(answer.answer)
     ) and _verifier_says_answer_shape_failure(verdict.reason):
@@ -2101,6 +2107,43 @@ def _verifier_says_answer_is_in_cited_evidence(reason: str | None) -> bool:
         or "evidence being available" in normalized
     )
     return has_cited_evidence and says_present
+
+
+def _verifier_says_partial_comparison_failure(reason: str | None) -> bool:
+    if not reason:
+        return False
+    normalized = str(reason).lower()
+    return bool(
+        (
+            "question asks" in normalized
+            and ("comparison" in normalized or "both " in normalized)
+        )
+        or (
+            "cites only" in normalized
+            and ("comparison" in normalized or "question asks" in normalized)
+        )
+    )
+
+
+def _question_requests_counted_category(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    normalized = str(question_text).lower()
+    return bool(
+        "which" in normalized
+        and "category" in normalized
+        and ("how many" in normalized or "number of" in normalized)
+    )
+
+
+def _verifier_says_counting_fix(reason: str | None) -> bool:
+    if not reason:
+        return False
+    normalized = str(reason).lower()
+    return bool(
+        re.search(r"\bnot\s+\d+\b", normalized)
+        and re.search(r"\b(?:contains?|has)\s+\d+\b", normalized)
+    )
 
 
 def _answer_has_multiple_value_tokens(answer: str | None) -> bool:

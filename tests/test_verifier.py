@@ -514,6 +514,23 @@ async def test_verify_llm_supported_false_propagates():
     assert verdict.next_action == "abstain"
 
 
+async def test_verify_llm_abstain_for_partial_comparison_becomes_reasoner_retry():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "Answer cites only the ASR description, '
+        "but the question asks for comparison between Rotate Right and Arithmetic "
+        'Shift Right.", "next_action": "abstain", "confidence": 0.8}'
+    )
+    verdict, _ = await verify_answer(
+        _question(),
+        _evidence(_packet(snippet="Arithmetic Shift Right: Sign bit shifted in")),
+        _answer("Arithmetic Shift Right shifts in the sign bit"),
+        backend_client=client,
+    )
+    assert verdict.supported is False
+    assert verdict.next_action == "escalate_reasoner"
+    assert verdict.diagnostics["normalized_next_action"] == "abstain"
+
+
 @pytest.mark.parametrize(
     "bad_payload",
     [

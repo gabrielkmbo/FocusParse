@@ -689,6 +689,11 @@ def _canonicalize_question_specific_answer_shape(
         if config_value:
             return config_value
 
+    if _question_requests_sign_bit_operation(question):
+        sign_bit_operation = _canonicalize_sign_bit_operation(cleaned)
+        if sign_bit_operation:
+            return sign_bit_operation
+
     if _question_requests_single_field(question):
         field = _canonicalize_single_field_answer(cleaned)
         if field:
@@ -783,6 +788,10 @@ def _question_requests_asset_class(question: str) -> bool:
 
 def _question_requests_configuration_value(question: str) -> bool:
     return "configuration value" in question or "which configuration" in question
+
+
+def _question_requests_sign_bit_operation(question: str) -> bool:
+    return "which operation" in question and "sign bit" in question
 
 
 def _question_requests_single_field(question: str) -> bool:
@@ -988,6 +997,15 @@ def _canonicalize_configuration_value_answer(answer: str) -> str | None:
     first = re.split(r"\s*;\s*", answer, maxsplit=1)[0].strip()
     if first and len(first.split()) <= 5 and "driver" in first.lower():
         return first
+    return None
+
+
+def _canonicalize_sign_bit_operation(answer: str) -> str | None:
+    normalized = answer.lower()
+    if "sign bit" not in normalized:
+        return None
+    if "arithmetic shift right" in normalized or re.search(r"\basr\b", normalized):
+        return "Arithmetic Shift Right shifts in the sign bit"
     return None
 
 

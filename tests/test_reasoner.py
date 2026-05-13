@@ -744,6 +744,23 @@ def test_parse_reasoner_response_canonicalizes_configuration_value() -> None:
     assert answer == "Push-Pull Driver"
 
 
+def test_parse_reasoner_response_canonicalizes_sign_bit_operation() -> None:
+    answer, _citations, _confidence = _parse_reasoner_response(
+        (
+            '{"answer":"Arithmetic Shift Right (ASR) shifts right and preserves '
+            'the sign bit; Sign bit shifted in","citations":[],"confidence":0.8}'
+        ),
+        valid_packet_ids=set(),
+        question_text=(
+            "Comparing the two charts labeled 'Rotate Right' and 'Arithmetic Shift Right', "
+            "which operation shifts in the sign bit, and how can you tell using both "
+            "the diagram and the associated caption?"
+        ),
+    )
+
+    assert answer == "Arithmetic Shift Right shifts in the sign bit"
+
+
 def test_parse_reasoner_response_canonicalizes_single_field_answer() -> None:
     answer, _citations, _confidence = _parse_reasoner_response(
         (

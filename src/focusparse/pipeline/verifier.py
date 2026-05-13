@@ -86,6 +86,10 @@ _SYSTEM_PROMPT = (
     "value. Use `expand_context` only when you can name a missing neighboring "
     "caption, footnote, legend, header, or continuation that is not present in "
     "any packet summary.\n"
+    "- Do not choose `abstain` merely because a non-empty answer only uses "
+    "part of a comparison or omits requested explanatory detail. In that case "
+    "choose `escalate_reasoner` if the packets already include the comparison "
+    "evidence, or `expand_context` if a named neighbor is missing.\n"
     "- `confidence` is your confidence in the verdict, not the answer."
 )
 
@@ -161,6 +165,8 @@ async def verify_answer(
         supported=supported,
         next_action=next_action,
         diagnostics=diagnostics,
+        reason=reason,
+        answer_text=answer.answer,
     )
     verdict = VerdictEvent(
         supported=supported,
@@ -421,6 +427,8 @@ def _reconcile_supported_next_action(
     supported: bool,
     next_action: str,
     diagnostics: dict[str, Any],
+    reason: str | None = None,
+    answer_text: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Make verifier control-flow fields internally consistent."""
     if supported:
@@ -434,7 +442,41 @@ def _reconcile_supported_next_action(
         if diagnostics.get("missing_context"):
             return "expand_context", diagnostics
         return "escalate_reasoner", diagnostics
+    if next_action == "abstain" and _abstain_should_retry_reasoner(
+        reason=reason,
+        answer_text=answer_text,
+    ):
+        diagnostics = dict(diagnostics)
+        diagnostics["normalized_next_action"] = "abstain"
+        return "escalate_reasoner", diagnostics
     return next_action, diagnostics
+
+
+def _abstain_should_retry_reasoner(*, reason: str | None, answer_text: str | None) -> bool:
+    if not reason or not answer_text:
+        return False
+    if str(answer_text).strip().lower() in {
+        "unanswerable",
+        "unknown",
+        "cannot determine",
+        "can't determine",
+    }:
+        return False
+    normalized = str(reason).lower()
+    return bool(
+        (
+            "question asks" in normalized
+            and ("comparison" in normalized or "both " in normalized)
+        )
+        or (
+            "cites only" in normalized
+            and ("comparison" in normalized or "question asks" in normalized)
+        )
+        or (
+            "does not include" in normalized
+            and ("comparison" in normalized or "both " in normalized)
+        )
+    )
 
 
 def _parse_diagnostics(raw: Any, *, reason: str | None = None) -> dict[str, Any]:
