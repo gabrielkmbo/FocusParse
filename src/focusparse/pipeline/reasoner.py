@@ -80,10 +80,98 @@ _FOCUS_STOPWORDS = frozenset(
 )
 
 
-def _format_hint(answer_type: str | None) -> str:
+_DATASHEET_EXACT_MATCH_HINT = (
+    "Answer with the exact label, identifier, or phrase from the document. "
+    "Quote the document verbatim — do not paraphrase, abbreviate, or add "
+    "explanation text that isn't present in the document. Match the "
+    "document's exact punctuation, case, and spacing. Even if the question "
+    "asks for an explanation, put only the final exact answer in the "
+    "`answer` field.\n\n"
+    "Formatting rules (Phase 6a tightening):\n"
+    "1. Output ONLY the answer span. Do NOT prefix the value with a "
+    "label or category name from the document (e.g., if the gold "
+    "answer is '180,683; typical', do not write 'Gross margin "
+    "180,683, typical').\n"
+    "2. Do NOT append a description, definition, or trailing context "
+    "after the value (e.g., if the gold answer is '[31:16]', do not "
+    "write '[31:16] - Reserved. RAZ.').\n"
+    "3. When the answer is a multi-part phrase joined by punctuation "
+    "(e.g., 'A; B' or 'A and B'), include ALL parts in the exact "
+    "form they appear in the document — do not truncate to the first "
+    "part and do not reorder the parts.\n"
+    "4. Do NOT return alternative or conditional answers ('if X then "
+    "A; if Y then B'). Select the single value that matches the "
+    "question's specified condition.\n"
+    "5. When the question asks which item has the maximum/minimum/most "
+    "frequent property AND the visible evidence shows two or more items "
+    "tied at that value, list ALL tied items joined by ' and ' (e.g. "
+    "'LOGGING and MULTI-THREADING are tied at 7 functions each'). Do not "
+    "arbitrarily pick one.\n\n"
+    "For register bit-field assignments, omit spaces around '=' and "
+    "separate assignments with comma+space, e.g. [15:14]=b00, "
+    "[8:5]=b1111."
+)
+
+# Phase 3a (2026-05-13 sprint): finance documents diverge from datasheets.
+# Phase 6a's 4-rule tightening helped datasheets (+7.3pp) but hurt finance
+# (-11.4pp) per the 2026-05-11 ablation. The finance failure mix is
+# different — many golds are sentence-form claims about chart contents
+# (e.g. 'Micro firms show a more noticeable uptick in NPL ratios...'),
+# and the strict 'output ONLY the answer span' rule actively truncates
+# those into wrong tag-like answers ('loans to micro firms'). The
+# finance variant keeps the multi-part inclusion (rule 3) and the
+# no-conditional-answer rule (rule 4), but relaxes 1 and 2 so the model
+# can return a descriptive clause when the document presents the answer
+# in that form. It also reminds the model to preserve any unit / sign /
+# parenthesization the document uses.
+_FINANCE_EXACT_MATCH_HINT = (
+    "Answer with the exact label, identifier, phrase, or short descriptive "
+    "clause from the document. Quote the document verbatim where possible "
+    "and preserve its exact wording, punctuation, units, currency symbols, "
+    "and parenthesization (e.g. '$(40) million' should stay '$(40) million' "
+    "when that is how the document reports a negative; 'Class A Common Stock, "
+    "$0.001 par value (GOOGL)' must include the parenthesized ticker if "
+    "present).\n\n"
+    "Formatting rules (finance variant):\n"
+    "1. When the document presents the answer as a descriptive sentence or "
+    "clause (especially for chart-interpretation, trend, or comparison "
+    "questions), include the full clause as it appears — do not collapse "
+    "to a single tag (e.g. if the gold answer is 'Micro firms show a more "
+    "noticeable uptick in NPL ratios at the end of the period', do NOT "
+    "answer 'loans to micro firms').\n"
+    "2. When the document presents the answer as a short label or value, "
+    "keep it short — match the granularity of the document's own phrasing.\n"
+    "3. When the answer is a multi-part phrase joined by punctuation, "
+    "include ALL parts in the exact form they appear in the document — do "
+    "not truncate to the first part and do not reorder the parts.\n"
+    "4. Do NOT return alternative or conditional answers ('if X then A; if "
+    "Y then B'). Select the single value that matches the question's "
+    "specified condition.\n"
+    "5. For chart readings: state the value at the labelled axis tick "
+    "closest to the curve / bar / point being asked about. If the document "
+    "uses a country, region, or category name in its own legend / label, "
+    "answer with that full name (e.g. 'Latvia', not the 2-letter ISO "
+    "code 'LV')."
+)
+
+
+def _format_hint(
+    answer_type: str | None,
+    *,
+    domain: str | None = None,
+    question_family: str | None = None,
+) -> str:
     """Mirror of `workflow._format_hint`. Kept local to avoid a workflow import
     cycle (reasoner is imported by workflow). Type-aware nudges so the model
-    emits scorer-compliant output instead of prose."""
+    emits scorer-compliant output instead of prose.
+
+    Phase 3a (2026-05-13 sprint): `domain` routes the exact_match hint —
+    datasheet keeps the strict 4-rule prompt, finance gets a relaxed
+    variant that allows descriptive-clause answers when the document
+    presents them that way. `question_family` is reserved for future
+    family-specific addenda (e.g. tie-handling on near_miss_distractor)
+    but not yet branched on.
+    """
     if not answer_type:
         return ""
     s = str(answer_type)
@@ -95,45 +183,10 @@ def _format_hint(answer_type: str | None) -> str:
             "or extra units beyond what the question asks for."
         )
     if stem == "exact_match":
-        # 2026-05-11 (Phase 6a): the Phase 4 failure analysis showed 19 of
-        # 62 right-region-wrong examples are prompt-fixable extraction
-        # format issues. Three concrete patterns from sampled traces:
-        #   - over-extraction with leading labels:
-        #       gold "180,683; typical" vs pred "Gross margin 180,683, typical"
-        #   - truncation of multi-part answers joined by punctuation:
-        #       gold "BLE; Signed integer comparison gave less than or equal"
-        #       vs pred "BLE; Less or equal; Signed integer comparison..."
-        #   - returning conditional/alternative branches instead of one value:
-        #       gold "0xFFFF0000" vs pred "HIVECS=0, 0x00000000; HIVECS=1, 0xFF..."
-        # Each rule below addresses one of those patterns. The instructions
-        # are deliberately concrete (with bracket-and-bit-field exceptions
-        # preserved from the previous version).
-        return (
-            "Answer with the exact label, identifier, or phrase from the document. "
-            "Quote the document verbatim — do not paraphrase, abbreviate, or add "
-            "explanation text that isn't present in the document. Match the "
-            "document's exact punctuation, case, and spacing. Even if the question "
-            "asks for an explanation, put only the final exact answer in the "
-            "`answer` field.\n\n"
-            "Formatting rules (Phase 6a tightening):\n"
-            "1. Output ONLY the answer span. Do NOT prefix the value with a "
-            "label or category name from the document (e.g., if the gold "
-            "answer is '180,683; typical', do not write 'Gross margin "
-            "180,683, typical').\n"
-            "2. Do NOT append a description, definition, or trailing context "
-            "after the value (e.g., if the gold answer is '[31:16]', do not "
-            "write '[31:16] - Reserved. RAZ.').\n"
-            "3. When the answer is a multi-part phrase joined by punctuation "
-            "(e.g., 'A; B' or 'A and B'), include ALL parts in the exact "
-            "form they appear in the document — do not truncate to the first "
-            "part and do not reorder the parts.\n"
-            "4. Do NOT return alternative or conditional answers ('if X then "
-            "A; if Y then B'). Select the single value that matches the "
-            "question's specified condition.\n\n"
-            "For register bit-field assignments, omit spaces around '=' and "
-            "separate assignments with comma+space, e.g. [15:14]=b00, "
-            "[8:5]=b1111."
-        )
+        dom = (domain or "").lower()
+        if "finance" in dom:
+            return _FINANCE_EXACT_MATCH_HINT
+        return _DATASHEET_EXACT_MATCH_HINT
     if stem == "boolean":
         return "Answer 'yes' or 'no'."
     if stem == "multiple_choice":
@@ -175,7 +228,7 @@ async def answer_from_evidence(
             "and scorer-compliant: do not add explanations, qualifiers, or "
             "copied verifier language.\n\n"
         )
-    format_hint = _format_hint(question.answer_type)
+    format_hint = _format_hint(question.answer_type, domain=question.domain)
     format_block = f"\n{format_hint}\n" if format_hint else ""
     prompt = (
         f"{hint_block}"

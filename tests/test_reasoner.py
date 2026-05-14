@@ -456,6 +456,54 @@ def test_exact_match_format_hint_phase6a_tightening_rules_present() -> None:
     assert "[15:14]=b00" in hint
 
 
+def test_exact_match_format_hint_default_is_datasheet_strict() -> None:
+    """Phase 3a (2026-05-13 sprint): the default (no-domain) prompt stays on
+    the datasheet-strict variant — back-compat for callers that haven't
+    plumbed `domain` yet."""
+    hint = _format_hint("exact_match")
+    hint_datasheet = _format_hint("exact_match", domain="datasheet")
+    hint_datasheet_enum = _format_hint("exact_match", domain="Domain.DATASHEET")
+    assert hint == hint_datasheet == hint_datasheet_enum
+    # Datasheet strict prompt: rule 1 says "Output ONLY the answer span"
+    assert "Output ONLY the answer span" in hint
+    # Tied-answer rule (Phase 3a addendum) is present in the datasheet prompt
+    assert "tied" in hint.lower()
+
+
+def test_exact_match_format_hint_finance_variant_relaxes_strict_rules() -> None:
+    """Phase 3a (2026-05-13 sprint): finance documents need a relaxed
+    variant — the strict 'output ONLY the answer span' rule truncates
+    sentence-form gold answers into wrong tag-like predictions
+    ('loans to micro firms' vs 'Micro firms show a more noticeable uptick
+    in NPL ratios at the end of the period'). The finance variant keeps
+    multi-part inclusion and no-conditional rules but allows descriptive
+    clauses."""
+    hint = _format_hint("exact_match", domain="finance")
+    hint_enum = _format_hint("exact_match", domain="Domain.FINANCE")
+    assert hint == hint_enum
+    # Finance must allow descriptive-clause answers
+    assert "descriptive sentence" in hint.lower() or "descriptive clause" in hint.lower()
+    # Finance keeps the multi-part inclusion rule (rule 3 equivalent)
+    assert "multi-part" in hint or "all parts" in hint.lower()
+    # Finance keeps no-conditional-answer rule
+    assert "conditional" in hint.lower()
+    # Finance must NOT contain the strict "Output ONLY the answer span" rule
+    assert "Output ONLY the answer span" not in hint
+    # Finance gets the country/region full-name nudge
+    assert "Latvia" in hint or "full name" in hint.lower()
+
+
+def test_exact_match_format_hint_unknown_domain_falls_back_to_datasheet() -> None:
+    """Phase 3a (2026-05-13 sprint): unknown / None domain falls back to the
+    datasheet strict prompt, which is what main-stack-run1 used."""
+    assert _format_hint("exact_match", domain=None) == _format_hint(
+        "exact_match", domain="datasheet"
+    )
+    assert _format_hint("exact_match", domain="unknown") == _format_hint(
+        "exact_match", domain="datasheet"
+    )
+
+
 def test_parse_reasoner_response_canonicalizes_bit_assignments() -> None:
     answer, citations, confidence = _parse_reasoner_response(
         (
