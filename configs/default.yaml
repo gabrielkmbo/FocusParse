@@ -21,6 +21,16 @@ tiers:
     model: gemini-2.5-flash-lite
     max_tokens: 4096
     thinking_budget: 1024
+  cheap_oai:
+    # OpenAI fallback for planner/router when both Gemini cheap tiers
+    # are quota-exhausted (sprint 2026-05-13 ran out of both
+    # gemini-2.5-flash AND gemini-2.5-flash-lite free-tier 20 req/day
+    # quotas in the same session). gpt-4.1-nano is OpenAI's smallest
+    # general model and has paid-tier quota that won't bite.
+    # Use via FOCUSPARSE_TIER_PLANNER=cheap_oai etc.
+    provider: openai
+    model: gpt-4.1-nano
+    max_completion_tokens: 4096
   mid:
     provider: anthropic
     model: claude-haiku-4-5
