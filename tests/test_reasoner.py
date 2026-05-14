@@ -470,27 +470,37 @@ def test_exact_match_format_hint_default_is_datasheet_strict() -> None:
     assert "tied" in hint.lower()
 
 
-def test_exact_match_format_hint_finance_variant_relaxes_strict_rules() -> None:
-    """Phase 3a (2026-05-13 sprint): finance documents need a relaxed
-    variant — the strict 'output ONLY the answer span' rule truncates
-    sentence-form gold answers into wrong tag-like predictions
-    ('loans to micro firms' vs 'Micro firms show a more noticeable uptick
-    in NPL ratios at the end of the period'). The finance variant keeps
-    multi-part inclusion and no-conditional rules but allows descriptive
-    clauses."""
-    hint = _format_hint("exact_match", domain="finance")
-    hint_enum = _format_hint("exact_match", domain="Domain.FINANCE")
-    assert hint == hint_enum
-    # Finance must allow descriptive-clause answers
-    assert "descriptive sentence" in hint.lower() or "descriptive clause" in hint.lower()
-    # Finance keeps the multi-part inclusion rule (rule 3 equivalent)
-    assert "multi-part" in hint or "all parts" in hint.lower()
-    # Finance keeps no-conditional-answer rule
-    assert "conditional" in hint.lower()
-    # Finance must NOT contain the strict "Output ONLY the answer span" rule
-    assert "Output ONLY the answer span" not in hint
-    # Finance gets the country/region full-name nudge
-    assert "Latvia" in hint or "full name" in hint.lower()
+def test_exact_match_format_hint_finance_sentence_form_variant_fires_only_for_specific_families() -> (
+    None
+):
+    """Phase 3a v2 (2026-05-13 sprint): the relaxed finance variant is gated
+    on question_family. Sentence-form-prone families
+    (`chart_caption_fusion`, `multi_chart_comparison`, etc.) get the relaxed
+    prompt that allows descriptive clauses; everything else stays strict.
+
+    Why: the v1 release blindly relaxed all finance prompts, which caused
+    over-extraction on short-label finance golds (author names, ticker
+    strings) — e.g. 'Stephanie Aliaga' became 'Stephanie Aliaga — her
+    portrait is in the leftmost column'. v2 routes by question_family so
+    short-label finance answers keep the strict datasheet prompt."""
+    relaxed = _format_hint("exact_match", domain="finance", question_family="chart_caption_fusion")
+    assert "descriptive sentence" in relaxed.lower() or "descriptive clause" in relaxed.lower()
+    assert "Output ONLY the answer span" not in relaxed
+    assert (
+        "do not pad short answers" in relaxed.lower() or "favor a short answer" in relaxed.lower()
+    )
+
+    # Finance + non-sentence-form family -> strict datasheet variant
+    strict = _format_hint("exact_match", domain="finance", question_family="direct_label_reading")
+    assert "Output ONLY the answer span" in strict
+    assert strict == _format_hint("exact_match", domain="datasheet")
+
+    # Finance + None family -> falls back to strict (conservative)
+    assert _format_hint("exact_match", domain="finance", question_family=None) == strict
+
+    # Datasheet + ANY question_family -> always strict, regardless of family
+    for fam in ("chart_caption_fusion", "spec_table_cell_retrieval", None):
+        assert _format_hint("exact_match", domain="datasheet", question_family=fam) == strict
 
 
 def test_exact_match_format_hint_unknown_domain_falls_back_to_datasheet() -> None:

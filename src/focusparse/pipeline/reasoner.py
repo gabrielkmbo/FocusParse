@@ -112,40 +112,62 @@ _DATASHEET_EXACT_MATCH_HINT = (
     "[8:5]=b1111."
 )
 
-# Phase 3a (2026-05-13 sprint): finance documents diverge from datasheets.
-# Phase 6a's 4-rule tightening helped datasheets (+7.3pp) but hurt finance
-# (-11.4pp) per the 2026-05-11 ablation. The finance failure mix is
-# different — many golds are sentence-form claims about chart contents
-# (e.g. 'Micro firms show a more noticeable uptick in NPL ratios...'),
-# and the strict 'output ONLY the answer span' rule actively truncates
-# those into wrong tag-like answers ('loans to micro firms'). The
-# finance variant keeps the multi-part inclusion (rule 3) and the
-# no-conditional-answer rule (rule 4), but relaxes 1 and 2 so the model
-# can return a descriptive clause when the document presents the answer
-# in that form. It also reminds the model to preserve any unit / sign /
-# parenthesization the document uses.
-_FINANCE_EXACT_MATCH_HINT = (
+# Phase 3a v2 (2026-05-13 sprint): finance documents diverge from
+# datasheets, but the divergence is concentrated in a SPECIFIC set of
+# question_families where the gold is a sentence-form claim about a
+# chart (e.g. 'Micro firms show a more noticeable uptick in NPL
+# ratios...'). For short-label finance golds (author names, ticker
+# strings, '$(40) million'), the original Phase 6a strict prompt is
+# the better choice — relaxing it on those examples causes
+# over-extraction ('Stephanie Aliaga — her portrait and caption are
+# directly above Grant Papa in the leftmost Americas New York
+# column' instead of the gold 'Stephanie Aliaga').
+#
+# So the relaxed variant is gated on (domain == finance) AND
+# (question_family in _SENTENCE_FORM_FAMILIES). Everything else
+# falls back to the strict datasheet prompt.
+_SENTENCE_FORM_FAMILIES: frozenset[str] = frozenset(
+    {
+        # Finance families whose gold answers are frequently sentence-form
+        # claims about chart/figure contents (per the n=148 failure triage).
+        "chart_caption_fusion",
+        "chart_footnote_fusion",
+        "multi_chart_comparison",
+        "chart_table_cross_ref",
+        "dual_axis_disambiguation",
+        "figure_caption_cross_ref",
+        # `distant_evidence_fusion` on finance also tends sentence-form
+        # (synthesized claims spanning regions), though on datasheet it
+        # is typically a short label — so we filter by domain too.
+        "distant_evidence_fusion",
+    }
+)
+
+
+_FINANCE_SENTENCE_FORM_EXACT_MATCH_HINT = (
     "Answer with the exact label, identifier, phrase, or short descriptive "
     "clause from the document. Quote the document verbatim where possible "
     "and preserve its exact wording, punctuation, units, currency symbols, "
-    "and parenthesization (e.g. '$(40) million' should stay '$(40) million' "
-    "when that is how the document reports a negative; 'Class A Common Stock, "
-    "$0.001 par value (GOOGL)' must include the parenthesized ticker if "
-    "present).\n\n"
-    "Formatting rules (finance variant):\n"
+    "and parenthesization.\n\n"
+    "Formatting rules (finance sentence-form variant; applies because the "
+    "question_family is one that often has a sentence-form gold answer):\n"
     "1. When the document presents the answer as a descriptive sentence or "
-    "clause (especially for chart-interpretation, trend, or comparison "
-    "questions), include the full clause as it appears — do not collapse "
-    "to a single tag (e.g. if the gold answer is 'Micro firms show a more "
-    "noticeable uptick in NPL ratios at the end of the period', do NOT "
-    "answer 'loans to micro firms').\n"
-    "2. When the document presents the answer as a short label or value, "
-    "keep it short — match the granularity of the document's own phrasing.\n"
+    "clause about a chart, trend, comparison, or relationship between "
+    "regions / categories / time periods, include the full clause as it "
+    "appears — do not collapse to a single tag (e.g. if the gold answer "
+    "is 'Micro firms show a more noticeable uptick in NPL ratios at the "
+    "end of the period', do NOT answer 'loans to micro firms').\n"
+    "2. When the document presents the answer as a short label or single "
+    "value, keep it short — match the granularity of the document's own "
+    "phrasing. Do not pad short answers with explanatory clauses (e.g. if "
+    "the gold answer is the name 'Stephanie Aliaga', do NOT add '— her "
+    "portrait is in the leftmost column'). When in doubt about length, "
+    "favor a SHORT answer matching the most direct span in the document.\n"
     "3. When the answer is a multi-part phrase joined by punctuation, "
     "include ALL parts in the exact form they appear in the document — do "
     "not truncate to the first part and do not reorder the parts.\n"
-    "4. Do NOT return alternative or conditional answers ('if X then A; if "
-    "Y then B'). Select the single value that matches the question's "
+    "4. Do NOT return alternative or conditional answers ('if X then A; "
+    "if Y then B'). Select the single value that matches the question's "
     "specified condition.\n"
     "5. For chart readings: state the value at the labelled axis tick "
     "closest to the curve / bar / point being asked about. If the document "
@@ -153,6 +175,10 @@ _FINANCE_EXACT_MATCH_HINT = (
     "answer with that full name (e.g. 'Latvia', not the 2-letter ISO "
     "code 'LV')."
 )
+
+
+def _is_finance_domain(domain: str | None) -> bool:
+    return bool(domain) and "finance" in domain.lower()
 
 
 def _format_hint(
@@ -165,12 +191,12 @@ def _format_hint(
     cycle (reasoner is imported by workflow). Type-aware nudges so the model
     emits scorer-compliant output instead of prose.
 
-    Phase 3a (2026-05-13 sprint): `domain` routes the exact_match hint —
-    datasheet keeps the strict 4-rule prompt, finance gets a relaxed
-    variant that allows descriptive-clause answers when the document
-    presents them that way. `question_family` is reserved for future
-    family-specific addenda (e.g. tie-handling on near_miss_distractor)
-    but not yet branched on.
+    Phase 3a v2 (2026-05-13 sprint): exact_match prompt routes by
+    (domain, question_family). The strict datasheet prompt is the
+    default; the relaxed finance sentence-form variant fires ONLY when
+    domain == finance AND question_family is known to often have a
+    sentence-form gold. This avoids over-extraction on short-label
+    finance answers (author names, ticker strings, etc.).
     """
     if not answer_type:
         return ""
@@ -183,9 +209,14 @@ def _format_hint(
             "or extra units beyond what the question asks for."
         )
     if stem == "exact_match":
-        dom = (domain or "").lower()
-        if "finance" in dom:
-            return _FINANCE_EXACT_MATCH_HINT
+        # Phase 3a v2: relaxed variant fires ONLY for finance examples
+        # whose question_family is known to often have a sentence-form
+        # gold answer. All other examples (including most of finance —
+        # author names, ticker strings, short cell values) get the strict
+        # datasheet prompt to avoid over-extraction.
+        fam = (question_family or "").lower()
+        if _is_finance_domain(domain) and fam in _SENTENCE_FORM_FAMILIES:
+            return _FINANCE_SENTENCE_FORM_EXACT_MATCH_HINT
         return _DATASHEET_EXACT_MATCH_HINT
     if stem == "boolean":
         return "Answer 'yes' or 'no'."
@@ -202,6 +233,7 @@ async def answer_from_evidence(
     *,
     backend_client: ModelClient,
     escalation_hint: str | None = None,
+    question_family: str | None = None,
 ) -> tuple[AnswerEvent, ModelResponse]:
     """One VLM call over the packet images. Returns parsed answer + raw response.
 
@@ -214,6 +246,10 @@ async def answer_from_evidence(
     reasoner "your last try was unsupported; here's why" without changing
     the evidence packets. Pass it from the workflow's retry handler; pass
     None for first-attempt and routine answer calls.
+
+    `question_family`, when provided, routes the exact_match format hint
+    to a domain × family-specific variant (Phase 3a v2). The workflow
+    passes `plan.question_family`; tests / direct callers can omit.
     """
     packet_list = "\n".join(
         _render_packet_line(p, question_text=question.question) for p in evidence.packets
@@ -228,7 +264,11 @@ async def answer_from_evidence(
             "and scorer-compliant: do not add explanations, qualifiers, or "
             "copied verifier language.\n\n"
         )
-    format_hint = _format_hint(question.answer_type, domain=question.domain)
+    format_hint = _format_hint(
+        question.answer_type,
+        domain=question.domain,
+        question_family=question_family,
+    )
     format_block = f"\n{format_hint}\n" if format_hint else ""
     prompt = (
         f"{hint_block}"

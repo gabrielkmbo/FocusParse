@@ -554,6 +554,7 @@ class FocusWorkflow:
             escalation_hint=None,
             recorder=recorder,
             step_counter=step_counter,
+            question_family=plan.question_family,
         )
 
         # Phase 3d (2026-05-13 sprint): proactive non-abstain retry.
@@ -589,6 +590,7 @@ class FocusWorkflow:
                 step_counter=step_counter,
                 retry_attempt=0,
                 evidence_scope="full",
+                question_family=plan.question_family,
             )
             if not _answer_looks_unanswerable(retry_answer.answer):
                 _add_debug_event(
@@ -810,6 +812,7 @@ class FocusWorkflow:
                 step_counter=step_counter,
                 retry_attempt=retries_used,
                 evidence_scope=_evidence_scope(evidence, retry_answer_evidence),
+                question_family=plan.question_family,
             )
             answer_evidence = retry_answer_evidence
             verdict, verify_response = await self._run_verify(
@@ -1315,12 +1318,14 @@ class FocusWorkflow:
         step_counter: _StepCounter,
         retry_attempt: int = 0,
         evidence_scope: str = "full",
+        question_family: str | None = None,
     ) -> tuple[AnswerEvent, ModelResponse]:
         answer_event, reasoner_response = await answer_from_evidence(
             question_event,
             evidence,
             backend_client=self.backend_client,
             escalation_hint=escalation_hint,
+            question_family=question_family,
         )
         recorder.record(
             TrajectoryStep(
