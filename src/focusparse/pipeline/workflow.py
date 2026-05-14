@@ -31,7 +31,11 @@ from focusparse.pipeline.expander import expand_context
 from focusparse.pipeline.inspector import _FINE_DETAIL_QUESTION_FAMILIES, inspect_regions
 from focusparse.pipeline.localizer import propose_regions
 from focusparse.pipeline.planner import plan_question
-from focusparse.pipeline.reasoner import answer_from_evidence
+from focusparse.pipeline.reasoner import (
+    answer_from_evidence,
+    answer_from_evidence_k_samples,
+    pick_best_answer,
+)
 from focusparse.pipeline.region_reranker import rerank_regions
 from focusparse.pipeline.router import route_pages
 from focusparse.pipeline.verifier import verify_answer
@@ -290,6 +294,7 @@ class FocusWorkflow:
         layout_max_retries: int | None = None,
         layout_timeout_s: float | None = None,
         proactive_non_abstain_retry: bool = True,
+        reasoner_self_consistency_k: int = 1,
     ) -> None:
         self.backend_client = backend_client
         self.config = config
@@ -354,6 +359,20 @@ class FocusWorkflow:
         # has a concrete non-null gold — so this is overwhelmingly harness
         # error, not benchmark error. Costs ~+8% of a reasoner call/example.
         self.proactive_non_abstain_retry = proactive_non_abstain_retry
+        # Phase 3b (2026-05-14 sprint): K-sample reasoner self-consistency.
+        # When k > 1, the initial answer step runs `k` parallel reasoner calls
+        # with diversified prompt variants and picks the best via
+        # `reasoner.pick_best_answer` (non-Unanswerable, more citations,
+        # shorter for exact_match/numeric, higher confidence). Retry-loop
+        # answer calls stay k=1 — only the initial pass uses self-consistency,
+        # because retries already have the verifier's reason as guidance.
+        # Cost: ~k× initial reasoner spend; predicted +2-3pp on the 45-row
+        # wrong_extraction_other bucket at k=2.
+        if reasoner_self_consistency_k < 1:
+            raise ValueError(
+                f"reasoner_self_consistency_k must be >= 1, got {reasoner_self_consistency_k!r}"
+            )
+        self.reasoner_self_consistency_k = reasoner_self_consistency_k
 
     def _client_for(self, role: str) -> ModelClient | None:
         """Resolve a role-scoped client via `tier_router`, else return None.
@@ -1352,6 +1371,92 @@ class FocusWorkflow:
         evidence_scope: str = "full",
         question_family: str | None = None,
     ) -> tuple[AnswerEvent, ModelResponse]:
+        # Phase 3b (2026-05-14 sprint): K-sample self-consistency on the
+        # initial answer call only. Retry calls already have verifier
+        # guidance and stay k=1 so retry budgets aren't blown.
+        use_self_consistency = (
+            self.reasoner_self_consistency_k > 1 and retry_attempt == 0 and not escalation_hint
+        )
+
+        if use_self_consistency:
+            answer_events, responses = await answer_from_evidence_k_samples(
+                question_event,
+                evidence,
+                backend_client=self.backend_client,
+                k=self.reasoner_self_consistency_k,
+                escalation_hint=escalation_hint,
+                question_family=question_family,
+            )
+            best_idx = pick_best_answer(answer_events, answer_type=question_event.answer_type)
+            answer_event = answer_events[best_idx]
+            reasoner_response = responses[best_idx]
+            # Sum token + cost telemetry across all K samples — the run
+            # paid for every call, not just the chosen one. Latency stays
+            # the max of the K (asyncio.gather runs them in parallel).
+            total_tokens_in = sum(r.tokens_in or 0 for r in responses)
+            total_tokens_out = sum(r.tokens_out or 0 for r in responses)
+            total_usd = sum(r.usd or 0.0 for r in responses)
+            max_latency_ms = max((r.latency_ms or 0) for r in responses)
+            sample_log = [
+                {
+                    "sample_variant": i,
+                    "answer": ev.answer,
+                    "n_citations": len(ev.citations or []),
+                    "confidence": ev.confidence,
+                    "chosen": i == best_idx,
+                }
+                for i, ev in enumerate(answer_events)
+            ]
+            _add_debug_event(
+                recorder,
+                stage="answer",
+                event_type="self_consistency",
+                retry_attempt=retry_attempt,
+                payload={
+                    "k": self.reasoner_self_consistency_k,
+                    "chosen_index": best_idx,
+                    "samples": sample_log,
+                    "all_agree": len({(ev.answer or "").strip() for ev in answer_events}) == 1,
+                },
+            )
+            recorder.record(
+                TrajectoryStep(
+                    step_index=step_counter.next(),
+                    stage="answer",
+                    tier="reasoner",
+                    action="llm_call_k",
+                    args={
+                        "n_packets": len(evidence.packets),
+                        "retry_attempt": retry_attempt,
+                        "had_escalation_hint": bool(escalation_hint),
+                        "evidence_scope": evidence_scope,
+                        "self_consistency_k": self.reasoner_self_consistency_k,
+                        "chosen_index": best_idx,
+                    },
+                    obs_summary=(reasoner_response.text[:200] if reasoner_response.text else None),
+                    tokens_in=total_tokens_in,
+                    tokens_out=total_tokens_out,
+                    latency_ms=max_latency_ms,
+                    usd=total_usd,
+                    confidence=answer_event.confidence,
+                )
+            )
+            _add_debug_event(
+                recorder,
+                stage="answer",
+                event_type="answer",
+                retry_attempt=retry_attempt,
+                payload={
+                    "answer": answer_event.answer,
+                    "citations": list(answer_event.citations),
+                    "confidence": answer_event.confidence,
+                    "had_escalation_hint": bool(escalation_hint),
+                    "evidence_scope": evidence_scope,
+                    "self_consistency_k": self.reasoner_self_consistency_k,
+                },
+            )
+            return answer_event, reasoner_response
+
         answer_event, reasoner_response = await answer_from_evidence(
             question_event,
             evidence,

@@ -234,6 +234,7 @@ async def answer_from_evidence(
     backend_client: ModelClient,
     escalation_hint: str | None = None,
     question_family: str | None = None,
+    sample_variant: int = 0,
 ) -> tuple[AnswerEvent, ModelResponse]:
     """One VLM call over the packet images. Returns parsed answer + raw response.
 
@@ -250,6 +251,11 @@ async def answer_from_evidence(
     `question_family`, when provided, routes the exact_match format hint
     to a domain × family-specific variant (Phase 3a v2). The workflow
     passes `plan.question_family`; tests / direct callers can omit.
+
+    `sample_variant` (Phase 3b, 2026-05-14 sprint) selects a prompt
+    variant when running K=2 self-consistency. Variant 0 is the default
+    prompt (back-compat). Variant 1 adds a verbatim-grounding nudge — a
+    different angle so K=2 isn't just sampling-noise on the same prompt.
     """
     packet_list = "\n".join(
         _render_packet_line(p, question_text=question.question) for p in evidence.packets
@@ -270,11 +276,12 @@ async def answer_from_evidence(
         question_family=question_family,
     )
     format_block = f"\n{format_hint}\n" if format_hint else ""
+    variant_block = _sample_variant_addendum(sample_variant)
     prompt = (
         f"{hint_block}"
         f"Question: {question.question}\n\n"
         f"Available evidence packets:\n{packet_list}\n\n"
-        f"Answer using only these packets.{format_block}"
+        f"Answer using only these packets.{format_block}{variant_block}"
     )
     images = _collect_packet_images(evidence)
 
@@ -297,6 +304,138 @@ async def answer_from_evidence(
         ),
         response,
     )
+
+
+def _sample_variant_addendum(sample_variant: int) -> str:
+    """Phase 3b (2026-05-14 sprint): per-sample prompt diversification.
+
+    K=2 self-consistency with the same prompt on a low-temperature model
+    often returns the same answer twice — no diversity, no gain. Each
+    sample beyond variant 0 appends a short addendum that pushes the
+    model to consider the question from a different angle, so the K
+    samples land on genuinely independent reasoning paths.
+    """
+    if sample_variant == 0:
+        return ""
+    if sample_variant == 1:
+        return (
+            "\nBefore finalizing your answer, locate the exact span of text "
+            "in at least one cited packet that supports your answer. If the "
+            "exact span is not present, revise your answer to match the "
+            "document's wording. Match the document's punctuation, spacing, "
+            "and units verbatim.\n"
+        )
+    return ""
+
+
+async def answer_from_evidence_k_samples(
+    question: QuestionEvent,
+    evidence: EvidenceEvent,
+    *,
+    backend_client: ModelClient,
+    k: int = 1,
+    escalation_hint: str | None = None,
+    question_family: str | None = None,
+) -> tuple[list[AnswerEvent], list[ModelResponse]]:
+    """Phase 3b (2026-05-14 sprint): K=2 reasoner self-consistency.
+
+    Runs `k` reasoner calls in parallel (asyncio.gather) with diversified
+    prompt variants so each sample explores a different angle. Returns
+    the parallel lists of AnswerEvent and ModelResponse, in the order
+    of `sample_variant=0, 1, ..., k-1`.
+
+    Caller is responsible for picking via `pick_best_answer`. Cost is
+    `k * 1` reasoner calls; predicted +2-3pp on the n=148
+    wrong_extraction_other bucket at k=2.
+    """
+    import asyncio
+
+    if k <= 1:
+        answer_event, response = await answer_from_evidence(
+            question,
+            evidence,
+            backend_client=backend_client,
+            escalation_hint=escalation_hint,
+            question_family=question_family,
+            sample_variant=0,
+        )
+        return [answer_event], [response]
+
+    tasks = [
+        answer_from_evidence(
+            question,
+            evidence,
+            backend_client=backend_client,
+            escalation_hint=escalation_hint,
+            question_family=question_family,
+            sample_variant=i,
+        )
+        for i in range(k)
+    ]
+    results = await asyncio.gather(*tasks)
+    answer_events = [r[0] for r in results]
+    responses = [r[1] for r in results]
+    return answer_events, responses
+
+
+def pick_best_answer(
+    answer_events: list[AnswerEvent],
+    *,
+    answer_type: str | None,
+) -> int:
+    """Pick the best of K self-consistency samples. Returns the chosen index.
+
+    Heuristic ordering (most-preferred first):
+      1. Non-Unanswerable beats Unanswerable.
+      2. Citation count: more cited packets is better.
+      3. For exact_match / numeric / boolean: shorter answer is better
+         (the format hints all push for concise spans; a verbose sample is
+         usually the model padding).
+      4. Higher self-reported confidence.
+      5. Sample index 0 (tie-breaker).
+
+    A sample appearing in `k` of the samples (consensus) does not get a
+    direct vote — the heuristic ordering already favors the concise
+    self-confident citation-anchored sample, which the consensus sample
+    usually is. Keeping the picker pure-heuristic (no string match)
+    avoids edge cases where two phrasings of the same answer are treated
+    as a tie.
+    """
+    if not answer_events:
+        raise ValueError("answer_events is empty")
+    if len(answer_events) == 1:
+        return 0
+
+    stem = (str(answer_type).split(".")[-1].lower() if answer_type else "").strip()
+    prefer_short = stem in {"exact_match", "numeric", "boolean", "multiple_choice"}
+
+    def key(idx_event: tuple[int, AnswerEvent]):
+        idx, ev = idx_event
+        is_unanswerable = (ev.answer or "").strip().lower() in {
+            "unanswerable",
+            "unknown",
+            "cannot determine",
+            "can't determine",
+            "",
+        }
+        n_citations = len(ev.citations or [])
+        ans_len = len(ev.answer or "")
+        # Sort key: lower is better.
+        # - Unanswerable last (1 vs 0)
+        # - More citations first (negate)
+        # - Shorter first (only when prefer_short)
+        # - Higher confidence first (negate)
+        # - Lower index first (stable tie-break)
+        return (
+            1 if is_unanswerable else 0,
+            -n_citations,
+            ans_len if prefer_short else 0,
+            -float(ev.confidence or 0.0),
+            idx,
+        )
+
+    best_idx, _ = min(enumerate(answer_events), key=key)
+    return best_idx
 
 
 def _render_packet_line(packet, *, question_text: str | None = None) -> str:

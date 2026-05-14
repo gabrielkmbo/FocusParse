@@ -615,3 +615,125 @@ def test_system_prompt_explains_neighbor_layout() -> None:
     assert "context_window" in _SYSTEM_PROMPT
     assert "zoomed" in _SYSTEM_PROMPT
     assert "context" in _SYSTEM_PROMPT.lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3b (2026-05-14 sprint): K-sample self-consistency
+# ---------------------------------------------------------------------------
+
+
+def test_phase3b_sample_variant_addendum_empty_for_variant_zero() -> None:
+    """Phase 3b: variant 0 is the back-compat default — no prompt change."""
+    from focusparse.pipeline.reasoner import _sample_variant_addendum
+
+    assert _sample_variant_addendum(0) == ""
+
+
+def test_phase3b_sample_variant_addendum_variant_one_has_verbatim_grounding() -> None:
+    """Phase 3b: variant 1 nudges the model to anchor its answer in the
+    cited packet's verbatim wording. K=2 with same prompt on a low-temp
+    model usually returns identical samples; this addendum gives variant
+    1 a different angle so the K samples explore independent paths."""
+    from focusparse.pipeline.reasoner import _sample_variant_addendum
+
+    text = _sample_variant_addendum(1)
+    assert "exact span" in text.lower()
+    assert "cited packet" in text.lower() or "cited packets" in text.lower()
+
+
+def test_phase3b_pick_best_answer_prefers_non_unanswerable() -> None:
+    """Picker rule 1: any concrete answer beats `Unanswerable`."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="Unanswerable", citations=["pkt_000"], confidence=0.9),
+        AnswerEvent(answer="0x3FFFF8", citations=["pkt_000"], confidence=0.5),
+    ]
+    assert pick_best_answer(samples, answer_type="exact_match") == 1
+
+
+def test_phase3b_pick_best_answer_prefers_more_citations() -> None:
+    """Picker rule 2: more citations wins (citation count ranks before length
+    and confidence)."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="b0010", citations=["pkt_000"], confidence=0.9),
+        AnswerEvent(answer="b0010", citations=["pkt_000", "pkt_001"], confidence=0.5),
+    ]
+    assert pick_best_answer(samples, answer_type="exact_match") == 1
+
+
+def test_phase3b_pick_best_answer_prefers_shorter_for_exact_match() -> None:
+    """Picker rule 3: for exact_match / numeric the format hints push for
+    a concise span — a verbose sample is the model padding. Pick the
+    shorter answer when citation counts are equal."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(
+            answer="Stephanie Aliaga — her portrait is in the leftmost column",
+            citations=["pkt_000"],
+            confidence=0.7,
+        ),
+        AnswerEvent(answer="Stephanie Aliaga", citations=["pkt_000"], confidence=0.7),
+    ]
+    assert pick_best_answer(samples, answer_type="exact_match") == 1
+
+
+def test_phase3b_pick_best_answer_higher_confidence_breaks_tie() -> None:
+    """Picker rule 4: when non-Unanswerable, citation count, and length all
+    tie, higher self-reported confidence wins."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="70%", citations=["pkt_000"], confidence=0.4),
+        AnswerEvent(answer="70%", citations=["pkt_000"], confidence=0.9),
+    ]
+    assert pick_best_answer(samples, answer_type="exact_match") == 1
+
+
+def test_phase3b_pick_best_answer_index_zero_breaks_final_tie() -> None:
+    """Picker rule 5: total tie → keep sample 0 (back-compat with k=1
+    behavior)."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="70%", citations=["pkt_000"], confidence=0.5),
+        AnswerEvent(answer="70%", citations=["pkt_000"], confidence=0.5),
+    ]
+    assert pick_best_answer(samples, answer_type="exact_match") == 0
+
+
+def test_phase3b_pick_best_answer_does_not_prefer_short_for_freeform() -> None:
+    """For answer types without a concise-span format hint (None /
+    unknown), shorter is NOT preferred — only citation count + confidence
+    matter. This keeps the picker from arbitrarily truncating valid long
+    answers."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(
+            answer="A very long, detailed answer that is correct.",
+            citations=["pkt_000"],
+            confidence=0.5,
+        ),
+        AnswerEvent(answer="short wrong answer", citations=["pkt_000"], confidence=0.5),
+    ]
+    # No answer_type → no preference for shorter, so index 0 wins on tie.
+    assert pick_best_answer(samples, answer_type=None) == 0
+
+
+def test_phase3b_pick_best_answer_single_sample_returns_zero() -> None:
+    """Picker on a single sample is a no-op."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [AnswerEvent(answer="x", citations=[], confidence=0.5)]
+    assert pick_best_answer(samples, answer_type="exact_match") == 0
