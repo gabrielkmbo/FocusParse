@@ -1484,6 +1484,108 @@ async def test_loop_allows_single_entity_shape_retry(tmp_path, parser_bench_subm
     assert "Keep the answer field concise" in reasoner.calls[1]["prompt"]
 
 
+async def test_phase3d_proactive_non_abstain_retry_recovers_lazy_answer(
+    tmp_path, parser_bench_submodule_present
+):
+    """Phase 3d (2026-05-13 sprint): when the initial answer is 'Unanswerable'
+    but the reasoner cited at least one evidence packet (i.e. evidence is
+    present and the reasoner gave up on extraction), a single proactive
+    retry with a 'do not abstain' hint fires before the verifier sees the
+    abstention. If the retry produces a concrete answer, it replaces the
+    abstention."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            # Initial: lazy abstain with 1 citation (citations get filtered to
+            # the set of actual packet ids; test setup yields packet pkt_000).
+            '{"answer": "Unanswerable", "citations": ["pkt_000"], "confidence": 0.3}',
+            # Proactive retry: concrete answer
+            '{"answer": "0x3FFFF8", "citations": ["pkt_000"], "confidence": 0.9}',
+        ]
+    )
+    verifier = _FakeClient(_verdict_json(supported=True, next_action="accept"))
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        proactive_non_abstain_retry=True,
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "0x3FFFF8"
+    # citations are page/bbox dicts, not packet_id strings
+    assert len(result.citations) >= 1
+    # The proactive retry produced a debug selection event with the right reason.
+    selection_events = [
+        e for e in result.trace.debug_events if e.stage == "answer" and e.event_type == "selection"
+    ]
+    assert any(s.payload.get("selected") == "proactive_non_abstain_retry" for s in selection_events)
+    # Verify both reasoner calls happened: initial (no hint) + proactive retry (with hint).
+    assert len(reasoner.calls) == 2
+    assert "Your previous answer was 'Unanswerable'" in reasoner.calls[1]["prompt"]
+
+
+async def test_phase3d_skips_retry_when_initial_answer_has_no_citations(
+    tmp_path, parser_bench_submodule_present
+):
+    """Phase 3d guard: when the initial 'Unanswerable' answer cites zero
+    packets, the model didn't find candidate evidence so we trust its
+    abstention rather than spending a reasoner call on a likely
+    hallucinated retry."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            # Initial: abstain with no citations -> no proactive retry.
+            '{"answer": "Unanswerable", "citations": [], "confidence": 0.2}',
+        ]
+    )
+    verifier = _FakeClient(_verdict_json(supported=False, next_action="abstain"))
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        proactive_non_abstain_retry=True,
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    # Only one reasoner call was made (no proactive retry).
+    assert len(reasoner.calls) == 1
+    assert result.answer == "Unanswerable"
+
+
+async def test_phase3d_flag_off_preserves_legacy_behavior(tmp_path, parser_bench_submodule_present):
+    """Phase 3d is gated by `proactive_non_abstain_retry`; passing False
+    restores the pre-Phase-3d flow (no proactive retry on lazy abstain)."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            # Initial: abstain with 2 citations — pre-Phase-3d would NOT retry
+            '{"answer": "Unanswerable", "citations": ["pkt_000", "pkt_001"], "confidence": 0.3}',
+        ]
+    )
+    verifier = _FakeClient(_verdict_json(supported=False, next_action="abstain"))
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        proactive_non_abstain_retry=False,
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    # Only one reasoner call (flag off — no proactive retry).
+    assert len(reasoner.calls) == 1
+    assert result.answer == "Unanswerable"
+
+
 async def test_loop_abstain_terminates_with_unanswerable(tmp_path, parser_bench_submodule_present):
     """abstain replaces the answer with 'Unanswerable' and ends the loop."""
     if not parser_bench_submodule_present:

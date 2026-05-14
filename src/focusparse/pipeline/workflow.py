@@ -257,6 +257,7 @@ class FocusWorkflow:
         allow_layout_endpoint_fallback: bool = True,
         layout_max_retries: int | None = None,
         layout_timeout_s: float | None = None,
+        proactive_non_abstain_retry: bool = True,
     ) -> None:
         self.backend_client = backend_client
         self.config = config
@@ -312,6 +313,15 @@ class FocusWorkflow:
         self.allow_layout_endpoint_fallback = allow_layout_endpoint_fallback
         self.layout_max_retries = layout_max_retries
         self.layout_timeout_s = layout_timeout_s
+        # Phase 3d (2026-05-13 sprint): proactive non-abstain retry. When the
+        # initial reasoner answer is 'Unanswerable' but the reasoner cited >= 2
+        # evidence packets (i.e. it found candidate evidence but gave up on
+        # extraction), force one extra reasoner call with a 'do not abstain'
+        # hint before letting the verifier see the abstention. On n=148
+        # main-stack the lazy_answer_rate is 8.1% (12/148) and every lazy row
+        # has a concrete non-null gold — so this is overwhelmingly harness
+        # error, not benchmark error. Costs ~+8% of a reasoner call/example.
+        self.proactive_non_abstain_retry = proactive_non_abstain_retry
 
     def _client_for(self, role: str) -> ModelClient | None:
         """Resolve a role-scoped client via `tier_router`, else return None.
@@ -545,6 +555,59 @@ class FocusWorkflow:
             recorder=recorder,
             step_counter=step_counter,
         )
+
+        # Phase 3d (2026-05-13 sprint): proactive non-abstain retry.
+        # When the initial answer is 'Unanswerable' but the reasoner cited
+        # at least one packet, the evidence is present and the reasoner gave
+        # up on extraction. Re-prompt once with a 'do not abstain' hint
+        # before the verifier sees the abstention. Citation-gated so cases
+        # with zero citations (the model genuinely saw nothing) do not
+        # trigger a hallucination-prone retry. Default-on; gated by a config
+        # flag so we can A/B if needed.
+        if (
+            self.proactive_non_abstain_retry
+            and _answer_looks_unanswerable(answer_event.answer)
+            and len(answer_event.citations) >= 1
+            and len(evidence.packets) >= 1
+        ):
+            non_abstain_hint = (
+                "Your previous answer was 'Unanswerable' but you cited "
+                f"{len(answer_event.citations)} evidence packet(s). The "
+                "verifier will compare your answer against those packets — "
+                "they likely contain the answer. Re-read the cited packets "
+                "carefully, look at the attached neighbor / context-window "
+                "crops if present, and produce a concrete answer drawn "
+                "directly from the packet contents. Only return "
+                "'Unanswerable' if you can explicitly confirm that no "
+                "relevant data appears in any of the cited packets."
+            )
+            retry_answer, retry_response = await self._run_answer(
+                question_event,
+                evidence,
+                escalation_hint=non_abstain_hint,
+                recorder=recorder,
+                step_counter=step_counter,
+                retry_attempt=0,
+                evidence_scope="full",
+            )
+            if not _answer_looks_unanswerable(retry_answer.answer):
+                _add_debug_event(
+                    recorder,
+                    stage="answer",
+                    event_type="selection",
+                    retry_attempt=0,
+                    payload={
+                        "selected": "proactive_non_abstain_retry",
+                        "discarded_answer": answer_event.answer,
+                        "discarded_confidence": answer_event.confidence,
+                        "selected_answer": retry_answer.answer,
+                        "selected_confidence": retry_answer.confidence,
+                        "n_cited_packets": len(answer_event.citations),
+                    },
+                )
+                answer_event = retry_answer
+                reasoner_response = retry_response
+
         verifier_client = self._client_for("verifier")
         verdict, verify_response = await self._run_verify(
             question_event,
