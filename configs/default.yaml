@@ -59,8 +59,8 @@ escalation:
 # External endpoints.
 endpoints:
   layout:
-    url: https://jqkx3k3gn4ciymvi.us-east-1.aws.endpoints.huggingface.cloud
-    # Shared with parser-bench — be a polite neighbor.
+    url: https://llamaindex--layout-v3-triton-layoutv3triton-serve.modal.run
+    # Modal-hosted layout-v3 Triton service. Keep eval sweeps polite.
     rate_limit_rps: 2
     timeout_s: 180
     retries: 3
