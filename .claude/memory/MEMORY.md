@@ -114,8 +114,13 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 ## Known sharp edges
 
-- Layout HF endpoint (`jqkx3k3gn4ciymvi…`) returns a **single full-page bbox stub** on failure.
-  Signal: "whole page crops only". Check `HF_TOKEN` + backoff logs first; `tools/layout_detect.py` must raise on stub, not succeed silently.
+- Layout endpoint is Modal by default:
+  `https://llamaindex--layout-v3-triton-layoutv3triton-serve.modal.run`.
+  Use `LAYOUT_EXTRACTION_V3_MODAL_TOKEN`; `HF_TOKEN` is only a temporary
+  fallback for older local setups. The endpoint returns a **single full-page bbox
+  stub** on failure. Signal: "whole page crops only". Check the Modal token +
+  backoff logs first; `tools/layout_detect.py` must raise on stub, not succeed
+  silently.
 - NFS path uses SSH alias `llama-nfs` — must exist in `~/.ssh/config`. macOS `openrsync` needs `shlex.quote`'d remote paths (lift from parser-bench `scripts/run_generate.py` `_rsync`).
 - HF dataset revision is **not** pinned yet (plan §8.4 deferred). Benchmark is still being hardened (contact-sheet bbox fix + 300 dpi oracle crops per parser-bench slide deck 2026-04-13). Re-run baselines whenever the dataset advances; note advances here with the new revision SHA.
 - Layout endpoint is **shared** with parser-bench. Rate-limit to ≤ 2 req/s; cache layout output on disk under `cache/layout/<doc_sha>.json` so eval sweeps don't burn shared quota.
@@ -124,12 +129,50 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 - **8.1 parser-bench schema dep**: git submodule at `third_party/parser-bench/`.
 - **8.2 visual rerank**: skipped in v1 — FTS-only router. `visual_rerank.py` is a stub seam.
-- **8.3 layout endpoint**: cache-on-disk + rate-limited fallback to shared parser-bench endpoint.
+- **8.3 layout endpoint**: cache-on-disk + rate-limited fallback to shared Modal parser-bench endpoint.
 - **8.4 HF revision pin**: deferred; `FOCUSPARSE_DATASET_REVISION` env var wired for one-line flip later.
 
 ## Changelog
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
+
+### 2026-05-13 — full Modal run audit + transient provider retry
+
+Full validation run after the Modal layout migration and dynamic tool gating:
+`results/hf/sprint-2026-05-13/full-modal-compact-normalized-run1/`, HF revision
+`3774c67f8b814392b6d04c939e904f749a3f52eb`, 148 canonical validation rows after
+filtering 71 stress rows. Raw accuracy was **48.6%** (72/148); completed-row
+accuracy excluding 11 provider/network failures was **52.6%** (72/137). Cost was
+**$1.766** total, **$0.0245/correct**, mean latency **3.53s**, page recall
+**87.6%**, bbox IoU **80.4%**, lazy answer rate **8.1%**.
+
+Failure taxonomy: 72 correct, 11 infrastructure failures, 9 page/routing misses,
+9 region/evidence misses, and 47 answer/scorer/reasoning misses. The degradation
+from the earlier n=30 slice is therefore not primarily the Modal layout endpoint:
+Modal returned healthy 200s, and the largest completed-row bucket is post-evidence
+answer/scorer/reasoning. The new scientific audit is
+`docs/research/2026-05-13-full-run-failure-audit.md`; it also lists HF/scorer
+audit candidates such as abstention wording, part-number alternatives, country
+abbreviations, and equivalent zero formats.
+
+Dynamic tool use did not force all +4 tools: 55 rows used only `inspect_region`
+(58.2% accuracy, $0.606, 3.47s mean latency), 82 rows used
+`inspect_region+expand_context` (48.8%, $1.160, 4.05s), and the 11 no-tool rows
+were infra failures. Interpret the weaker expand bucket as harder-case routing
+until a matched difficulty control says otherwise.
+
+HF split drift: the live dataset now exposes `train`, `validation`, and `test`,
+while older FocusParse commands/tests still ask for parser-bench local names
+`dev`, `test`, and `holdout`. `BenchmarkLoader` maps `dev -> train`,
+`test -> validation`, and `holdout -> test` for HF streaming so legacy smoke
+commands keep working.
+
+To keep provider flakiness from being counted as harness reasoning failure,
+`src/focusparse/models/{openai,anthropic,gemini}.py` now wrap one provider
+operation in transient retry. New env vars: `FOCUSPARSE_MODEL_RETRY_ATTEMPTS`
+(default 2, max 5; legacy fallback `FOCUSPARSE_MODEL_RETRIES`) and
+`FOCUSPARSE_MODEL_RETRY_SLEEP_S` (default 0.5, exponential backoff). This is
+paired with the existing `FOCUSPARSE_MODEL_TIMEOUT_S` timeout guard.
 
 ### 2026-05-11 (afternoon) — Phase 4 slice analysis + Phase 5 trigger tightening
 

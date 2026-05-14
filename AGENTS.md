@@ -29,16 +29,24 @@ Python ≥ 3.11. Ruff line-length 100 (see `pyproject.toml`).
 Copy `.env.example` → `.env` and fill. Required for most work:
 
 - `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` — at least one reasoner provider.
-- `HF_TOKEN` — **mandatory** for HF layout endpoint and dataset streaming.
+- `HF_TOKEN` — **mandatory** for HF dataset streaming.
+- `LAYOUT_EXTRACTION_V3_MODAL_TOKEN` — **mandatory** for the Modal layout
+  endpoint. `HF_TOKEN` is accepted by the client as a temporary fallback for
+  older local setups.
 
 Optional:
 
 - `LLAMA_CLOUD_API_KEY` — LlamaParse/LlamaExtract baseline row (Phase 5).
-- `FOCUSPARSE_LAYOUT_ENDPOINT_URL` — override the default parser-bench endpoint.
+- `FOCUSPARSE_LAYOUT_ENDPOINT_URL` — override the default Modal layout endpoint.
 - `FOCUSPARSE_TIER_*` — override tier assignment per role at runtime.
 - `FOCUSPARSE_MODEL_TIMEOUT_S` — per-provider model call wall-clock timeout
   (default 180s). Keeps long evals from hanging indefinitely on a stuck API
-  request; timed-out examples are recorded as failures by the harness.
+  request.
+- `FOCUSPARSE_MODEL_RETRY_ATTEMPTS` — total provider-call attempts for transient
+  timeouts / connection failures (default 2, max 5). Keeps flaky network rows
+  from being miscounted as harness reasoning failures.
+- `FOCUSPARSE_MODEL_RETRY_SLEEP_S` — initial retry backoff in seconds
+  (default 0.5; doubles after each retry).
 
 ## Model tiers
 
@@ -58,7 +66,7 @@ Escalation is **per-stage** (one tier up on low confidence), never pipeline-wide
 
 ## External endpoints
 
-- **Layout** — `https://jqkx3k3gn4ciymvi.us-east-1.aws.endpoints.huggingface.cloud` (RT-DETRv2 via parser-bench). POST PNG bytes with `Authorization: Bearer $HF_TOKEN`. Rate-limit ≤ 2 req/s; cache on disk in `cache/layout/<doc_sha>.json`. Fall-back stub returns a single full-page bbox — if you see "whole page crops only", the endpoint is down or the token is wrong.
+- **Layout** — `https://llamaindex--layout-v3-triton-layoutv3triton-serve.modal.run` (layout-v3 Triton on Modal). POST PNG bytes with `Authorization: Bearer $LAYOUT_EXTRACTION_V3_MODAL_TOKEN`. Rate-limit ≤ 2 req/s; cache on disk in `cache/layout/<doc_sha>.json`. `HF_TOKEN` is accepted as a temporary fallback token. Fall-back stub returns a single full-page bbox — if you see "whole page crops only", the endpoint is down or the token is wrong.
 - **HF dataset** — `gabrielbo/parser-bench` (streaming default). Pin via `FOCUSPARSE_DATASET_REVISION` when the benchmark stabilizes.
 - **LlamaCloud** (optional) — `llama-cloud` pypi package, used only behind `[llamacloud]` extra.
 
@@ -89,7 +97,7 @@ FocusParse/
 │   ├── tools/                    # FunctionTool primitives (stay small and strong)
 │   │   ├── inspect_region.py     #   3 modes: image | element | region (no 4th without plan update)
 │   │   ├── run_python.py         #   sandboxed coding-zoom (subprocess + rlimit + import allowlist)
-│   │   ├── layout_detect.py      #   HF layout endpoint client; raises on stub responses
+│   │   ├── layout_detect.py      #   Modal layout endpoint client; raises on stub responses
 │   │   └── {expand_context,get_text_layer,chart_to_table}.py
 │   ├── evidence/
 │   │   ├── packet.py             #   EvidencePacket — the contract the reasoner sees (never raw pages)
@@ -155,7 +163,7 @@ This file is operational (commands / structure / contracts / failure modes). It 
 
 | Symptom                                  | Likely cause                                                                                  |
 | ---------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Whole-page crops only in a run           | Layout endpoint stub fallback. Check `HF_TOKEN` and endpoint status.                          |
+| Whole-page crops only in a run           | Layout endpoint stub fallback. Check `LAYOUT_EXTRACTION_V3_MODAL_TOKEN` and endpoint status.   |
 | `Generated 0 candidate examples`         | Dataset loader mismatch (schema drifted in parser-bench submodule); bump submodule SHA.       |
 | Empty visible response from Gemini       | Set `thinking_budget ≥ 1024`; Gemini 2.5/3.x otherwise spends all tokens on hidden reasoning. |
 | GPT-5.x "max_tokens not supported" error | Use `max_completion_tokens` (different param name than GPT-4.x).                              |

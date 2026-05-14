@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from focusparse.eval.pricing import compute_usd
+from focusparse.models._retry import retry_transient_model_call
 from focusparse.models._timeouts import model_timeout_s
 from focusparse.models.base import ModelResponse
 from focusparse.models.images import read_model_image_bytes
@@ -71,12 +72,16 @@ class OpenAIClient:
         input_messages.append({"role": "user", "content": user_content})
 
         t0 = time.perf_counter()
-        async with asyncio.timeout(timeout_s):
-            resp = await client.responses.create(
-                model=self.model,
-                input=input_messages,
-                max_output_tokens=max_tokens or self.max_completion_tokens,
-            )
+
+        async def _create_response():
+            async with asyncio.timeout(timeout_s):
+                return await client.responses.create(
+                    model=self.model,
+                    input=input_messages,
+                    max_output_tokens=max_tokens or self.max_completion_tokens,
+                )
+
+        resp = await retry_transient_model_call("openai", _create_response)
         latency_ms = int((time.perf_counter() - t0) * 1000)
 
         text = getattr(resp, "output_text", None) or ""
