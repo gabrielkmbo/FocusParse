@@ -7,7 +7,7 @@ Covers:
   * transient 502/503 is retried and eventually succeeds
   * ConnectError is retried
   * non-retryable 4xx raises LayoutEndpointUnavailable after one attempt
-  * missing HF_TOKEN raises LayoutEndpointUnavailable before any request
+  * missing layout token raises LayoutEndpointUnavailable before any request
   * disk cache round-trips: first call writes, second call skips the network
 
 Uses `httpx.MockTransport` so no external dependency is introduced — respx is
@@ -24,6 +24,8 @@ import pytest
 
 from focusparse.tools.layout_detect import (
     DEFAULT_ENDPOINT,
+    LAYOUT_TOKEN_ENV,
+    LEGACY_HF_TOKEN_ENV,
     DetectedBox,
     LayoutEndpointUnavailable,
     StubResponseError,
@@ -284,8 +286,43 @@ async def test_detect_layout_non_retryable_4xx_raises():
 # ---------------------------------------------------------------------------
 
 
-async def test_detect_layout_raises_when_hf_token_missing(monkeypatch):
-    monkeypatch.delenv("HF_TOKEN", raising=False)
+async def test_detect_layout_uses_modal_token_env(monkeypatch):
+    monkeypatch.setenv(LAYOUT_TOKEN_ENV, "modal-token")
+    monkeypatch.setenv(LEGACY_HF_TOKEN_ENV, "legacy-token")
+    record: list[httpx.Request] = []
+    transport = _transport([httpx.Response(200, json=_ok_payload())], record=record)
+
+    await detect_layout(
+        _PNG_BYTES,
+        page=1,
+        image_width=_WIDTH,
+        image_height=_HEIGHT,
+        transport=transport,
+    )
+
+    assert record[0].headers["authorization"] == "Bearer modal-token"
+
+
+async def test_detect_layout_falls_back_to_legacy_hf_token_env(monkeypatch):
+    monkeypatch.delenv(LAYOUT_TOKEN_ENV, raising=False)
+    monkeypatch.setenv(LEGACY_HF_TOKEN_ENV, "legacy-token")
+    record: list[httpx.Request] = []
+    transport = _transport([httpx.Response(200, json=_ok_payload())], record=record)
+
+    await detect_layout(
+        _PNG_BYTES,
+        page=1,
+        image_width=_WIDTH,
+        image_height=_HEIGHT,
+        transport=transport,
+    )
+
+    assert record[0].headers["authorization"] == "Bearer legacy-token"
+
+
+async def test_detect_layout_raises_when_layout_token_missing(monkeypatch):
+    monkeypatch.delenv(LAYOUT_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(LEGACY_HF_TOKEN_ENV, raising=False)
     with pytest.raises(LayoutEndpointUnavailable):
         await detect_layout(
             _PNG_BYTES,
