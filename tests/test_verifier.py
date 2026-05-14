@@ -58,13 +58,17 @@ class _FakeVerifierClient:
         return max(1, len(text) // 4)
 
 
-def _question(domain: str | None = None) -> QuestionEvent:
+def _question(
+    domain: str | None = None,
+    answer_type: str | None = None,
+) -> QuestionEvent:
     return QuestionEvent(
         example_id="ex-1",
         question="What is the max supply voltage on the MCU?",
         doc_id="datasheet-A",
         pages_available=10,
         domain=domain,
+        answer_type=answer_type,
     )
 
 
@@ -535,3 +539,51 @@ async def test_verify_llm_robust_to_bad_payloads(bad_payload):
     assert verdict.supported is True
     assert verdict.next_action == "accept"
     assert verdict.reason == "skeleton_always_accept"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3e strict-shape rule (2026-05-14 sprint)
+# ---------------------------------------------------------------------------
+
+
+def test_phase3e_system_prompt_has_exact_match_strict_shape_rule() -> None:
+    """Phase 3e: the verifier system prompt explicitly tells the model to
+    reject punctuation/spacing/structural-word mismatches on exact_match
+    answers, with `escalate_reasoner` as the prescribed action. This is
+    the lever for the 26 over-accepted wrong_extraction rows from the
+    main-stack n=148 triage (e.g. 'BLE ; Signed' vs 'BLE; Signed';
+    'Balance Sheets 52' vs 'Balance Sheets, page 52')."""
+    from focusparse.pipeline.verifier import _SYSTEM_PROMPT
+
+    assert "exact_match" in _SYSTEM_PROMPT.lower()
+    assert "character-for-character" in _SYSTEM_PROMPT
+    # Concrete examples from the triage are in the prompt to ground the model.
+    assert "BLE" in _SYSTEM_PROMPT
+    assert "Balance Sheets" in _SYSTEM_PROMPT
+    # The action verdict for shape mismatches is escalate_reasoner.
+    assert "escalate_reasoner" in _SYSTEM_PROMPT
+    # The rule must explicitly NOT apply to numeric/boolean/etc.
+    assert "numeric" in _SYSTEM_PROMPT.lower()
+
+
+def test_phase3e_verifier_prompt_passes_answer_type_to_model() -> None:
+    """Phase 3e: the verifier must see the question's answer_type so it
+    can decide whether to apply the strict-shape rule. The build helper
+    includes `Question answer_type: <type>` in the user prompt when
+    `question.answer_type` is set, and omits the line when it's None
+    (back-compat for callers / tests that don't populate the field)."""
+    from focusparse.pipeline.verifier import _build_verifier_prompt
+
+    prompt_with_type = _build_verifier_prompt(
+        _question(answer_type="exact_match"),
+        _evidence(_packet()),
+        _answer(),
+    )
+    assert "Question answer_type: exact_match" in prompt_with_type
+
+    prompt_without_type = _build_verifier_prompt(
+        _question(),
+        _evidence(_packet()),
+        _answer(),
+    )
+    assert "answer_type" not in prompt_without_type

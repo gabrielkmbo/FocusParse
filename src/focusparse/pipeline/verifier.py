@@ -86,6 +86,21 @@ _SYSTEM_PROMPT = (
     "value. Use `expand_context` only when you can name a missing neighboring "
     "caption, footnote, legend, header, or continuation that is not present in "
     "any packet summary.\n"
+    "- Phase 3e strict-shape rule (2026-05-14 sprint): when "
+    "`answer_type` is `exact_match`, the answer must match the document's "
+    "wording character-for-character (punctuation, commas, semicolons, "
+    "spaces, parenthesization, structural words like 'page'). Compare the "
+    "answer text to the verbatim text snippets shown in the cited packets. "
+    "If the answer is semantically correct but has a punctuation, spacing, "
+    "or structural-word mismatch (e.g. 'BLE ; Signed' when the doc shows "
+    "'BLE; Signed'; 'Balance Sheets 52' when the doc shows 'Balance Sheets, "
+    "page 52'; 'X.bin 641 kb' when the doc shows 'X.bin, 641 kb'), do "
+    "NOT accept it. Return `next_action=escalate_reasoner` with reason "
+    "`'exact_match shape mismatch with cited packet text: <quote>'` so the "
+    "reasoner gets one chance to fix the format. Only accept when the "
+    "answer is exactly reproducible from a cited packet's text. This rule "
+    "does NOT apply to numeric / boolean / multiple_choice / unanswerable "
+    "answer types.\n"
     "- `confidence` is your confidence in the verdict, not the answer."
 )
 
@@ -209,8 +224,12 @@ def _build_verifier_prompt(
 
     citations = ", ".join(answer.citations) if answer.citations else "(none)"
     domain_line = f"Document domain: {question.domain}\n" if question.domain else ""
+    answer_type_line = (
+        f"Question answer_type: {question.answer_type}\n" if question.answer_type else ""
+    )
     return (
         f"{domain_line}"
+        f"{answer_type_line}"
         f"Question: {question.question}\n\n"
         f"Evidence packets the reasoner had access to:\n{packet_block}\n\n"
         f"Reasoner's answer: {answer.answer}\n"
