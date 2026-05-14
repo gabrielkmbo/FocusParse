@@ -212,6 +212,7 @@ def main() -> int:
                 strict_layout_detection=not args.allow_layout_fallbacks,
                 layout_max_retries=args.layout_detect_retries,
                 layout_timeout_s=args.layout_detect_timeout_s,
+                reasoner_self_consistency_k=args.reasoner_self_consistency_k,
             )
         )
     elif args.agent in ("react", "agent_baseline"):
@@ -427,6 +428,18 @@ def _parse_args() -> argparse.Namespace:
         "questions. The reasoner sees the extracted CSV alongside the crop. "
         "Default off; gated by question family + figure_class so cost stays "
         "bounded. Predicted +2-4pp on Finance accuracy.",
+    )
+    parser.add_argument(
+        "--reasoner-self-consistency-k",
+        type=int,
+        default=1,
+        help="Phase 3b (2026-05-14 sprint): run K parallel reasoner samples "
+        "on the INITIAL answer call (retries stay k=1). The picker prefers "
+        "non-Unanswerable, more citations, shorter for exact_match/numeric, "
+        "and higher confidence. k=2 doubles initial reasoner spend "
+        "(~+$1.50 per n=148) and targets the 45 wrong_extraction_other rows "
+        "in the main-stack triage. Predicted +2-3pp on top of Phase 3a v2 "
+        "+ Phase 3d. Default 1 (off / back-compat).",
     )
     parser.add_argument(
         "--tool-set",

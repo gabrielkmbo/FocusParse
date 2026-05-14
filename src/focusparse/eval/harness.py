@@ -331,6 +331,7 @@ async def run_focus_eval(
     strict_layout_detection: bool = False,
     layout_max_retries: int | None = None,
     layout_timeout_s: float | None = None,
+    reasoner_self_consistency_k: int = 1,
 ) -> dict[str, Any]:
     """Run `FocusWorkflow` over an iterable of examples.
 
@@ -412,6 +413,12 @@ async def run_focus_eval(
         # Sprint Phase 3 (2026-05-04, Phase 6 #7): chart_to_table extraction
         # gated on question_family + figure_class inside the inspector.
         workflow_kwargs["chart_to_table_enabled"] = True
+    if reasoner_self_consistency_k != 1:
+        # Phase 3b (2026-05-14 sprint): K-sample reasoner self-consistency on
+        # the initial answer call. k=2 default-off; opt-in via CLI flag.
+        # Costs ~k× initial reasoner spend on n=148. The workflow constructor
+        # validates k >= 1.
+        workflow_kwargs["reasoner_self_consistency_k"] = reasoner_self_consistency_k
     workflow = FocusWorkflow(**workflow_kwargs)
     available_tools = workflow.available_tools()
     per_example: list[dict[str, Any]] = []
