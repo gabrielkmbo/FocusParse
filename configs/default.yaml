@@ -9,6 +9,18 @@ tiers:
     model: gemini-2.5-flash
     max_tokens: 4096
     thinking_budget: 1024 # required for Gemini 2.5/3.x, else empty response
+  cheap_lite:
+    # Fallback cheap tier on a separate per-model Gemini quota. Same
+    # provider, smaller model. Use via FOCUSPARSE_TIER_PLANNER=cheap_lite
+    # (etc.) when the primary `cheap` model hits its free-tier daily
+    # quota. The planner/router decision quality dips slightly but the
+    # downstream pipeline still benefits from Gemini-style routing
+    # heuristics (Anthropic Haiku for cheap on the 2026-05-13 sprint
+    # ablation lost the entire +10pp Phase 3a+3d gain).
+    provider: gemini
+    model: gemini-2.5-flash-lite
+    max_tokens: 4096
+    thinking_budget: 1024
   mid:
     provider: anthropic
     model: claude-haiku-4-5
