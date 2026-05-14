@@ -223,47 +223,106 @@ The Gemini free-tier daily quota resets at midnight Pacific. The
 ~2 calls/example × 148 = 296). The next viable Gemini-cheap n=148
 run lands after ~22 hours from quota exhaustion.
 
-### Run: 60plus-3a-3d-3b-oai-run1 (full n=148, **landed 2026-05-14**)
+### Run: shape-gated reasoner retry, full OAI n=148 (**current best**)
 
-`results/hf/sprint-2026-05-13/60plus-3a-3d-3b-oai-run1/focusparse_focus_agentic_multi_page_8c5e328d.json`.
+`results/hf/sprint-2026-05-14/escalate-shape-retry-oai-run1/focusparse_focus_agentic_multi_page_8c5e328d.json`.
 
-Adds Phase 3b (K=2 reasoner self-consistency) on top of Phase 3a v2
-
-- Phase 3d. Same `cheap_oai` (OpenAI `gpt-4.1-nano`) planner/router
-  tier as the previous OAI run, so the Δ is the Phase 3b
-  contribution net of variance.
+This is the full n=148 check for the dynamic `escalate_reasoner` policy above.
+It uses the Modal layout endpoint, `cheap_oai` planner/router overrides, and the
+shape-gated default retry policy. It is the current best full-table harness
+result.
 
 | Metric             | Run                 | Δ vs main-stack | Δ vs 3a+3d-OAI |
 | ------------------ | ------------------- | --------------- | -------------- |
 | Overall accuracy   | **57.43%** (85/148) | **+8.1pp**      | **+5.4pp**     |
-| Datasheet accuracy | 64.4% (65/101)      | +9.9pp          | +4.0pp         |
-| Finance accuracy   | 42.6% (20/47)       | +4.3pp          | (similar)      |
-| Page recall        | 0.901               | +0.035          | −0.012         |
-| Bbox IoU           | 0.859               | +0.060          | +0.016         |
-| Lazy answer rate   | 0.034               | −0.047 (−58%)   | (similar)      |
-| Cost per correct   | $0.025              | −$0.001         | (similar)      |
-| Total cost         | $2.14               | +$0.25          | (similar)      |
+| Datasheet accuracy | 64.4% (65/101)      | +9.9pp          | +6.9pp         |
+| Finance accuracy   | 42.6% (20/47)       | +4.3pp          | +2.1pp         |
+| Page recall        | 0.921               | +0.055          | +0.008         |
+| Bbox IoU           | 0.851               | +0.052          | +0.009         |
+| Lazy answer rate   | 0.034               | -0.047 (-58%)   | +0.007         |
+| Cost per correct   | $0.025              | -$0.001         | -$0.003        |
+| Total cost         | $2.10               | +$0.21          | -$0.03         |
+| Mean latency       | 4.37s               | +0.51s          | -0.02s         |
 
-**Phase 3b is mechanism-decisive**: +5.4pp on top of the prior Phase
-3a v2 + Phase 3d stack, with the datasheet wrong_extraction whale
-absorbing most of the win (+4.0pp on datasheet alone). K=2
-parallel reasoner samples + the deterministic picker (non-Unanswerable
-→ more citations → shorter for exact_match → higher confidence)
-recover format-shape failures that single-shot extraction misses.
+Compared with the clean OAI run on the common 147-row set, the shape-gated
+default recovered 17 prior-wrong rows and regressed 9 prior-correct rows
+(net +8). The top-line file has 85/148 vs 77/148, so the full-table gain is
++8 rows.
 
-**2.57pp short of 60%** — need ~4 more correct examples.
+The run is still **4 correct answers short of 60%**. Its 63 remaining wrong
+rows are 36 datasheet and 27 finance. The wrong-row diagnostics point away from
+layout as the main remaining bottleneck: only 11 wrong rows have page recall
+below 1, and only 12 have bbox IoU below 0.5. The dominant gap is still
+post-evidence answer extraction / scorer-shape, especially verifier decisions
+that accepted or exhausted with plausible but scorer-wrong spans.
 
-### Run: 60plus-3a-3d-3b-multiscale-oai-run1 (in flight)
+### Control: expanded technical vocabulary gate (not shipped)
 
-Stacking `--multi-scale-packets` on top of the above for the
-predicted +2-5pp on chart-heavy failures. Inspector renders both a
-tight crop and a wider ~30%-padded context crop per region; the
-reasoner sees both via `EvidencePacket.multi_scale_crops`. Same
-`cheap_oai` tier. Output:
-`results/hf/sprint-2026-05-13/60plus-3a-3d-3b-multiscale-oai-run1/`.
+`results/hf/sprint-2026-05-14/escalate-vocab-gate-slice-run1/`.
 
-(metrics filled in once the run lands; ETA ~2-3 hours due to
-multi_scale rendering overhead)
+After inspecting failures such as "which instruction", "which mode", and
+"which loop", a broader single-entity vocabulary gate was tested on every row
+from the full run whose initial verifier action was `escalate_reasoner`
+(29 rows, including prior-correct controls).
+
+| Metric                      | Value       |
+| --------------------------- | ----------- |
+| Prior full-run slice        | 13/29       |
+| New slice                   | 13/29       |
+| Net delta                   | **0 rows**  |
+| Prior wrong recovered       | 3 rows      |
+| Prior correct regressed     | 3 rows      |
+| Retries observed            | 0 in flips  |
+
+Decision: do **not** ship the broader vocabulary gate. The apparent recoveries
+are mostly initial-answer sampling variance (`retries_used=0`), and the equal
+number of regressions fails the generalized-technique bar.
+
+### Run: Phase 3b K=2 reasoner self-consistency (negative)
+
+`results/hf/sprint-2026-05-14/self-consistency-k2-oai-run1/focusparse_focus_agentic_multi_page_8c5e328d.json`.
+
+K=2 reasoner self-consistency was tested as a full-table answer-extraction
+lever on the `phase3b-self-consistency` branch. It runs two initial reasoner
+samples and picks with the committed heuristic (non-Unanswerable, more
+citations, shorter for exact/numeric/boolean/multiple-choice, higher
+confidence).
+
+| Metric             | K=2 run             | Δ vs current best |
+| ------------------ | ------------------ | ----------------- |
+| Overall accuracy   | **52.70%** (78/148) | **-4.7pp**        |
+| Datasheet accuracy | 59.4% (60/101)      | -5 rows           |
+| Finance accuracy   | 38.3% (18/47)       | -2 rows           |
+| Page recall        | 0.903               | -0.018            |
+| Bbox IoU           | 0.827               | -0.024            |
+| Lazy answer rate   | 0.034               | flat              |
+| Reported cost      | $2.10               | flat              |
+| Mean latency       | 3.96s               | -0.41s            |
+
+Common-set flip analysis vs the current best run (147 shared rows): K=2
+recovered 5 prior-wrong rows but regressed 12 prior-correct rows (net -7).
+Regressions include scorer-critical over/under-extraction:
+`dat-adrv9040-...-0052` (`LOGGING and MULTI-THREADING` ->
+`LOGGING, 6`), `fin-10-K-0036` (`68%` -> `84%`), and
+`dat-aducm350_ug-587-0052` (`SRAM0 ... SRAM1` -> unrelated bus terms).
+
+Decision: K=2 self-consistency should remain opt-in, not default. The current
+picker is too weak: a second sample adds another chance to pick a plausible but
+wrong span. Future answer-selection work should use verifier/scorer-aware
+selection or evidence-grounded answer normalization, not naive K-sample picking.
+
+Pricing caveat: this run also exposed that per-example headline `usd` is
+answer-stage telemetry, not full trace cost, and the pre-fix K=2 telemetry
+counted only the chosen sample. The workflow now returns aggregated K-sample
+tokens/cost for answer telemetry, but historical run JSONs before this fix
+understate K=2 pricing.
+
+### Candidate still open: multi-scale packets
+
+`--multi-scale-packets` remains a plausible next lever for chart-heavy failures:
+the inspector renders both a tight crop and a wider context crop per region, and
+the reasoner sees both via `EvidencePacket.multi_scale_crops`. It still needs a
+matched full n=148 run against the 57.4% current best before it can be claimed.
 
 ## Phase 4 — Stopping condition
 

@@ -1762,6 +1762,9 @@ async def test_phase3b_k_equals_two_runs_two_reasoner_calls_and_picks_best(
     assert "exact span" not in reasoner.calls[0]["prompt"].lower()
     # Picker chose sample 1 (shorter + higher confidence + same citations).
     assert result.answer == "0x3FFFF8"
+    assert result.telemetry["tokens_in"] == 200
+    assert result.telemetry["tokens_out"] == 50
+    assert result.telemetry["usd"] == pytest.approx(0.002)
     sc_events = [
         e
         for e in result.trace.debug_events
@@ -1773,6 +1776,12 @@ async def test_phase3b_k_equals_two_runs_two_reasoner_calls_and_picks_best(
     assert payload["chosen_index"] == 1
     assert payload["all_agree"] is False
     assert len(payload["samples"]) == 2
+    answer_step = next(
+        s for s in result.trace.steps if s.stage == "answer" and s.action == "llm_call_k"
+    )
+    assert answer_step.tokens_in == 200
+    assert answer_step.tokens_out == 50
+    assert answer_step.usd == pytest.approx(0.002)
 
 
 async def test_phase3b_default_k_one_preserves_legacy_behavior(

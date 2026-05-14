@@ -1389,7 +1389,7 @@ class FocusWorkflow:
             )
             best_idx = pick_best_answer(answer_events, answer_type=question_event.answer_type)
             answer_event = answer_events[best_idx]
-            reasoner_response = responses[best_idx]
+            chosen_response = responses[best_idx]
             # Sum token + cost telemetry across all K samples — the run
             # paid for every call, not just the chosen one. Latency stays
             # the max of the K (asyncio.gather runs them in parallel).
@@ -1397,6 +1397,18 @@ class FocusWorkflow:
             total_tokens_out = sum(r.tokens_out or 0 for r in responses)
             total_usd = sum(r.usd or 0.0 for r in responses)
             max_latency_ms = max((r.latency_ms or 0) for r in responses)
+            reasoner_response = ModelResponse(
+                text=chosen_response.text,
+                tokens_in=total_tokens_in,
+                tokens_out=total_tokens_out,
+                usd=total_usd,
+                latency_ms=max_latency_ms,
+                raw={
+                    "chosen_index": best_idx,
+                    "sample_usd": [r.usd for r in responses],
+                    "chosen_raw": chosen_response.raw,
+                },
+            )
             sample_log = [
                 {
                     "sample_variant": i,

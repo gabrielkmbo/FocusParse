@@ -136,6 +136,37 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-14 — Phase 3b K=2 negative result + K-sample telemetry fix
+
+Branch `phase3b-self-consistency` tested full-table K=2 reasoner
+self-consistency on the canonical 148 validation rows:
+`results/hf/sprint-2026-05-14/self-consistency-k2-oai-run1/`. Result:
+**78/148 = 52.7%**, worse than the current best shape-gated run
+`results/hf/sprint-2026-05-14/escalate-shape-retry-oai-run1/`
+(**85/148 = 57.4%**). Domain split: datasheet **60/101 = 59.4%** and
+finance **18/47 = 38.3%**. Common-set flip analysis vs the current best
+(147 shared rows): **5** prior-wrong recoveries but **12** prior-correct
+regressions, net **-7**. Decision: keep `--reasoner-self-consistency-k` opt-in;
+do not make K=2 default. The heuristic picker is too weak because a second
+sample can choose a plausible but scorer-wrong span.
+
+The run also exposed a K-sample pricing telemetry bug: `_run_answer` recorded
+the aggregate K-sample cost on the trajectory `llm_call_k` step, but returned
+the chosen sample's `ModelResponse`, so per-example answer telemetry and
+headline `usd` counted only the chosen sample. `src/focusparse/pipeline/workflow.py`
+now returns an aggregated `ModelResponse` for K-sample answer telemetry
+(summed tokens/cost, max parallel latency, chosen text). `tests/test_workflow.py`
+pins the telemetry and trace-step totals. Historical K=2 run JSONs before this
+fix understate K-sample pricing.
+
+Expanded technical single-entity retry vocabulary was also tested on all 29
+rows from the current best run whose initial verifier action was
+`escalate_reasoner`:
+`results/hf/sprint-2026-05-14/escalate-vocab-gate-slice-run1/`. It was neutral
+(old **13/29**, new **13/29**; 3 recoveries and 3 regressions), and the flips
+had `retries_used=0`, so it was mostly initial-answer variance rather than a
+verified retry mechanism. Decision: do not ship that broader gate.
+
 ### 2026-05-14 — gated reasoner-escalation slice vs broad retry negative control
 
 Branch `harness-60plus-iteration` added a narrow default reasoner retry for
