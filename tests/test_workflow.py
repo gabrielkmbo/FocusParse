@@ -383,6 +383,92 @@ def test_variable_question_allows_reasoner_shape_retry():
     )
 
 
+def test_verbose_numeric_answer_allows_reasoner_shape_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The answer is too verbose and does not directly provide the scalar value.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+    )
+    answer = AnswerEvent(
+        answer=(
+            'You might incorrectly report "10%", but the table note shows that '
+            "the requested percentage should be reported as 0%."
+        ),
+        citations=["pkt_003"],
+        confidence=0.72,
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="What percentage should be reported for the prior-period adjustment?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="numeric",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
+def test_concise_exact_answer_blocks_reasoner_shape_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The verifier thinks the answer misread the cited table cell.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+    )
+    answer = AnswerEvent(answer="ADRV9040_FW.bin", citations=["pkt_003"], confidence=0.72)
+    question = QuestionEvent(
+        example_id="ex",
+        question="What firmware file is loaded?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+    )
+
+    assert not _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
+def test_boolean_answer_blocks_verbose_reasoner_shape_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The answer is verbose and does not directly answer the question.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+    )
+    answer = AnswerEvent(
+        answer="No, VOUT2 does not dip below the LDO threshold in the timing waveform.",
+        citations=["pkt_003"],
+        confidence=0.72,
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="Does VOUT2 dip below the LDO threshold?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="boolean",
+    )
+
+    assert not _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
 # ---------------------------------------------------------------------------
 # FocusWorkflow.run end-to-end (requires parser-bench submodule)
 # ---------------------------------------------------------------------------
@@ -1435,6 +1521,55 @@ async def test_loop_escalate_reasoner_is_not_default_evidence_retry(
     assert stage_counts["answer"] == 1
     assert stage_counts["verify"] == 1
     assert stage_counts["expand_context"] == 1
+
+
+async def test_loop_allows_verbose_numeric_shape_retry(tmp_path, parser_bench_submodule_present):
+    """Verifier-rejected explanatory numeric prose gets one hinted retry by default."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            (
+                '{"answer": "You might incorrectly report 10%, but the table '
+                'shows the requested percentage should be 0%.", '
+                '"citations": ["pkt_000"], "confidence": 0.72}'
+            ),
+            '{"answer": "0%", "citations": ["pkt_000"], "confidence": 0.86}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="escalate_reasoner",
+                reason="The answer is too verbose and does not directly provide the scalar value.",
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+    example = _make_example().model_copy(
+        update={
+            "question": "What percentage should be reported?",
+            "answer_type": "numeric",
+        }
+    )
+
+    result = await workflow.run(
+        example, [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "0%"
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["evidence_retries_used"] == 0
+    stage_counts = _stage_counts(result)
+    assert stage_counts["answer"] == 2
+    assert stage_counts["verify"] == 2
+    assert stage_counts["expand_context"] == 1
+    assert "Keep the answer field concise" in reasoner.calls[1]["prompt"]
 
 
 async def test_loop_allows_single_entity_shape_retry(tmp_path, parser_bench_submodule_present):

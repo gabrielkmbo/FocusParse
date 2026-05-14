@@ -76,6 +76,38 @@ _EXPAND_RETRY_FACTOR = 1.5  # multiplied each retry → wider neighbor net
 _MAX_ADJACENCY_PAD = 0.30  # cap so the pad stays meaningful
 _RETRY_SELECTION_CONFIDENCE_MARGIN = 0.15
 _ABSTAIN_OVERRIDE_MIN_CONFIDENCE = 0.45
+_VERBOSE_SHAPE_RETRY_MAX_CHARS = 90
+_VERBOSE_SHAPE_RETRY_MAX_WORDS = 12
+_VERBOSE_SHAPE_RETRY_ANSWER_TYPES = frozenset({"exact_match", "numeric", "string"})
+_VERBOSE_SHAPE_RETRY_PHRASES = (
+    "incorrectly report",
+    "instead of",
+    "rather than",
+    "because",
+    "you should",
+    "should report",
+    "should answer",
+    "should use",
+    "the answer is",
+    "the correct answer",
+    "this means",
+    "shown in",
+    "based on",
+)
+_VERBOSE_SHAPE_RETRY_REASON_PHRASES = (
+    "too verbose",
+    "concise",
+    "answer format",
+    "does not provide",
+    "did not provide",
+    "does not directly answer",
+    "did not directly answer",
+    "actual question",
+    "mis-read",
+    "misread",
+    "omits",
+    "instead",
+)
 
 # Phase 2 of harness-growth-sprint (2026-05-11): hard-case dispatch for the
 # LLM-driven inspector. When `use_react_inspector=True`, the workflow routes
@@ -1773,6 +1805,37 @@ def _answer_looks_list_like(answer: str | None) -> bool:
     return len(_answer_selection_tokens(normalized)) > 3
 
 
+def _answer_looks_verbose_shape_mismatch(
+    answer: str | None,
+    *,
+    answer_type: str | None,
+    verifier_reason: str | None,
+) -> bool:
+    if not answer:
+        return False
+    normalized_type = str(answer_type or "").strip().lower()
+    if normalized_type not in _VERBOSE_SHAPE_RETRY_ANSWER_TYPES:
+        return False
+    if _answer_type_is_unanswerable(normalized_type):
+        return False
+
+    text = re.sub(r"\s+", " ", str(answer)).strip()
+    if not text or _answer_looks_unanswerable(text):
+        return False
+    normalized = text.lower()
+    word_count = len(re.findall(r"[a-z0-9]+", normalized))
+    too_long = (
+        len(text) > _VERBOSE_SHAPE_RETRY_MAX_CHARS or word_count > _VERBOSE_SHAPE_RETRY_MAX_WORDS
+    )
+    if not too_long:
+        return False
+
+    reason = str(verifier_reason or "").lower()
+    phrase_hit = any(phrase in normalized for phrase in _VERBOSE_SHAPE_RETRY_PHRASES)
+    reason_hit = any(phrase in reason for phrase in _VERBOSE_SHAPE_RETRY_REASON_PHRASES)
+    return phrase_hit or reason_hit
+
+
 def _should_keep_best_unsupported_on_retry_abstain(
     answer: AnswerEvent | None,
     *,
@@ -1810,10 +1873,11 @@ def _should_allow_reasoner_shape_retry(
     """Allow a narrow default reasoner retry for verifier-detected answer shape.
 
     Generic `escalate_reasoner` stays behind `max_retries`: it spends another
-    frontier call without improving evidence packets. This exception is scoped
-    to the common chart/table failure where the evidence is present, the
-    question asks for one entity, and the answer is list-like; the verifier
-    hint usually fixes that without another inspect/expand mutation.
+    frontier call without improving evidence packets. These exceptions are
+    scoped to verifier-rejected answers where evidence is cited but the final
+    answer shape is likely wrong: either a singular-entity question got a
+    list-like answer, or an exact/numeric benchmark answer is explanatory prose
+    when the verifier is already asking the reasoner to repair format/extraction.
     """
     if max_evidence_retries <= 0 or action != "escalate_reasoner":
         return False
@@ -1821,22 +1885,26 @@ def _should_allow_reasoner_shape_retry(
         return False
     if not answer.citations:
         return False
-    if not _question_requests_single_entity(question_event.question):
-        return False
-    if not _answer_looks_list_like(answer.answer):
-        return False
     reason = verdict.reason.lower()
-    return bool(
-        "single" in reason
-        or "one " in reason
-        or "two " in reason
-        or "multiple" in reason
-        or "does not quantify" in reason
-        or "did not answer" in reason
-        or "actual question" in reason
-        or "which variable" in reason
-        or "y-axis variable" in reason
-        or "y axis variable" in reason
+    if _question_requests_single_entity(question_event.question) and _answer_looks_list_like(
+        answer.answer
+    ):
+        return bool(
+            "single" in reason
+            or "one " in reason
+            or "two " in reason
+            or "multiple" in reason
+            or "does not quantify" in reason
+            or "did not answer" in reason
+            or "actual question" in reason
+            or "which variable" in reason
+            or "y-axis variable" in reason
+            or "y axis variable" in reason
+        )
+    return _answer_looks_verbose_shape_mismatch(
+        answer.answer,
+        answer_type=question_event.answer_type,
+        verifier_reason=verdict.reason,
     )
 
 

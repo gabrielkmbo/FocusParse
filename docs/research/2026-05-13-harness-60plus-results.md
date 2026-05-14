@@ -135,6 +135,86 @@ when Gemini cheap-tier quota resets (next bullet) and whether
 additional levers (Phase 3b self-consistency, multi_scale_packets)
 stack on top.
 
+### Run: 2026-05-14 reasoner-escalation gating slices
+
+**Question**: should verifier `next_action="escalate_reasoner"` spend a
+default retry? The 52.0% OAI fallback run had 24 initial
+`escalate_reasoner` rows: 10 were wrong and 14 were already scorer-correct
+despite verifier disagreement. That is the exact non-cherry-picked control set
+for this question.
+
+**Code change**: `_should_allow_reasoner_shape_retry` now keeps generic
+`escalate_reasoner` behind the explicit full-loop budget, but allows one
+default retry when:
+
+- the answer cites evidence,
+- the verifier rejected it,
+- the answer type is exact/numeric/string, and
+- the answer is visibly explanatory/prose-shaped when the verifier reason is
+  also about format/direct-answer failure.
+
+The existing single-entity/list-like exception remains. New workflow tests pin
+the three important guardrails: verbose numeric prose retries, concise exact
+answers do not retry, and boolean answers do not enter the path.
+
+#### Slice A — shape-gated default
+
+`results/hf/sprint-2026-05-14/escalate-shape-retry-slice-run1/`
+
+| Metric                         | Value          |
+| ------------------------------ | -------------- |
+| Slice accuracy vs prior run    | 79.2% (19/24)  |
+| Prior-run slice accuracy       | 58.3% (14/24)  |
+| Net delta                      | **+5 rows**    |
+| Prior wrong recovered          | 5/10           |
+| Prior correct regressed        | **0/14**       |
+| Rows with any retry            | 5/24           |
+| Total cost                     | $0.348         |
+
+Important caveat: the +5 slice gain is not fully attributable to the new retry
+gate. Several recovered rows were fixed on the first sampled answer in the new
+run (`retries_used=0`), so upstream sampling variance is still mixed in. The
+stronger claim is the guardrail claim: the shape-gated policy preserved all 14
+prior-correct verifier false-negatives on this control set.
+
+Useful recoveries:
+
+| example_id                                      | prior prediction                                | new prediction                                      | gold |
+| ----------------------------------------------- | ----------------------------------------------- | --------------------------------------------------- | ---- |
+| `dat-adrv9040-reference-manual-ug-2192-0052`    | `LOGGING and MULTI-THREADING ... 6 functions`   | `LOGGING and MULTI-THREADING ... 7 functions`       | same |
+| `dat-spruhm8k-0025`                             | prose about left-shifting and ignoring bits     | `0x3FFFF8; 0x3FFFF`                                 | `0x3FFFF8` |
+| `fin-bis_qr_2025_mar-0040`                      | long EMEU explanation with scatterplot rationale | `EMEU`                                              | `EMEU` |
+
+#### Slice B — broad full-loop retry (`--max-retries 1`)
+
+`results/hf/sprint-2026-05-14/escalate-all-reasoner-slice-run1/`
+
+| Metric                         | Value          |
+| ------------------------------ | -------------- |
+| Slice accuracy vs prior run    | 54.2% (13/24)  |
+| Prior-run slice accuracy       | 58.3% (14/24)  |
+| Net delta                      | **−1 row**     |
+| Prior wrong recovered          | 3/10           |
+| Prior correct regressed        | **4/14**       |
+| Rows with any retry            | 21/24          |
+| Total cost                     | $0.321         |
+
+Broad retry proves the negative control: verifier disagreement alone is not a
+safe dynamic signal. It recovers some wrong rows, but it also damages concise
+answers that were already scorer-correct:
+
+| example_id                         | prior correct answer       | broad-retry answer              |
+| ---------------------------------- | -------------------------- | ------------------------------- |
+| `dat-spruhm8k-0002`                | `3 lines`                  | `8`                             |
+| `fin-aapl-20250927-0034`           | `September 2022, $21`      | `September 2023, $19`           |
+| `fin-bis_qr_2024_sep-0050`         | `FX bonds`                 | `C. FX bonds and D. FX loans`   |
+
+**Decision**: keep `escalate_reasoner` dynamic and gated. Do not force all
+verifier escalations through a retry, and do not treat +4 tool availability as
+"always use all tools." The next publishable check is a full n=148 run under
+the shape-gated default, ideally with an LLM cache for planner/reranker to
+reduce upstream sampling noise.
+
 ### Quota-blocked: rerun under Gemini cheap once daily quota resets
 
 The Gemini free-tier daily quota resets at midnight Pacific. The

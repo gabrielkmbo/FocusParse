@@ -136,6 +136,39 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
 
+### 2026-05-14 — gated reasoner-escalation slice vs broad retry negative control
+
+Branch `harness-60plus-iteration` added a narrow default reasoner retry for
+verifier-rejected answer-shape failures in `FocusWorkflow`. Generic
+`escalate_reasoner` still stays behind the explicit full-loop budget, but
+`_should_allow_reasoner_shape_retry` now also allows one default retry when the
+answer cites evidence, the answer type is exact/numeric/string, the answer is
+long explanatory prose, and the verifier reason is about direct-answer/format
+failure. The previous singular-entity/list-like exception remains. Tests added
+in `tests/test_workflow.py` pin verbose numeric retry, concise exact-answer
+non-retry, boolean non-retry, and the end-to-end default retry path.
+
+Non-cherry-picked control set: the 24 rows from
+`60plus-3a-3d-oai-nano-run1` whose first verifier action was
+`escalate_reasoner` (10 wrong + 14 already scorer-correct). Shape-gated default
+slice at
+`results/hf/sprint-2026-05-14/escalate-shape-retry-slice-run1/` scored
+**19/24 = 79.2%**, +5 rows vs that prior run, with **5/10** prior wrong rows
+recovered and **0/14** prior-correct rows regressed. Caveat: several recoveries
+had `retries_used=0`, so the +5 includes upstream sampling variance; the safer
+claim is that the guard did not damage prior-correct verifier false-negatives.
+
+Negative control: broad full-loop retry with `--max-retries 1` on the same 24
+rows at
+`results/hf/sprint-2026-05-14/escalate-all-reasoner-slice-run1/` scored
+**13/24 = 54.2%**, -1 row vs prior, with **3/10** recoveries but **4/14**
+prior-correct regressions. Concrete regressions: `dat-spruhm8k-0002`
+(`3 lines` -> `8`), `fin-aapl-20250927-0034`
+(`September 2022, $21` -> `September 2023, $19`), and
+`fin-bis_qr_2024_sep-0050` (`FX bonds` -> `C. FX bonds and D. FX loans`).
+Decision: keep tool/retry use dynamic and gated; do not retry every verifier
+escalation and do not force all +4 tools.
+
 ### 2026-05-13 — full Modal run audit + transient provider retry
 
 Full validation run after the Modal layout migration and dynamic tool gating:
