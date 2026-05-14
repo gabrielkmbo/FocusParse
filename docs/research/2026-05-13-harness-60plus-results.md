@@ -161,15 +161,15 @@ answers do not retry, and boolean answers do not enter the path.
 
 `results/hf/sprint-2026-05-14/escalate-shape-retry-slice-run1/`
 
-| Metric                         | Value          |
-| ------------------------------ | -------------- |
-| Slice accuracy vs prior run    | 79.2% (19/24)  |
-| Prior-run slice accuracy       | 58.3% (14/24)  |
-| Net delta                      | **+5 rows**    |
-| Prior wrong recovered          | 5/10           |
-| Prior correct regressed        | **0/14**       |
-| Rows with any retry            | 5/24           |
-| Total cost                     | $0.348         |
+| Metric                      | Value         |
+| --------------------------- | ------------- |
+| Slice accuracy vs prior run | 79.2% (19/24) |
+| Prior-run slice accuracy    | 58.3% (14/24) |
+| Net delta                   | **+5 rows**   |
+| Prior wrong recovered       | 5/10          |
+| Prior correct regressed     | **0/14**      |
+| Rows with any retry         | 5/24          |
+| Total cost                  | $0.348        |
 
 Important caveat: the +5 slice gain is not fully attributable to the new retry
 gate. Several recovered rows were fixed on the first sampled answer in the new
@@ -179,35 +179,35 @@ prior-correct verifier false-negatives on this control set.
 
 Useful recoveries:
 
-| example_id                                      | prior prediction                                | new prediction                                      | gold |
-| ----------------------------------------------- | ----------------------------------------------- | --------------------------------------------------- | ---- |
-| `dat-adrv9040-reference-manual-ug-2192-0052`    | `LOGGING and MULTI-THREADING ... 6 functions`   | `LOGGING and MULTI-THREADING ... 7 functions`       | same |
-| `dat-spruhm8k-0025`                             | prose about left-shifting and ignoring bits     | `0x3FFFF8; 0x3FFFF`                                 | `0x3FFFF8` |
-| `fin-bis_qr_2025_mar-0040`                      | long EMEU explanation with scatterplot rationale | `EMEU`                                              | `EMEU` |
+| example_id                                   | prior prediction                                 | new prediction                                | gold       |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------------------------- | ---------- |
+| `dat-adrv9040-reference-manual-ug-2192-0052` | `LOGGING and MULTI-THREADING ... 6 functions`    | `LOGGING and MULTI-THREADING ... 7 functions` | same       |
+| `dat-spruhm8k-0025`                          | prose about left-shifting and ignoring bits      | `0x3FFFF8; 0x3FFFF`                           | `0x3FFFF8` |
+| `fin-bis_qr_2025_mar-0040`                   | long EMEU explanation with scatterplot rationale | `EMEU`                                        | `EMEU`     |
 
 #### Slice B — broad full-loop retry (`--max-retries 1`)
 
 `results/hf/sprint-2026-05-14/escalate-all-reasoner-slice-run1/`
 
-| Metric                         | Value          |
-| ------------------------------ | -------------- |
-| Slice accuracy vs prior run    | 54.2% (13/24)  |
-| Prior-run slice accuracy       | 58.3% (14/24)  |
-| Net delta                      | **−1 row**     |
-| Prior wrong recovered          | 3/10           |
-| Prior correct regressed        | **4/14**       |
-| Rows with any retry            | 21/24          |
-| Total cost                     | $0.321         |
+| Metric                      | Value         |
+| --------------------------- | ------------- |
+| Slice accuracy vs prior run | 54.2% (13/24) |
+| Prior-run slice accuracy    | 58.3% (14/24) |
+| Net delta                   | **−1 row**    |
+| Prior wrong recovered       | 3/10          |
+| Prior correct regressed     | **4/14**      |
+| Rows with any retry         | 21/24         |
+| Total cost                  | $0.321        |
 
 Broad retry proves the negative control: verifier disagreement alone is not a
 safe dynamic signal. It recovers some wrong rows, but it also damages concise
 answers that were already scorer-correct:
 
-| example_id                         | prior correct answer       | broad-retry answer              |
-| ---------------------------------- | -------------------------- | ------------------------------- |
-| `dat-spruhm8k-0002`                | `3 lines`                  | `8`                             |
-| `fin-aapl-20250927-0034`           | `September 2022, $21`      | `September 2023, $19`           |
-| `fin-bis_qr_2024_sep-0050`         | `FX bonds`                 | `C. FX bonds and D. FX loans`   |
+| example_id                 | prior correct answer  | broad-retry answer            |
+| -------------------------- | --------------------- | ----------------------------- |
+| `dat-spruhm8k-0002`        | `3 lines`             | `8`                           |
+| `fin-aapl-20250927-0034`   | `September 2022, $21` | `September 2023, $19`         |
+| `fin-bis_qr_2024_sep-0050` | `FX bonds`            | `C. FX bonds and D. FX loans` |
 
 **Decision**: keep `escalate_reasoner` dynamic and gated. Do not force all
 verifier escalations through a retry, and do not treat +4 tool availability as
@@ -222,6 +222,48 @@ The Gemini free-tier daily quota resets at midnight Pacific. The
 `gemini-2.5-flash-lite` (20 req/day each, our planner+router does
 ~2 calls/example × 148 = 296). The next viable Gemini-cheap n=148
 run lands after ~22 hours from quota exhaustion.
+
+### Run: 60plus-3a-3d-3b-oai-run1 (full n=148, **landed 2026-05-14**)
+
+`results/hf/sprint-2026-05-13/60plus-3a-3d-3b-oai-run1/focusparse_focus_agentic_multi_page_8c5e328d.json`.
+
+Adds Phase 3b (K=2 reasoner self-consistency) on top of Phase 3a v2
+
+- Phase 3d. Same `cheap_oai` (OpenAI `gpt-4.1-nano`) planner/router
+  tier as the previous OAI run, so the Δ is the Phase 3b
+  contribution net of variance.
+
+| Metric             | Run                 | Δ vs main-stack | Δ vs 3a+3d-OAI |
+| ------------------ | ------------------- | --------------- | -------------- |
+| Overall accuracy   | **57.43%** (85/148) | **+8.1pp**      | **+5.4pp**     |
+| Datasheet accuracy | 64.4% (65/101)      | +9.9pp          | +4.0pp         |
+| Finance accuracy   | 42.6% (20/47)       | +4.3pp          | (similar)      |
+| Page recall        | 0.901               | +0.035          | −0.012         |
+| Bbox IoU           | 0.859               | +0.060          | +0.016         |
+| Lazy answer rate   | 0.034               | −0.047 (−58%)   | (similar)      |
+| Cost per correct   | $0.025              | −$0.001         | (similar)      |
+| Total cost         | $2.14               | +$0.25          | (similar)      |
+
+**Phase 3b is mechanism-decisive**: +5.4pp on top of the prior Phase
+3a v2 + Phase 3d stack, with the datasheet wrong_extraction whale
+absorbing most of the win (+4.0pp on datasheet alone). K=2
+parallel reasoner samples + the deterministic picker (non-Unanswerable
+→ more citations → shorter for exact_match → higher confidence)
+recover format-shape failures that single-shot extraction misses.
+
+**2.57pp short of 60%** — need ~4 more correct examples.
+
+### Run: 60plus-3a-3d-3b-multiscale-oai-run1 (in flight)
+
+Stacking `--multi-scale-packets` on top of the above for the
+predicted +2-5pp on chart-heavy failures. Inspector renders both a
+tight crop and a wider ~30%-padded context crop per region; the
+reasoner sees both via `EvidencePacket.multi_scale_crops`. Same
+`cheap_oai` tier. Output:
+`results/hf/sprint-2026-05-13/60plus-3a-3d-3b-multiscale-oai-run1/`.
+
+(metrics filled in once the run lands; ETA ~2-3 hours due to
+multi_scale rendering overhead)
 
 ## Phase 4 — Stopping condition
 
