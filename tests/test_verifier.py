@@ -547,16 +547,15 @@ async def test_verify_llm_robust_to_bad_payloads(bad_payload):
 
 
 def test_phase3e_system_prompt_has_exact_match_strict_shape_rule() -> None:
-    """Phase 3e: the verifier system prompt explicitly tells the model to
-    reject punctuation/spacing/structural-word mismatches on exact_match
-    answers, with `escalate_reasoner` as the prescribed action. This is
-    the lever for the 26 over-accepted wrong_extraction rows from the
-    main-stack n=148 triage (e.g. 'BLE ; Signed' vs 'BLE; Signed';
-    'Balance Sheets 52' vs 'Balance Sheets, page 52')."""
+    """Phase 3e v2 (2026-05-14, narrowed): the strict-shape rule applies
+    ONLY when all three conditions hold (exact_match type AND multi-token
+    or structural phrase AND clear character-level mismatch in cited
+    packet). Explicit anti-examples for single-token / numeric / identifier
+    answers keep the verifier from over-rejecting valid answers like '5',
+    '70%', '0xFF', or 'VDD'."""
     from focusparse.pipeline.verifier import _SYSTEM_PROMPT
 
     assert "exact_match" in _SYSTEM_PROMPT.lower()
-    assert "character-for-character" in _SYSTEM_PROMPT
     # Concrete examples from the triage are in the prompt to ground the model.
     assert "BLE" in _SYSTEM_PROMPT
     assert "Balance Sheets" in _SYSTEM_PROMPT
@@ -564,6 +563,11 @@ def test_phase3e_system_prompt_has_exact_match_strict_shape_rule() -> None:
     assert "escalate_reasoner" in _SYSTEM_PROMPT
     # The rule must explicitly NOT apply to numeric/boolean/etc.
     assert "numeric" in _SYSTEM_PROMPT.lower()
+    # v2: anti-examples for single-token / numeric / identifier answers
+    assert "'5'" in _SYSTEM_PROMPT or "'6'" in _SYSTEM_PROMPT
+    assert "Latvia" in _SYSTEM_PROMPT or "single number" in _SYSTEM_PROMPT
+    # v2: explicit instruction to prefer accept under uncertainty
+    assert "When in doubt, prefer `accept`" in _SYSTEM_PROMPT
 
 
 def test_phase3e_verifier_prompt_passes_answer_type_to_model() -> None:
