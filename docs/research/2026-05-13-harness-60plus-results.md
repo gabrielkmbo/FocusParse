@@ -97,19 +97,51 @@ the triage). Phase 3a v2 finance variant didn't yet fire visibly in
 the first-40 slice because most early finance examples are not in
 the sentence-form families.
 
-### Run: 60plus-3a-3d-haiku-cheap-run1 (in flight)
+### Run: 60plus-3a-3d-oai-nano-run1 (full n=148, **landed**)
 
-Same stack as above but with `--tier-override planner=mid
---tier-override router=mid` to bypass the Gemini free-tier quota.
-Mid-tier is `anthropic:claude-haiku-4-5`. Output dir:
-`results/hf/sprint-2026-05-13/60plus-3a-3d-haiku-cheap-run1/`.
+`results/hf/sprint-2026-05-13/60plus-3a-3d-oai-nano-run1/focusparse_focus_agentic_multi_page_8c5e328d.json`.
 
-This run lands under a different `tier_sha8` than 333fe987 since the
-cheap-tier provider changed. Per-example comparisons against the
-main-stack baseline stay apples-to-apples on the same parser-bench
-validation split.
+After burning through both Gemini free-tier daily quotas
+(gemini-2.5-flash + gemini-2.5-flash-lite, 20 req/day each) and
+seeing Anthropic Haiku zero out the Phase 3a v2 + 3d gain, the
+fallback `cheap_oai` tier (OpenAI `gpt-4.1-nano`) was wired in
+(`configs/default.yaml`) and used via
+`FOCUSPARSE_TIER_PLANNER=cheap_oai FOCUSPARSE_TIER_ROUTER=cheap_oai`.
 
-(metrics filled in once the run lands)
+| Metric               | Run                 | Δ vs main-stack   |
+| -------------------- | ------------------- | ----------------- |
+| Overall accuracy     | **52.03%** (77/148) | **+2.7pp**        |
+| Page recall          | 0.913               | +0.047            |
+| Bbox IoU             | 0.843               | +0.044            |
+| **Lazy answer rate** | **0.027**           | **−0.054 (−54%)** |
+| Cost per correct     | $0.028              | +$0.002           |
+| Total cost           | $2.13               | +$0.24            |
+
+**Phase 3d's lazy-abstain recovery is fully confirmed** at scale:
+8 of the 12 baseline lazy abstentions were recovered into concrete
+answers. Localizer metrics also improved (Modal endpoint healthier
+than the paused HF endpoint).
+
+Net delta is small because the cheap-tier model dominates the
+planner+router decisions — OpenAI `gpt-4.1-nano` is a meaningfully
+weaker planner than Gemini Flash on this benchmark. The killed
+Gemini-cheap partial showed +12.8pp on n=39, which extrapolates to
+~62% if it scales; this OAI fallback shows the _Phase 3a v2 + 3d
+intrinsic contribution_ without that benefit.
+
+**Headline interpretation**: at +2.7pp from Phase 3a v2 + Phase 3d
+alone we're short of the 60% target. The path forward depends on
+when Gemini cheap-tier quota resets (next bullet) and whether
+additional levers (Phase 3b self-consistency, multi_scale_packets)
+stack on top.
+
+### Quota-blocked: rerun under Gemini cheap once daily quota resets
+
+The Gemini free-tier daily quota resets at midnight Pacific. The
+2026-05-13 sprint burned both `gemini-2.5-flash` and
+`gemini-2.5-flash-lite` (20 req/day each, our planner+router does
+~2 calls/example × 148 = 296). The next viable Gemini-cheap n=148
+run lands after ~22 hours from quota exhaustion.
 
 ## Phase 4 — Stopping condition
 
