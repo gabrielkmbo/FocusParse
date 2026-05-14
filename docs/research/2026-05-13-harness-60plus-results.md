@@ -62,19 +62,54 @@ benchmark fixes surfaced.
 
 ## Phase 3 iteration runs
 
-### Run: 60plus-3a-3d-run1
+### Run: 60plus-3a-3d-run1 (killed at 40/148 — Gemini free-tier quota)
 
 **Stack**: Phase 3a v2 (question_family-gated finance prompt) +
-Phase 3d (proactive non-abstain retry).
+Phase 3d (proactive non-abstain retry on lazy answers with citations).
 
-| Metric             | Run   | Δ vs baseline |
-| ------------------ | ----- | ------------- |
-| Overall accuracy   | (TBD) | (TBD)         |
-| Datasheet accuracy | (TBD) | (TBD)         |
-| Finance accuracy   | (TBD) | (TBD)         |
-| Lazy answer rate   | (TBD) | (TBD)         |
+The eval hit Gemini's free-tier 20-req/day quota and started returning
+429 `RESOURCE_EXHAUSTED` on every planner+router call. Killed at
+example 40. Partial directional signal on the 39 examples that
+completed cleanly (alphabetical order; 31 datasheets + 9 finance —
+finance-light vs the full 101+47 split):
 
-(filled in once `results/hf/sprint-2026-05-13/60plus-3a-3d-run1/` lands)
+| Slice (n=39)     | main-stack | 3a+3d run1 | Δ           |
+| ---------------- | ---------- | ---------- | ----------- |
+| Overall accuracy | 53.8% (21) | 66.7% (26) | **+12.8pp** |
+| Datasheet (n=30) | 60.0% (18) | 73.3% (22) | +13.3pp     |
+| Finance (n=9)    | 33.3% (3)  | 44.4% (4)  | +11.1pp     |
+
+Six examples flipped to correct, one flipped to wrong:
+
+| example_id                           | base → new pred                 | gold                             | mechanism           |
+| ------------------------------------ | ------------------------------- | -------------------------------- | ------------------- |
+| `dat-Arm_EE382N_4-0028`              | `EXECUTE MEMORY WRITE` → MEMORY | `MEMORY; it occurs after…`       | prompt change       |
+| `dat-DS5091D-00-0002`                | `0 ppt` → `2 ppt`               | `Approximately 3%`               | chart re-read       |
+| `dat-adrv9040-…-0032`                | `…641 kb` → `…, 641 kb`         | `…, 641 kb`                      | comma format fix    |
+| `dat-adrv9040-…-0041`                | long sentence → `DPD_MODE1`     | `DPD_MODE1; this is visually…`   | prompt change       |
+| `dat-aducm350_ug-587-0032`           | `Unanswerable` → `b0010`        | `b0010`                          | **Phase 3d retry**  |
+| `fin-10-K-0036`                      | `82%` → `68%`                   | `68%`                            | unknown (variance?) |
+| `dat-Arm_EE382N_4-0006` (regression) | `1.0` → `1.2`                   | `aspect ratio approximately 1.0` | reasoner variance   |
+
+Phase 3d's lazy-abstain recovery is mechanism-confirmed
+(`dat-aducm350_ug-587-0032` is one of the 4 `lazy_abstain` rows in
+the triage). Phase 3a v2 finance variant didn't yet fire visibly in
+the first-40 slice because most early finance examples are not in
+the sentence-form families.
+
+### Run: 60plus-3a-3d-haiku-cheap-run1 (in flight)
+
+Same stack as above but with `--tier-override planner=mid
+--tier-override router=mid` to bypass the Gemini free-tier quota.
+Mid-tier is `anthropic:claude-haiku-4-5`. Output dir:
+`results/hf/sprint-2026-05-13/60plus-3a-3d-haiku-cheap-run1/`.
+
+This run lands under a different `tier_sha8` than 333fe987 since the
+cheap-tier provider changed. Per-example comparisons against the
+main-stack baseline stay apples-to-apples on the same parser-bench
+validation split.
+
+(metrics filled in once the run lands)
 
 ## Phase 4 — Stopping condition
 
