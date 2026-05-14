@@ -155,6 +155,12 @@ recall and IoU stayed strong, and the largest completed-row miss bucket was
 answer/scorer/reasoning rather than layout detection. The full failure audit is
 `docs/research/2026-05-13-full-run-failure-audit.md`.
 
+A follow-up retry of the 11 null infrastructure rows with planner/router
+tier-overridden from Gemini cheap to the mid tier recovered 6/11 examples. If
+substituted into the full run, raw accuracy would become 78/148 = 52.7%. That is
+useful reliability evidence, but it confirms that provider recovery alone does
+not close the gap to 60%.
+
 ## 4. Mechanism Signals
 
 From `results/hf/sprint-2026-05-11/phase4-run1/diagnostics.md`:

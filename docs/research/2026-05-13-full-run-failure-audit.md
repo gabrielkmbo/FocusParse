@@ -36,6 +36,42 @@ The raw full-run number should not be treated as a clean accuracy claim because
 11 rows failed before a real prediction was produced. Those rows have
 `answer_pred=null`, no domain, no tools, zero tokens, and zero latency.
 
+## Infrastructure Retry Follow-up
+
+After adding provider retry hardening, a direct retry of one infra row with the
+default cheap planner still failed before planning because Gemini returned
+`429 RESOURCE_EXHAUSTED`. Re-running the same infra slice with
+`--tier-override planner=mid --tier-override router=mid` bypassed the exhausted
+cheap tier and produced real predictions for all 11 previously-null examples:
+
+| Metric | Value |
+| --- | ---: |
+| Retry-slice accuracy | 54.5% (6/11) |
+| Retry-slice cost | $0.176 |
+| Retry-slice cost per correct | $0.0293 |
+| Retry-slice mean latency | 5.62s |
+| Retry-slice page recall | 77.3% |
+| Retry-slice bbox IoU | 65.5% |
+| Tools selected | `inspect_region+expand_context` on all 11 |
+
+If those 11 retry outcomes replaced the full run's null infrastructure rows,
+the raw full-run score would move from 72/148 = 48.6% to 78/148 = 52.7%. That
+matches the completed-row diagnosis: provider reliability is a real source of
+noise, but it is not enough to reach 60%. The remaining lift has to come from
+answer extraction, scorer-shape discipline, and hard visual reasoning.
+
+Representative retry outcomes:
+
+- `dat-ads1299-0023`: recovered to correct (`Gain = 24`) with high IoU.
+- `dat-JESD204B-Survival-Guide-0029`: recovered to correct (`6`) with high IoU.
+- `dat-spruhm8k-0019`: high-IoU evidence but exact answer ordering / list shape
+  still failed (`ADC_readPPBResult; ADC_setINLTrim; ADC_readResult` vs gold
+  order).
+- `dat-infineon-power-mosfet-avalanche-design-guidelines-applicationnotes-en-0047`:
+  near numeric miss (`316 mJ` vs `315 mJ`), worth checking tolerance policy.
+- `dat-ads1299-0028`: remained `Unanswerable` after verifier rejection, so this
+  is an evidence/routing or verifier-control miss rather than provider noise.
+
 ## Failure Taxonomy
 
 | Category | Count | Interpretation |

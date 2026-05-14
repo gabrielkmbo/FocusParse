@@ -167,6 +167,15 @@ while older FocusParse commands/tests still ask for parser-bench local names
 `test -> validation`, and `holdout -> test` for HF streaming so legacy smoke
 commands keep working.
 
+Provider-failover smoke: the default retry of `dat-ads1299-0023` still failed
+before planning because Gemini cheap tier returned `429 RESOURCE_EXHAUSTED`.
+Running the 11 previously-null infra rows with
+`--tier-override planner=mid --tier-override router=mid` produced real
+predictions for all 11 and recovered **6/11**. The adjusted full-run score would
+be **78/148 = 52.7%**, so provider reliability explains the raw-vs-completed gap
+but not the path to 60%. The remaining lift is answer/scorer/reasoning plus hard
+visual evidence.
+
 To keep provider flakiness from being counted as harness reasoning failure,
 `src/focusparse/models/{openai,anthropic,gemini}.py` now wrap one provider
 operation in transient retry. New env vars: `FOCUSPARSE_MODEL_RETRY_ATTEMPTS`
