@@ -333,6 +333,7 @@ def test_reasoner_prompt_uses_grouped_evidence_objects() -> None:
     prompt = client.calls[0]["prompt"]
     assert "Available grouped evidence objects" in prompt
     assert "group_pkt_000 [table]" in prompt
+    assert "Packet-level descriptors for exact span reading" in prompt
     assert "Binding frame" in prompt
     assert "cite the primary packet ids, not group ids" in prompt
 

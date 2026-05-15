@@ -22,6 +22,9 @@ from focusparse.pipeline.evidence_groups import build_evidence_groups, render_ev
 _SYSTEM_PROMPT = (
     "You are answering a question about a document using the provided evidence packets. "
     "Each packet shows a page region with a packet_id (e.g. pkt_000). "
+    "Evidence groups summarize how a packet should be bound to nearby headers, "
+    "units, captions, legends, axes, and footnotes; packet descriptors preserve "
+    "the citation-level text and image-order details. "
     "When a packet's descriptor lists image scales, the packet images appear in that "
     "listed order. `tight` is the target region; `context` and `chart_context` are "
     "wider crops for nearby labels, axes, legends, and curve geometry; `zoomed` "
@@ -259,6 +262,9 @@ async def answer_from_evidence(
     prompt (back-compat). Variant 1 adds a verbatim-grounding nudge — a
     different angle so K=2 isn't just sampling-noise on the same prompt.
     """
+    packet_list = "\n".join(
+        _render_packet_line(p, question_text=question.question) for p in evidence.packets
+    )
     hint_block = ""
     if escalation_hint:
         hint_block = (
@@ -298,7 +304,11 @@ async def answer_from_evidence(
         "Available grouped evidence objects "
         "(cite the primary packet ids, not group ids):\n"
         f"{evidence_group_block}\n\n"
-        f"Answer using only these evidence groups.{format_block}{variant_block}"
+        f"Packet-level descriptors for exact span reading:\n{packet_list}\n\n"
+        "Use the grouped evidence to choose the correct row/entity/series, "
+        "and use packet descriptors to read the exact answer span. "
+        "Do not answer Unanswerable when a cited packet already contains the "
+        f"requested value or label.{format_block}{variant_block}"
     )
     images = _collect_packet_images(evidence)
 

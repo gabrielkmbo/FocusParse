@@ -21,6 +21,12 @@
   and chart groups bind plot/legend/axis/caption/footnote. This is the next
   post-evidence packaging layer after the contract-only slice showed too many
   regressions.
+- Evidence-groups slice
+  `results/hf/sprint-2026-05-15/evidence-groups-slice-run1/` also failed the
+  mixed-slice gate (3 recoveries, 7 control regressions, net -4). Follow-up:
+  keep groups as the organizing layer but restore packet-level descriptor lines
+  in the reasoner prompt to reduce over-abstention and verbose control
+  regressions before trying repair tools.
 - Added an agent-eyes audit builder that renders wrong rows as inspectable HTML:
   page overlays, selected/candidate crops, packet text, multi-scale/context
   crop refs, answer history, verifier payloads, and trajectory steps. The
