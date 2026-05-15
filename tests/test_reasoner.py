@@ -766,6 +766,90 @@ def test_phase3b_pick_best_answer_single_sample_returns_zero() -> None:
     assert pick_best_answer(samples, answer_type="exact_match") == 0
 
 
+def test_phase3b_v2_consensus_wins_over_outlier_confidence() -> None:
+    """Phase 3b v2 (2026-05-15): K=3 with majority-agreement should pick
+    the consensus answer even when a high-confidence outlier disagrees.
+    This is the lever for close-numeric chart reads where the model's
+    spread is ['0.4', '0.4', '0.5'] — heuristic-only picker prefers
+    confidence; consensus picker prefers the 2-vote answer."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="0.4", citations=["pkt_000"], confidence=0.5),
+        AnswerEvent(answer="0.4", citations=["pkt_000"], confidence=0.5),
+        AnswerEvent(answer="0.5", citations=["pkt_000"], confidence=0.95),
+    ]
+    # Consensus is "0.4" (2/3). Picker should return index 0 or 1 (both
+    # match), not index 2 (the high-confidence outlier).
+    assert pick_best_answer(samples, answer_type="numeric") in (0, 1)
+
+
+def test_phase3b_v2_consensus_normalizes_whitespace_and_case() -> None:
+    """Phase 3b v2: consensus bucketing collapses whitespace and case
+    so trivial formatting differences don't split the vote. Samples
+    [' 0.4 ', '0.4', '0.5'] still vote as ['0.4', '0.4', '0.5'] =
+    majority '0.4'."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer=" 0.4 ", citations=["pkt_000"], confidence=0.6),
+        AnswerEvent(answer="0.4", citations=["pkt_000"], confidence=0.6),
+        AnswerEvent(answer="0.5", citations=["pkt_000"], confidence=0.9),
+    ]
+    assert pick_best_answer(samples, answer_type="numeric") in (0, 1)
+
+
+def test_phase3b_v2_no_consensus_falls_back_to_heuristic() -> None:
+    """Phase 3b v2: when K=3 produces three distinct answers (no
+    majority), the heuristic ordering takes over (citation count,
+    confidence, length, index)."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="A", citations=["pkt_000"], confidence=0.5),
+        AnswerEvent(answer="B", citations=["pkt_000"], confidence=0.8),
+        AnswerEvent(answer="C", citations=["pkt_000"], confidence=0.6),
+    ]
+    # No consensus → heuristic falls through to confidence; B wins.
+    assert pick_best_answer(samples, answer_type="exact_match") == 1
+
+
+def test_phase3b_v2_consensus_excludes_unanswerable() -> None:
+    """Phase 3b v2: Unanswerable doesn't count toward consensus. With
+    ['Unanswerable', 'Unanswerable', '42'] the picker should still
+    prefer the concrete '42' over the abstention majority."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="Unanswerable", citations=["pkt_000"], confidence=0.5),
+        AnswerEvent(answer="Unanswerable", citations=["pkt_000"], confidence=0.5),
+        AnswerEvent(answer="42", citations=["pkt_000"], confidence=0.7),
+    ]
+    # Consensus excludes Unanswerable → falls back to heuristic →
+    # non-Unanswerable wins (rule 1).
+    assert pick_best_answer(samples, answer_type="numeric") == 2
+
+
+def test_phase3b_v2_k_equals_two_skips_consensus() -> None:
+    """Phase 3b v2: K=2 doesn't use consensus (no majority possible from
+    2 samples) and falls straight to the heuristic. Existing K=2
+    behavior is preserved."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="A", citations=["pkt_000"], confidence=0.4),
+        AnswerEvent(answer="A", citations=["pkt_000"], confidence=0.9),
+    ]
+    # Both samples agree on "A", but K=2 skips consensus and uses
+    # heuristic; higher confidence wins → index 1.
+    assert pick_best_answer(samples, answer_type="exact_match") == 1
+
+
 # ---------------------------------------------------------------------------
 # 2026-05-15: scorer-compatible answer-shape normalization
 # ---------------------------------------------------------------------------

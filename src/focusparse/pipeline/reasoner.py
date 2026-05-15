@@ -413,26 +413,34 @@ def pick_best_answer(
 ) -> int:
     """Pick the best of K self-consistency samples. Returns the chosen index.
 
-    Heuristic ordering (most-preferred first):
+    Phase 3b v2 (2026-05-15 expansion): when K >= 3 and a majority of
+    samples land on the SAME normalized answer (case + whitespace +
+    surrounding punctuation collapsed), pick the first sample with that
+    consensus answer. This catches close-numeric chart reads where the
+    model produces e.g. ['0.4', '0.4', '0.5'] — pure heuristic picker
+    might prefer the outlier on confidence, but the majority sample is
+    almost always the right call.
+
+    Falls back to the heuristic ordering (most-preferred first) when no
+    consensus exists or K < 3:
       1. Non-Unanswerable beats Unanswerable.
       2. Citation count: more cited packets is better.
       3. For exact_match / numeric / boolean: shorter answer is better
-         (the format hints all push for concise spans; a verbose sample is
-         usually the model padding).
+         (the format hints all push for concise spans; a verbose sample
+         is usually the model padding).
       4. Higher self-reported confidence.
-      5. Sample index 0 (tie-breaker).
-
-    A sample appearing in `k` of the samples (consensus) does not get a
-    direct vote — the heuristic ordering already favors the concise
-    self-confident citation-anchored sample, which the consensus sample
-    usually is. Keeping the picker pure-heuristic (no string match)
-    avoids edge cases where two phrasings of the same answer are treated
-    as a tie.
+      5. Sample index 0 (stable tie-break).
     """
     if not answer_events:
         raise ValueError("answer_events is empty")
     if len(answer_events) == 1:
         return 0
+
+    # Phase 3b v2: majority-consensus shortcut for K >= 3.
+    if len(answer_events) >= 3:
+        consensus_idx = _consensus_pick(answer_events)
+        if consensus_idx is not None:
+            return consensus_idx
 
     stem = (str(answer_type).split(".")[-1].lower() if answer_type else "").strip()
     prefer_short = stem in {"exact_match", "numeric", "boolean", "multiple_choice"}
@@ -464,6 +472,42 @@ def pick_best_answer(
 
     best_idx, _ = min(enumerate(answer_events), key=key)
     return best_idx
+
+
+def _consensus_pick(answer_events: list[AnswerEvent]) -> int | None:
+    """Phase 3b v2 (2026-05-15): majority-vote on normalized answers.
+
+    Returns the index of the FIRST sample whose normalized answer is the
+    majority across all K samples, or None if no answer has > K/2 votes.
+    Excludes Unanswerable / empty answers from the vote — if the
+    majority is Unanswerable, the heuristic fallback handles it
+    (preferring any concrete sample).
+    """
+    from collections import Counter
+
+    def normalize(s: str | None) -> str:
+        if not s:
+            return ""
+        # Collapse whitespace + strip surrounding punctuation for vote-bucketing.
+        normalized = " ".join(s.strip().split())
+        # Lowercase only for vote bucketing — we still return the original
+        # answer text from the chosen sample.
+        return normalized.lower().strip(",.;:")
+
+    normalized = [normalize(ev.answer) for ev in answer_events]
+    counts = Counter(n for n in normalized if n and n not in {"unanswerable", "unknown"})
+    if not counts:
+        return None
+
+    most_common, count = counts.most_common(1)[0]
+    # Require a strict majority (> K/2). K=3 → need 2.
+    if count <= len(answer_events) / 2:
+        return None
+    # Return the first sample whose normalized answer matches the majority.
+    for idx, n in enumerate(normalized):
+        if n == most_common:
+            return idx
+    return None
 
 
 def _normalize_answer_shape(
