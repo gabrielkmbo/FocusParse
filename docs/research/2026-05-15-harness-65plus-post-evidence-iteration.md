@@ -137,6 +137,29 @@ changed and all three rows were already correct in the 60.14% baseline. It is
 only a sanity check that the new repair path runs cleanly on the targeted
 failure families without immediate regressions on those controls.
 
+Next canonical gate command, once Gemini planner quota is available again:
+
+```bash
+set -a
+source /Users/gabrielbo/projects/FocusParse/.env
+set +a
+export FOCUSPARSE_MODEL_RETRY_ATTEMPTS=2
+export FOCUSPARSE_MODEL_RETRY_SLEEP_S=1
+uv run python scripts/run_hf_eval.py \
+  --agent focus \
+  --protocol agentic_multi_page \
+  --hf-revision 3774c67f8b814392b6d04c939e904f749a3f52eb \
+  --output-dir results/hf/sprint-2026-05-15/repair-worksheet-slice-run1 \
+  --example-ids-file results/slices/2026-05-15-contract-guard-target-control-ids.txt \
+  --tool-set full \
+  --minimal-artifacts \
+  --max-evidence-retries 1
+```
+
+Do not set `FOCUSPARSE_TIER_PLANNER` or `FOCUSPARSE_TIER_ROUTER` for the
+canonical gate; the 3-row smoke used `cheap_oai` only to bypass an exhausted
+quota and is therefore diagnostic-only.
+
 ## Qualitative Flips
 
 Useful recoveries in the hybrid run:
