@@ -12,7 +12,10 @@
   the new gated structured-region extractor use this role while planner,
   reasoner, and verifier tiers stay unchanged. Live smoke against a cached
   datasheet image succeeded with structured table rows; focused tests and
-  targeted Ruff checks passed. A mixed slice is still required before any
+  targeted Ruff checks passed. A 3-row workflow smoke
+  (`gemini-schema-extractor-smoke-run1`) ran end-to-end at 2/3 with structured
+  extraction notes visible in traces, but the Apple gross-margin row still
+  failed via verbose shape drift. A mixed slice is still required before any
   headline accuracy claim.
 - Verifier-directed reasoner retries now include deterministic same-evidence
   repair context derived from the packets already available to the reasoner.

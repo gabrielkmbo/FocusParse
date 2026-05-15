@@ -146,6 +146,18 @@ Implementation details:
   and 252 output tokens. This is not a benchmark result, only an integration
   validity check.
 
+Workflow smoke after this checkpoint:
+`results/hf/sprint-2026-05-15/gemini-schema-extractor-smoke-run1/focusparse_focus_agentic_multi_page_0b139a04.json`
+ran the existing 3-row smoke slice with the default planner/router tiers and
+the new `schema_extractor` role. It scored 2/3 = 66.7%, cost `$0.0472`
+total / `$0.0236` per correct, mean latency 3.63s, page recall 0.833, bbox IoU
+0.881, and lazy rate 0.0. The trace confirms `Gemini structured extraction`
+notes were injected for form/checkbox packets. This proves the integrated path
+runs with the updated key, but it is not evidence of a benchmark gain: the
+Apple gross-margin row still failed by returning a verbose shape-wrong answer
+instead of `180,683; typical`. The next valid gate remains the 60-row mixed
+target/control slice.
+
 ## Slice Results
 
 | Run | Correct | Accuracy | Cost | Cost/correct | Latency mean | Page recall | Bbox IoU | Lazy rate | Recoveries | Regressions | Net | Control regressions |
