@@ -249,8 +249,8 @@ _QUESTION_STOPWORDS = frozenset(
 #   1. The gate is `chart_extraction_active AND
 #      _region_is_chart(region, question_family=...)`. Explicit chart
 #      subclasses always pass. Generic/unknown visual subclasses pass only
-#      when the planner says this is a chart question and the reranker marked
-#      the region as primary/high-relevance.
+#      when the planner explicitly asked for chart evidence and the reranker
+#      marked the region as primary/high-relevance.
 #   2. chart_to_table failures collapse to an empty CSV with the visual crop
 #      preserved, so a low-quality chart never poisons the packet.
 #   3. Finance is the weak domain in the headline (~32-43% vs ~50% datasheets)
@@ -358,9 +358,17 @@ async def inspect_regions(
     wants_chart = (
         plan.question_family or ""
     ) in _CHART_QUESTION_FAMILIES or "chart" in evidence_keys
+    allow_query_chart_fallback = "chart" in evidence_keys
     ranked_all = sorted(
         regions.candidates,
-        key=lambda r: -_rank_score(r, boosted_types, wants_chart=wants_chart),
+        key=lambda r: (
+            -_rank_score(
+                r,
+                boosted_types,
+                wants_chart=wants_chart,
+                allow_query_chart_fallback=allow_query_chart_fallback,
+            )
+        ),
     )
     ranked = _select_regions_for_inspection(
         ranked_all,
@@ -384,6 +392,7 @@ async def inspect_regions(
             chart_extraction_active=chart_extraction_active,
             chart_to_table_backend=chart_to_table_backend,
             chart_context_active=wants_chart,
+            allow_query_chart_fallback=allow_query_chart_fallback,
             question_family=plan.question_family,
             question_text=question.question,
         )
@@ -411,6 +420,7 @@ async def _inspect_one_region(
     chart_extraction_active: bool = False,
     chart_to_table_backend: Any = None,
     chart_context_active: bool = False,
+    allow_query_chart_fallback: bool = False,
     question_family: str | None = None,
     question_text: str | None = None,
 ) -> EvidencePacket:
@@ -508,7 +518,11 @@ async def _inspect_one_region(
         and is_visual
         and crop_ref
         and crop_ref != page_thumbnail_ref
-        and _region_is_chart(region, question_family=question_family)
+        and _region_is_chart(
+            region,
+            question_family=question_family,
+            allow_query_fallback=allow_query_chart_fallback,
+        )
         and _allow_proactive_context_crop(question_family, region, packet_index=idx)
     ):
         context_bbox = _expand_bbox(region.bbox_norm, pad=_CHART_CONTEXT_PAD)
@@ -718,7 +732,11 @@ async def _inspect_one_region(
         and is_visual
         and crop_ref
         and crop_ref != page_thumbnail_ref
-        and _region_is_chart(region, question_family=question_family)
+        and _region_is_chart(
+            region,
+            question_family=question_family,
+            allow_query_fallback=allow_query_chart_fallback,
+        )
     ):
         figure_class = _figure_class(region) or "chart"
         crop_signals.append("chart_to_table:attempt")
@@ -807,6 +825,7 @@ def _region_is_chart(
     region: RegionCandidate,
     *,
     question_family: str | None = None,
+    allow_query_fallback: bool = False,
 ) -> bool:
     """True when a visual region is likely enough to justify chart tooling.
 
@@ -818,11 +837,14 @@ def _region_is_chart(
     fallback path covers a common Modal-layout miss: chart-grounded questions
     where the reranker identifies a generic `picture`/`other` region as the
     answer carrier. This does not globally spend chart_to_table calls because
-    it requires both a chart question family and strong reranker evidence.
+    callers must opt into query fallback only when the planner explicitly asked
+    for chart evidence.
     """
     figure_class = _figure_class(region)
     if (figure_class or "") in _CHART_FIGURE_CLASSES:
         return True
+    if not allow_query_fallback:
+        return False
     return _query_chart_fallback_allowed(region, question_family=question_family)
 
 
@@ -1206,6 +1228,7 @@ def _rank_score(
     boosted_types: frozenset[str],
     *,
     wants_chart: bool = False,
+    allow_query_chart_fallback: bool = False,
 ) -> float:
     """Score used only for top-N selection; packet.confidence still carries
     the raw detector score.
@@ -1243,7 +1266,7 @@ def _rank_score(
             # A generic picture is usually less useful than an explicit chart,
             # but do not bury it when the reranker already marked it as the
             # query's primary/high-relevance chart carrier.
-            if _strong_query_chart_rerank_signal(region):
+            if allow_query_chart_fallback and _strong_query_chart_rerank_signal(region):
                 boosted *= 1.05
             else:
                 boosted *= 0.45

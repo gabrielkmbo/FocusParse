@@ -393,6 +393,46 @@ Decision: keep multi-scale packets off by default. A future version may still
 be useful if gated to specific chart/readability families or verifier requests,
 but unconditional multi-scale is not the path to 60%.
 
+### Run: chart-to-table with generic-chart fallback, matched K=1 (negative)
+
+`results/hf/sprint-2026-05-15/chart-fallback-ctt-oai-run1/focusparse_focus_agentic_multi_page_8c5e328d.json`.
+
+This run tests a dynamic chart-tool fallback: when a chart-family question asks
+for chart evidence and reranker marks a generic visual (`figure_class=other` or
+`screenshot`) as primary/high-relevance, the inspector can add chart context and
+run `chart_to_table`. A smoke run on `fin-vis-jpm_gtm_us_daily-0109` validated
+the intended mechanism (`2` -> `3`, matching gold `3 times`), but the full
+first-pass chart-to-table run regressed overall.
+
+| Metric             | Chart fallback + CTT | Δ vs current best |
+| ------------------ | -------------------- | ----------------- |
+| Overall accuracy   | **54.05%** (80/148)  | **-3.4pp**        |
+| Datasheet accuracy | 60.4% (61/101)       | -4 rows           |
+| Finance accuracy   | 40.4% (19/47)        | -1 row            |
+| Page recall        | 0.914                | -0.007            |
+| Bbox IoU           | 0.833                | -0.018            |
+| Lazy answer rate   | 0.027                | -0.007            |
+| Reported cost      | $2.19                | +$0.09            |
+| Cost per correct   | $0.027              | +$0.003           |
+| Mean latency       | 5.30s                | +0.92s            |
+
+Flip analysis vs the 57.4% current best: 7 recovered rows, 12 regressed rows
+(net -5). The new generic fallback itself was promising but too broad before
+tightening: fallback rows were 8/12 correct with 3 recoveries
+(`fin-vis-jpm_gtm_us_daily-0109`, `dat-adrv9040-...-0041`,
+`dat-gmsl2-...-0023`) and 1 regression (`dat-aducm350_ug-587-0052`). The full
+`chart_to_table` flag was the larger problem: it attempted on 48 rows, produced
+CSV on 36, but those CSV rows were only 14/36 correct and introduced several
+explicit-chart regressions (`dat-DS5091D-00-0016`, `fin-boe_fsr_2024_nov-0056`,
+`fin-boj_fsr_2024_oct-0008`).
+
+Decision: keep `--chart-to-table` off as a first-pass default. The generic
+fallback was tightened after this run so ambiguous chart-like families such as
+`dual_axis_disambiguation` only treat `figure_class=other` as chart-like when
+the planner explicitly requests `evidence_types=["chart", ...]`. The next
+chart path should be verifier-triggered repair or fallback-only extraction, not
+global chart-to-table on every explicit chart region.
+
 ## Phase 4 — Stopping condition
 
 Goal: n=148 overall accuracy ≥ 60.0%, `lazy_answer_rate ≤ baseline + 1pp`,

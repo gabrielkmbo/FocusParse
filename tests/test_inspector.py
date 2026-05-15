@@ -2237,6 +2237,57 @@ async def test_chart_to_table_skips_weak_other_visual_candidate(tmp_path, monkey
     assert "inspect_region:chart_context" not in ev.packets[0].provenance.args_hash
 
 
+async def test_chart_to_table_skips_other_visual_when_planner_wants_diagram(tmp_path, monkeypatch):
+    """Ambiguous chart-like families are not enough for generic visual fallback.
+
+    `dual_axis_disambiguation` can describe charts, schematics, or diagrams.
+    For `figure_class=other`, require the planner to request chart evidence
+    before spending chart extraction or chart-context budget.
+    """
+    _install_fake_tools(monkeypatch, inspect_calls=[], text_calls=[])
+    chart_calls: list = []
+
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None, backend_client=None):
+        from focusparse.tools.chart_to_table import ChartToTableOutput
+
+        chart_calls.append({"crop_ref": inp.crop_ref})
+        return ChartToTableOutput(table_csv="x,y\n0,0", confidence=0.5, n_points=1)
+
+    monkeypatch.setattr(
+        "focusparse.tools.chart_to_table.chart_to_table",
+        _fake_chart_to_table,
+    )
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    primary_other = _region(
+        region_id="diagram",
+        page=1,
+        bbox_norm=(0.10, 0.20, 0.50, 0.60),
+        score=0.9,
+        region_type="picture",
+        supporting_signals=["figure_class=other"],
+    ).model_copy(update={"needed_for": "primary", "relevance": 0.9})
+    plan = _plan().model_copy(
+        update={"question_family": "dual_axis_disambiguation", "evidence_types": ["diagram"]}
+    )
+
+    ev = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=[primary_other]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=True,
+        multi_scale=False,
+    )
+
+    assert chart_calls == []
+    assert ev.packets[0].chart_csv is None
+    assert "chart_to_table:attempt" not in ev.packets[0].provenance.args_hash
+    assert "inspect_region:chart_context" not in ev.packets[0].provenance.args_hash
+
+
 async def test_chart_to_table_skipped_for_non_chart_family_even_with_flag(tmp_path, monkeypatch):
     """Non-chart families must NOT trigger chart_to_table even when the flag is
     on. Guards against accidental over-expansion of `_CHART_QUESTION_FAMILIES`."""
