@@ -180,6 +180,18 @@ regressions included losing punctuation/tie structure on
 diagnostic/opt-in; do not make prompt-only strict-shape behavior the default
 claim.
 
+Full-table multi-scale packet test:
+`results/hf/sprint-2026-05-14/multiscale-k1-oai-run1/`. Result:
+**83/148 = 56.1%**, below the current best **85/148 = 57.4%** and with much
+higher reported answer-stage cost (**$4.39**, **$0.053/correct**, mean latency
+**6.84s**). Domain split: datasheet **62/101 = 61.4%**, finance
+**21/47 = 44.7%**. Unique-id flips vs current best: **7** recovered and **9**
+regressed, net **-2**. Multi-scale helped some intended cases
+(`dat-ads1299-0057`, `dat-gmsl2-...-0023`) but introduced visual distractors
+(`dat-JESD204B-...-0029`, `dat-ads1299-0064`). Decision: keep
+`--multi-scale-packets` off by default; only revisit as a verifier-gated or
+question-family-gated evidence repair.
+
 ### 2026-05-14 — gated reasoner-escalation slice vs broad retry negative control
 
 Branch `harness-60plus-iteration` added a narrow default reasoner retry for

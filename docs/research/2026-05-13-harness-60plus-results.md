@@ -359,6 +359,40 @@ the inspector renders both a tight crop and a wider context crop per region, and
 the reasoner sees both via `EvidencePacket.multi_scale_crops`. It still needs a
 matched full n=148 run against the 57.4% current best before it can be claimed.
 
+### Run: multi-scale packets, matched K=1 (negative)
+
+`results/hf/sprint-2026-05-14/multiscale-k1-oai-run1/focusparse_focus_agentic_multi_page_8c5e328d.json`.
+
+This run tests `--multi-scale-packets` on the current branch with K=1. It gives
+the reasoner both tight and context crops per evidence packet. The run was
+stable, but it did not improve the full-table result and it materially increased
+reported answer-stage cost.
+
+| Metric             | Multi-scale K=1    | Δ vs current best |
+| ------------------ | ------------------ | ----------------- |
+| Overall accuracy   | **56.08%** (83/148) | **-1.4pp**        |
+| Datasheet accuracy | 61.4% (62/101)      | -3 rows           |
+| Finance accuracy   | 44.7% (21/47)       | +1 row            |
+| Page recall        | 0.904               | -0.017            |
+| Bbox IoU           | 0.839               | -0.012            |
+| Lazy answer rate   | 0.047               | +0.014            |
+| Reported cost      | $4.39               | +$2.29            |
+| Cost per correct   | $0.053              | +$0.028           |
+| Mean latency       | 6.84s               | +2.47s            |
+
+Compared with the 57.4% current best on the shared unique-id set, multi-scale
+recovered 7 rows and regressed 9 rows. The recoveries show the intended
+mechanism in a few cases (`dat-ads1299-0057`: `32 t_CLK` -> `16 t_CLK`;
+`dat-gmsl2-...-0023`: long comparison -> `different`), but the regressions are
+also evidence-shape regressions (`dat-JESD204B-...-0029`: `6` -> `Unanswerable`;
+`dat-ads1299-0064`: `0.35 uVpp` -> `0.25 uVpp`). This suggests that always
+showing more visual context creates distractors as often as it resolves missing
+context.
+
+Decision: keep multi-scale packets off by default. A future version may still
+be useful if gated to specific chart/readability families or verifier requests,
+but unconditional multi-scale is not the path to 60%.
+
 ## Phase 4 — Stopping condition
 
 Goal: n=148 overall accuracy ≥ 60.0%, `lazy_answer_rate ≤ baseline + 1pp`,
