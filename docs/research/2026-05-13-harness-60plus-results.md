@@ -433,35 +433,61 @@ the planner explicitly requests `evidence_types=["chart", ...]`. The next
 chart path should be verifier-triggered repair or fallback-only extraction, not
 global chart-to-table on every explicit chart region.
 
-## OAI-cheap ceiling: 57.4% (Phase 3a v2 + 3d + 3b)
+### Run: tightened generic-chart context only, matched K=1 (new best)
 
-After exhaustive iteration on the `cheap_oai` (gpt-4.1-nano) planner /
-router, the Phase 3a v2 + 3d + 3b stack at **57.43%** has emerged as a
-hard ceiling. Every additional lever we've stacked on top regresses:
+`results/hf/sprint-2026-05-15/chart-fallback-context-only-oai-run1/focusparse_focus_agentic_multi_page_8c5e328d.json`.
 
-| Stack addition               | Δ vs 57.4% best         |
-| ---------------------------- | ----------------------- |
-| Phase 3e v1 (strict shape)   | −4.7pp                  |
-| Phase 3e v2 (narrowed shape) | −2.7pp                  |
-| multi_scale_packets          | −2.0pp                  |
-| chart_to_table + fallback    | −3.4pp                  |
-| chart-fallback + Phase 3b    | −3.3pp (killed mid-run) |
+This run keeps the tightened generic-chart fallback but leaves
+`--chart-to-table` off. It isolates the useful part of the chart experiment:
+dynamic ranking/context for planner-confirmed chart evidence, without noisy
+first-pass CSV extraction.
 
-Mechanism: gpt-4.1-nano as the planner/router makes weaker routing
-decisions than Gemini Flash. Additional context crops or stricter
-verifier rules force retries on questions whose ROI hinges on
-high-quality routing — and those retries land on worse answers. We've
-hit the model-capacity ceiling for this cheap tier.
+| Metric             | Context-only fallback | Δ vs prior best |
+| ------------------ | --------------------- | --------------- |
+| Overall accuracy   | **58.78%** (87/148)   | **+1.4pp**      |
+| Datasheet accuracy | 64.4% (65/101)        | flat            |
+| Finance accuracy   | 46.8% (22/47)         | +2 rows         |
+| Page recall        | 0.911                 | -0.010          |
+| Bbox IoU           | 0.846                 | -0.006          |
+| Lazy answer rate   | 0.034                 | flat            |
+| Reported cost      | $2.12                 | +$0.02          |
+| Cost per correct   | $0.024                | flat            |
+| Mean latency       | 3.80s                 | -0.58s          |
 
-**Killed Gemini-cheap partial signal**: +12.8pp on n=39 with the same
-Phase 3a v2 + 3d stack. That projects to ~62% if it scales to n=148.
-Phase 3b added another +5pp on cheap_oai, so the projected Gemini-cheap
-full-stack result is **≥60%**.
+Unique-id flip analysis vs the 57.4% prior best: 9 recovered rows and
+7 regressed rows (net +2). Useful recoveries include `fin-aapl-20250927-0034`
+(`September 2022, $21`), `fin-vis-jpm_gtm_us_daily-0126` (`UK`),
+`fin-bis_qr_2025_mar-0050` (`Latvia`), `dat-gmsl2-...-0023` (`Different`),
+and `dat-ads1299-0057` (`16 t_CLK`). Regressions are mostly answer-shape or
+over-inclusion rather than localization failures: `dat-adrv9040-...-0052`
+adds `, 6`; `fin-bis_qr_2024_sep-0050` adds `D. FX loans`; and
+`dat-arm1176-ch3-coproc.annot-0004` answers with a full sentence instead of
+the compact value `0`.
 
-**Path to 60%**: wait for Gemini free-tier daily quota reset (midnight
-Pacific Friday, ~1 hour from this writing). Then rerun the full Phase
-3a v2 + 3d + 3b stack on Gemini cheap, without the regressing levers
-(Phase 3e, multi_scale, chart-fallback stay off).
+Decision: this becomes the new current best, but the goal is not complete.
+The harness still needs two more correct rows to cross 60%. The next lever
+should target answer-shape/selection on already-localized evidence, not broader
+first-pass visual tooling.
+
+## OAI-cheap current ceiling: 58.8%
+
+With `cheap_oai` (gpt-4.1-nano) planner/router, the best measured full-stack
+run is now **58.78%**. Broad "more context/tooling" changes still regress, but
+the tightened chart-context fallback shows that narrow, evidence-confirmed
+orchestration can move the table.
+
+| Stack addition                     | Δ vs 57.4% prior best |
+| ---------------------------------- | --------------------- |
+| Phase 3e v1 (strict shape)         | -4.7pp                |
+| Phase 3e v2 (narrowed shape)       | -0.7pp                |
+| multi_scale_packets                | -1.4pp                |
+| chart_to_table + generic fallback  | -3.4pp                |
+| tightened chart-context fallback   | +1.4pp                |
+
+The next two-row gap is unlikely to close by adding more first-pass evidence.
+Most remaining recoverable rows already have page recall / IoU signal; the
+highest-leverage path is answer-shape repair or verifier-aware selection over
+existing evidence.
 
 ## Phase 4 — Stopping condition
 

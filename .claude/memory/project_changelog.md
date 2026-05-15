@@ -12,3 +12,7 @@
   `dual_axis_disambiguation` require planner `evidence_types=["chart", ...]`
   before a generic `other` visual gets chart-context or `chart_to_table`
   treatment. This avoids treating diagram/schematic rows as chart rows.
+- The tightened fallback without `--chart-to-table` produced the new OAI-cheap
+  best full run: 87/148 = 58.78%, with finance at 22/47 and datasheet at
+  65/101. The remaining gap is two rows short of 60%, so answer-shape /
+  verifier-aware selection is the next likely lever.
