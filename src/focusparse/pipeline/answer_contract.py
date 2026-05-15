@@ -19,6 +19,8 @@ class AnswerContract:
     requires_quantitative_value: bool = False
     requires_visual_explanation: bool = False
     row_disambiguation_cues: tuple[str, ...] = ()
+    requires_corresponding_row_binding: bool = False
+    checkbox_binding_required: bool = False
     chart_binding_required: bool = False
 
 
@@ -66,6 +68,7 @@ _ROW_CUE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("lowest", re.compile(r"\blowest\b", re.IGNORECASE)),
     ("highest", re.compile(r"\bhighest\b", re.IGNORECASE)),
     ("among", re.compile(r"\bamong\b", re.IGNORECASE)),
+    ("corresponding", re.compile(r"\bcorresponding\b", re.IGNORECASE)),
     ("compare", re.compile(r"\bcompar(?:e|ing|ison)\b", re.IGNORECASE)),
     ("visually_similar", re.compile(r"\bvisually\s+similar\b", re.IGNORECASE)),
     ("min_typ_max", _MIN_TYP_MAX_RE),
@@ -73,6 +76,17 @@ _ROW_CUE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("row", re.compile(r"\brow\b", re.IGNORECASE)),
     ("condition", re.compile(r"\bcondition\b", re.IGNORECASE)),
     ("value", re.compile(r"\bvalue\b", re.IGNORECASE)),
+)
+_CORRESPONDING_ROW_BINDING_RE = re.compile(
+    r"\bfor\s+the\s+(?:year|period|quarter|row|item|entity|metric|series)\s+in\s+which\b"
+    r"|\breached\s+(?:its|their|the)?\s*(?:minimum|maximum|lowest|highest|largest|smallest)\b",
+    re.IGNORECASE,
+)
+_CORRESPONDING_OUTPUT_RE = re.compile(r"\bcorresponding\b", re.IGNORECASE)
+_CHECKBOX_BINDING_RE = re.compile(
+    r"\b(?:check\s*marks?|check\s+boxes|checkbox(?:es)?|checked|large\s+accelerated\s+filer|"
+    r"filed\s+all\s+required\s+reports|yes\s*/\s*no\s+checkbox(?:es)?)\b",
+    re.IGNORECASE,
 )
 _CHART_BINDING_RE = re.compile(
     r"\b(?:chart|legend|series|panel|caption|axis|axes|curve|line|bar|exhibit|figure|marker)\b",
@@ -93,10 +107,13 @@ def build_answer_contract(
     question = str(question_text or "")
     family = str(question_family or "").lower()
     domain_l = str(domain or "").lower()
+    answer_stem = str(answer_type or "").split(".")[-1].lower()
     requires_min_typ_max = bool(_MIN_TYP_MAX_RE.search(question))
     requires_multi_field = requires_min_typ_max or any(
         pattern.search(question) for pattern in _MULTI_FIELD_PATTERNS
     )
+    if answer_stem == "boolean":
+        requires_multi_field = False
     requires_visual_explanation = bool(_VISUAL_EXPLANATION_RE.search(question)) and bool(
         re.search(
             r"\b(?:cue|cues|diagram|explain|how does|indicate|confirm|using both)\b",
@@ -106,6 +123,13 @@ def build_answer_contract(
     )
     requires_quantitative_value = _requires_quantitative_value(question, answer_type)
     row_cues = tuple(name for name, pattern in _ROW_CUE_PATTERNS if pattern.search(question))
+    requires_corresponding_row_binding = bool(_CORRESPONDING_OUTPUT_RE.search(question)) and (
+        bool(_CORRESPONDING_ROW_BINDING_RE.search(question))
+        or bool(
+            re.search(r"\b(?:among|min(?:imum)?|max(?:imum)?|lowest|highest)\b", question, re.I)
+        )
+    )
+    checkbox_binding_required = bool(_CHECKBOX_BINDING_RE.search(question))
     chart_binding_required = bool(_CHART_BINDING_RE.search(question)) or bool(
         _CHART_FAMILY_RE.search(family)
     )
@@ -120,6 +144,8 @@ def build_answer_contract(
         requires_quantitative_value=requires_quantitative_value,
         requires_visual_explanation=requires_visual_explanation,
         row_disambiguation_cues=row_cues,
+        requires_corresponding_row_binding=requires_corresponding_row_binding,
+        checkbox_binding_required=checkbox_binding_required,
         chart_binding_required=chart_binding_required,
     )
 
@@ -140,6 +166,15 @@ def render_answer_contract(contract: AnswerContract) -> str:
         lines.append(
             "verify the exact table row/entity; disambiguation cues="
             + ", ".join(contract.row_disambiguation_cues)
+        )
+    if contract.requires_corresponding_row_binding:
+        lines.append(
+            "for corresponding-value questions, first bind the source row/year/entity, "
+            "then read the requested output from that same row"
+        )
+    if contract.checkbox_binding_required:
+        lines.append(
+            "bind each checkbox/check mark to the nearest Yes/No or status label before answering"
         )
     if contract.chart_binding_required:
         lines.append(
@@ -180,6 +215,10 @@ def answer_contract_diagnostics(contract: AnswerContract) -> dict[str, list[str]
     diagnostics: dict[str, list[str]] = {}
     if contract.row_disambiguation_cues:
         diagnostics["row_disambiguation_cues"] = list(contract.row_disambiguation_cues)
+    if contract.requires_corresponding_row_binding:
+        diagnostics["corresponding_row_binding_cues"] = ["source_row", "output_field"]
+    if contract.checkbox_binding_required:
+        diagnostics["checkbox_binding_cues"] = ["check_mark", "nearest_label"]
     if contract.chart_binding_required:
         diagnostics["chart_binding_cues"] = ["series", "legend", "panel", "caption", "axis"]
     return diagnostics
@@ -191,6 +230,10 @@ def answer_contract_risks(contract: AnswerContract) -> list[str]:
     risks: list[str] = []
     if contract.row_disambiguation_cues:
         risks.append("wrong_row_risk")
+    if contract.requires_corresponding_row_binding and "wrong_row_risk" not in risks:
+        risks.append("wrong_row_risk")
+    if contract.checkbox_binding_required:
+        risks.append("checkbox_binding_risk")
     if contract.chart_binding_required:
         risks.append("legend_binding_risk")
     return risks

@@ -82,6 +82,12 @@ _SYSTEM_PROMPT = (
     "AEC-Q100), and superlatives such as lowest/highest/min/max. Reject "
     "answers that satisfy only a subset of the constraints or use a nearby "
     "but different row/entity.\n"
+    "- For corresponding-row questions, first identify the source row/year/entity "
+    "from the metric named in the setup clause, then verify the requested output "
+    "field from that same row. Reject answers that instead choose the minimum or "
+    "maximum of the output field itself.\n"
+    "- For checkbox/check-mark questions, bind the selected mark to the nearest "
+    "Yes/No or status label; do not treat adjacent unselected labels as selected.\n"
     "- When `next_action` is expand_context, include optional "
     "`diagnostics.missing_context` with any of: caption, legend, footnote, "
     "header, continuation, axis_label, row_header, column_header, unit, "
@@ -89,7 +95,8 @@ _SYSTEM_PROMPT = (
     "- When rejecting because the answer violates the question answer contract "
     "but the evidence is present, use `next_action=escalate_reasoner` and "
     "include optional `diagnostics.answer_shape_failure` with any of: "
-    "missing_field, label_value_mismatch, wrong_row_risk, legend_binding_risk.\n"
+    "missing_field, label_value_mismatch, wrong_row_risk, legend_binding_risk, "
+    "checkbox_binding_risk.\n"
     "- If expand_context is for readability rather than missing context, keep "
     "`diagnostics.missing_context` empty and include "
     "`diagnostics.target_packet_ids` when you can name the affected packet.\n"
@@ -612,6 +619,10 @@ def _normalize_answer_shape_failure(value: str) -> str | None:
         "series_binding": "legend_binding_risk",
         "chart_binding": "legend_binding_risk",
         "chart_legend_binding": "legend_binding_risk",
+        "checkbox_binding": "checkbox_binding_risk",
+        "checkbox_binding_risk": "checkbox_binding_risk",
+        "checkmark_binding": "checkbox_binding_risk",
+        "check_mark_binding": "checkbox_binding_risk",
     }
     return aliases.get(key)
 

@@ -80,6 +80,35 @@ def test_wrong_row_cues_are_detected_without_forcing_failure() -> None:
     assert answer_contract_failures("RTQ2510-QA, VDFN3x3-8", contract) == []
 
 
+def test_corresponding_row_binding_detects_two_step_min_question() -> None:
+    contract = build_answer_contract(
+        "For the year in which Products net sales reached their minimum among the "
+        "three years shown, what was the corresponding Gross margin value, and is "
+        "this value also the minimum, typical, or maximum among the three years?",
+        answer_type="exact_match",
+        domain="finance",
+        question_family="min_typ_max_disambiguation",
+    )
+
+    assert contract.requires_corresponding_row_binding
+    assert "corresponding" in contract.row_disambiguation_cues
+    assert "wrong_row_risk" in answer_contract_risks(contract)
+    assert answer_contract_failures("180,683; typical", contract) == []
+
+
+def test_checkbox_binding_detected_without_boolean_failure() -> None:
+    contract = build_answer_contract(
+        "Based on the check marks in the table, does the registrant qualify as a "
+        "large accelerated filer and has it filed all required reports?",
+        answer_type="boolean",
+        domain="finance",
+    )
+
+    assert contract.checkbox_binding_required
+    assert "checkbox_binding_risk" in answer_contract_risks(contract)
+    assert answer_contract_failures("yes", contract) == []
+
+
 def test_chart_binding_detected_from_family_without_chart_extraction() -> None:
     contract = build_answer_contract(
         "Which country experienced the largest increase between markers a and c?",

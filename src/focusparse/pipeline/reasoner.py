@@ -673,7 +673,7 @@ def _normalize_terminal_o_digit_in_identifier(text: str) -> str:
 def _normalize_leading_code_identifier_shape(text: str) -> str | None:
     leading = re.match(
         r"^(?P<identifier>[A-Z][A-Z0-9]*(?:[ _-]+[A-Z0-9]*[0-9][A-Z0-9]*)*)"
-        r"\.\s+.+$",
+        r"[.;]\s+.+$",
         text,
     )
     if not leading:

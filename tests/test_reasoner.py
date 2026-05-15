@@ -1035,6 +1035,19 @@ def test_answer_shape_collapses_leading_code_identifier_explanation() -> None:
     )
 
 
+def test_answer_shape_collapses_leading_code_identifier_semicolon_explanation() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "DPD MODE1; NO M-TABLE UPDATE SINCE Tx RMS POWER < MAX POWER",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "DPD_MODE1"
+    )
+
+
 def test_answer_shape_does_not_collapse_plain_sentence_explanation() -> None:
     from focusparse.pipeline.reasoner import _normalize_answer_shape
 

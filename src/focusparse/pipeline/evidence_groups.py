@@ -189,6 +189,10 @@ def _binding_frame(group_kind: EvidenceGroupKind, contract: AnswerContract | Non
             contract_bits.append(
                 "disambiguate row cues=" + ",".join(contract.row_disambiguation_cues)
             )
+        if contract.requires_corresponding_row_binding:
+            contract_bits.append("bind source row before output field")
+        if contract.checkbox_binding_required:
+            contract_bits.append("bind checkbox mark to nearest label")
     if contract_bits:
         frame += "; contract: " + "; ".join(contract_bits)
     return frame

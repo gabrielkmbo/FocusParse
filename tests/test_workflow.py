@@ -443,6 +443,32 @@ def test_contract_diagnostic_allows_reasoner_shape_retry():
     )
 
 
+def test_checkbox_diagnostic_allows_reasoner_shape_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The checkbox mark is bound to the wrong adjacent label.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+        diagnostics={"answer_shape_failure": ["checkbox_binding_risk"]},
+    )
+    answer = AnswerEvent(answer="no", citations=["pkt_003"], confidence=0.72)
+    question = QuestionEvent(
+        example_id="ex",
+        question="Based on the check marks, did the registrant file all required reports?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="boolean",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
 def test_concise_exact_answer_blocks_reasoner_shape_retry():
     verdict = VerdictEvent(
         supported=False,

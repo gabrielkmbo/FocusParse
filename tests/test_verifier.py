@@ -238,6 +238,60 @@ async def test_verify_prompt_includes_question_answer_contract():
     assert "min/typ/max" in prompt
 
 
+async def test_verify_prompt_includes_corresponding_row_binding_contract():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "picked output-field minimum instead of corresponding row", '
+        '"next_action": "escalate_reasoner", "confidence": 0.8, '
+        '"diagnostics": {"answer_shape_failure": ["wrong_row"]}}'
+    )
+    question = _question(domain="finance")
+    question.question = (
+        "For the year in which Products net sales reached their minimum among the three years "
+        "shown, what was the corresponding Gross margin value, and is this value also the "
+        "minimum, typical, or maximum among the three years?"
+    )
+    await verify_answer(
+        question,
+        _evidence(
+            _packet(snippet="Products 297,392 220,747 198,270 Gross margin 169,148 180,683 170,782")
+        ),
+        _answer(answer="169,148; minimum"),
+        backend_client=client,
+        question_family="min_typ_max_disambiguation",
+    )
+
+    prompt = client.calls[0]["prompt"]
+    system = client.calls[0]["system"]
+    assert "first bind the source row/year/entity" in prompt
+    assert "Reject answers that instead choose the minimum or maximum of the output field" in system
+
+
+async def test_verify_parses_checkbox_binding_risk():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "checkbox mark is bound to the wrong adjacent label", '
+        '"next_action": "escalate_reasoner", "confidence": 0.8, '
+        '"diagnostics": {"answer_shape_failure": ["checkbox_binding"]}}'
+    )
+    question = _question(domain="finance")
+    question.answer_type = "boolean"
+    question.question = (
+        "Based on the check marks in the table, does the registrant qualify as a "
+        "large accelerated filer and has it filed all required reports?"
+    )
+    verdict, _ = await verify_answer(
+        question,
+        _evidence(
+            _packet(snippet="Large accelerated filer Yes [X] No [ ] Filed reports Yes [X] No [ ]")
+        ),
+        _answer(answer="no"),
+        backend_client=client,
+    )
+
+    assert verdict.next_action == "escalate_reasoner"
+    assert "checkbox_binding_risk" in verdict.diagnostics["answer_shape_failure"]
+    assert "checkbox_binding_cues" in verdict.diagnostics
+
+
 async def test_verify_contract_guard_overrides_false_accept_for_missing_field():
     client = _FakeVerifierClient(
         '{"supported": true, "reason": "value appears in the row", '

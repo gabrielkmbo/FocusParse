@@ -2082,6 +2082,7 @@ def _verdict_has_answer_shape_failure(verdict: VerdictEvent) -> bool:
             "label_value_mismatch",
             "wrong_row_risk",
             "legend_binding_risk",
+            "checkbox_binding_risk",
         }
         for value in values
     )
