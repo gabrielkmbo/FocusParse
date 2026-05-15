@@ -542,40 +542,19 @@ async def test_verify_llm_robust_to_bad_payloads(bad_payload):
 
 
 # ---------------------------------------------------------------------------
-# Phase 3e strict-shape rule (2026-05-14 sprint)
+# answer_type passthrough into verifier user prompt (Phase 3e v2 was
+# reverted on 2026-05-14 because both versions regressed on cheap_oai
+# n=148: v1 -4.7pp, v2 -2.7pp vs the no-3e 57.4% best. The answer_type
+# passthrough stayed in `_build_verifier_prompt` because it is harmless
+# and reusable for future verifier-side levers.)
 # ---------------------------------------------------------------------------
 
 
-def test_phase3e_system_prompt_has_exact_match_strict_shape_rule() -> None:
-    """Phase 3e v2 (2026-05-14, narrowed): the strict-shape rule applies
-    ONLY when all three conditions hold (exact_match type AND multi-token
-    or structural phrase AND clear character-level mismatch in cited
-    packet). Explicit anti-examples for single-token / numeric / identifier
-    answers keep the verifier from over-rejecting valid answers like '5',
-    '70%', '0xFF', or 'VDD'."""
-    from focusparse.pipeline.verifier import _SYSTEM_PROMPT
-
-    assert "exact_match" in _SYSTEM_PROMPT.lower()
-    # Concrete examples from the triage are in the prompt to ground the model.
-    assert "BLE" in _SYSTEM_PROMPT
-    assert "Balance Sheets" in _SYSTEM_PROMPT
-    # The action verdict for shape mismatches is escalate_reasoner.
-    assert "escalate_reasoner" in _SYSTEM_PROMPT
-    # The rule must explicitly NOT apply to numeric/boolean/etc.
-    assert "numeric" in _SYSTEM_PROMPT.lower()
-    # v2: anti-examples for single-token / numeric / identifier answers
-    assert "'5'" in _SYSTEM_PROMPT or "'6'" in _SYSTEM_PROMPT
-    assert "Latvia" in _SYSTEM_PROMPT or "single number" in _SYSTEM_PROMPT
-    # v2: explicit instruction to prefer accept under uncertainty
-    assert "When in doubt, prefer `accept`" in _SYSTEM_PROMPT
-
-
-def test_phase3e_verifier_prompt_passes_answer_type_to_model() -> None:
-    """Phase 3e: the verifier must see the question's answer_type so it
-    can decide whether to apply the strict-shape rule. The build helper
-    includes `Question answer_type: <type>` in the user prompt when
-    `question.answer_type` is set, and omits the line when it's None
-    (back-compat for callers / tests that don't populate the field)."""
+def test_verifier_user_prompt_passes_answer_type_when_present() -> None:
+    """`_build_verifier_prompt` includes `Question answer_type: <type>` in
+    the user prompt when `question.answer_type` is set, and omits the line
+    when it's None (back-compat for callers / tests that don't populate
+    the field)."""
     from focusparse.pipeline.verifier import _build_verifier_prompt
 
     prompt_with_type = _build_verifier_prompt(
