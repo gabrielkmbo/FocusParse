@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 
 from focusparse.models.base import ModelClient, ModelResponse
+from focusparse.pipeline.answer_contract import build_answer_contract, render_answer_contract
 from focusparse.pipeline.events import AnswerEvent, EvidenceEvent, QuestionEvent
 
 _SYSTEM_PROMPT = (
@@ -275,11 +276,19 @@ async def answer_from_evidence(
         domain=question.domain,
         question_family=question_family,
     )
+    answer_contract = build_answer_contract(
+        question.question,
+        answer_type=question.answer_type,
+        domain=question.domain,
+        question_family=question_family,
+    )
+    contract_block = render_answer_contract(answer_contract)
     format_block = f"\n{format_hint}\n" if format_hint else ""
     variant_block = _sample_variant_addendum(sample_variant)
     prompt = (
         f"{hint_block}"
         f"Question: {question.question}\n\n"
+        f"Question answer contract:\n{contract_block}\n\n"
         f"Available evidence packets:\n{packet_list}\n\n"
         f"Answer using only these packets.{format_block}{variant_block}"
     )
@@ -541,6 +550,10 @@ def _normalize_answer_shape(
             return "-" + accounting.group(1).replace(",", "")
 
     if stem in {"exact_match", "numeric"}:
+        min_typ_max = _normalize_min_typ_max_shape(text)
+        if min_typ_max:
+            return min_typ_max
+
         variable_value = re.fullmatch(
             r"([A-Za-z][A-Za-z0-9_]{0,12})\s*=\s*"
             r"(-?\d+(?:\.\d+)?)\s*([A-Za-zµμ%]{1,6})",
@@ -566,6 +579,24 @@ def _normalize_answer_shape(
 def _answer_type_stem(answer_type: str | None) -> str:
     s = str(answer_type or "").strip()
     return s.split(".")[-1].lower() if "." in s else s.lower()
+
+
+def _normalize_min_typ_max_shape(text: str) -> str | None:
+    value = r"[-+]?\d+(?:\.\d+)?\s*[A-Za-zµμ%]{0,8}"
+    pattern = re.fullmatch(
+        rf"min(?:imum)?\s*[:=]?\s*(?P<min>{value})\s*[,;/ ]+\s*"
+        rf"typ(?:ical)?\s*[:=]?\s*(?P<typ>{value})\s*[,;/ ]+\s*"
+        rf"max(?:imum)?\s*[:=]?\s*(?P<max>{value})",
+        text,
+        re.IGNORECASE,
+    )
+    if not pattern:
+        return None
+
+    def fmt(raw: str) -> str:
+        return re.sub(r"(?<=\d)\s*([A-Za-zµμ%]+)$", r" \1", raw.strip())
+
+    return f"min: {fmt(pattern.group('min'))}, typ: {fmt(pattern.group('typ'))}, max: {fmt(pattern.group('max'))}"
 
 
 def _render_packet_line(packet, *, question_text: str | None = None) -> str:

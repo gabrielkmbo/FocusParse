@@ -415,6 +415,34 @@ def test_verbose_numeric_answer_allows_reasoner_shape_retry():
     )
 
 
+def test_contract_diagnostic_allows_reasoner_shape_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The proposed answer violates the question answer contract.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+        diagnostics={"answer_shape_failure": ["missing_field"]},
+    )
+    answer = AnswerEvent(answer="0.697", citations=["pkt_003"], confidence=0.72)
+    question = QuestionEvent(
+        example_id="ex",
+        question=(
+            "Which value (min, typ, or max) should be used, and what is the corresponding voltage?"
+        ),
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
 def test_concise_exact_answer_blocks_reasoner_shape_retry():
     verdict = VerdictEvent(
         supported=False,
@@ -1570,6 +1598,54 @@ async def test_loop_allows_verbose_numeric_shape_retry(tmp_path, parser_bench_su
     assert stage_counts["verify"] == 2
     assert stage_counts["expand_context"] == 1
     assert "Keep the answer field concise" in reasoner.calls[1]["prompt"]
+
+
+async def test_loop_allows_contract_guard_retry(tmp_path, parser_bench_submodule_present):
+    """A verifier false-accept overridden by the contract gets one retry."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "0.697", "citations": ["pkt_000"], "confidence": 0.9}',
+            '{"answer": "min: 0.697 V", "citations": ["pkt_000"], "confidence": 0.86}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=True,
+                next_action="accept",
+                reason="The value appears in the cited table row.",
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+    example = _make_example().model_copy(
+        update={
+            "question": (
+                "Which value (min, typ, or max) should be used, and what is "
+                "the corresponding voltage?"
+            ),
+            "answer_type": "exact_match",
+            "question_family": "spec_table_cell_retrieval",
+        }
+    )
+
+    result = await workflow.run(
+        example, [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "min: 0.697 V"
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["evidence_retries_used"] == 0
+    stage_counts = _stage_counts(result)
+    assert stage_counts["answer"] == 2
+    assert stage_counts["verify"] == 2
+    assert "Question answer contract" in reasoner.calls[1]["prompt"]
 
 
 async def test_loop_allows_single_entity_shape_retry(tmp_path, parser_bench_submodule_present):

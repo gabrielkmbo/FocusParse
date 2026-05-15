@@ -341,6 +341,26 @@ def test_argparse_trace_viewer_flags(script_mod, monkeypatch, tmp_path):
     assert args.trace_viewer_output == out
 
 
+def test_argparse_example_ids_file(script_mod, monkeypatch, tmp_path):
+    ids_file = tmp_path / "ids.txt"
+    ids_file.write_text("ex-a\nex-b\n")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_hf_eval.py",
+            "--protocol",
+            "agentic_multi_page",
+            "--agent",
+            "focus",
+            "--example-ids-file",
+            str(ids_file),
+        ],
+    )
+    args = script_mod._parse_args()
+    assert args.example_ids_file == ids_file
+
+
 def test_argparse_layout_preflight_flags(script_mod, monkeypatch):
     monkeypatch.setattr(
         sys,
@@ -431,6 +451,29 @@ def test_filter_examples_by_id(script_mod):
     examples = [SimpleNamespace(id="a"), SimpleNamespace(id="b")]
     assert script_mod._filter_examples_by_id(examples, "b") == [examples[1]]
     assert script_mod._filter_examples_by_id(examples, "missing") == []
+
+
+def test_requested_example_ids_combines_file_and_single_id(script_mod, tmp_path):
+    ids_file = tmp_path / "ids.txt"
+    ids_file.write_text("# target rows\nb\nc\nb\n\n")
+    args = SimpleNamespace(example_id="a", example_ids_file=ids_file)
+
+    assert script_mod._requested_example_ids(args) == ["a", "b", "c"]
+
+
+def test_filter_examples_by_ids_preserves_dataset_order_and_duplicates(script_mod):
+    examples = [
+        SimpleNamespace(id="a"),
+        SimpleNamespace(id="b"),
+        SimpleNamespace(id="a"),
+        SimpleNamespace(id="c"),
+    ]
+
+    assert script_mod._filter_examples_by_ids(examples, ["c", "a"]) == [
+        examples[0],
+        examples[2],
+        examples[3],
+    ]
 
 
 def test_default_trace_viewer_output(script_mod):

@@ -154,7 +154,7 @@ def main() -> int:
         repo_id=args.hf_repo,
         split=args.hf_split,
         revision=args.hf_revision,
-        limit=None if args.example_id else args.limit,
+        limit=None if _has_example_filter(args) else args.limit,
     )
     fingerprint = dataset_fingerprint(ds)
 
@@ -181,12 +181,17 @@ def main() -> int:
         for line in benchmark_jsonl.read_text().splitlines()
         if line.strip()
     ]
-    if args.example_id:
-        examples = _filter_examples_by_id(examples, args.example_id)
+    example_ids = _requested_example_ids(args)
+    if example_ids:
+        examples = _filter_examples_by_ids(examples, example_ids)
         if not examples:
-            print(f"error: --example-id {args.example_id!r} was not found", file=sys.stderr)
+            print(
+                "error: no requested example ids were found "
+                f"({', '.join(example_ids[:5])}{'...' if len(example_ids) > 5 else ''})",
+                file=sys.stderr,
+            )
             return 2
-    eval_limit = None if args.example_id else args.limit
+    eval_limit = None if example_ids else args.limit
 
     if args.agent == "focus" and not args.skip_layout_preflight:
         try:
@@ -366,6 +371,16 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Filter the materialized split to exactly one example id. Useful with --visualize-trace.",
+    )
+    parser.add_argument(
+        "--example-ids-file",
+        type=Path,
+        default=None,
+        help=(
+            "Filter the materialized split to the newline-delimited example ids "
+            "in this file. Blank lines and # comments are ignored. Useful for "
+            "mixed target/control slices."
+        ),
     )
     parser.add_argument(
         "--visualize-trace",
@@ -567,6 +582,46 @@ def _parse_args() -> argparse.Namespace:
 def _filter_examples_by_id(examples: list, example_id: str) -> list:
     """Return the exact example-id match, preserving harness iterable shape."""
     return [ex for ex in examples if getattr(ex, "id", None) == example_id]
+
+
+def _filter_examples_by_ids(examples: list, example_ids: list[str]) -> list:
+    """Return requested ids in dataset order, preserving duplicate dataset rows."""
+    wanted = set(example_ids)
+    return [ex for ex in examples if getattr(ex, "id", None) in wanted]
+
+
+def _requested_example_ids(args: argparse.Namespace) -> list[str]:
+    ids: list[str] = []
+    if args.example_id:
+        ids.append(args.example_id)
+    if args.example_ids_file is not None:
+        ids.extend(_read_example_ids_file(args.example_ids_file))
+    return _dedupe_preserve_order(ids)
+
+
+def _has_example_filter(args: argparse.Namespace) -> bool:
+    return bool(args.example_id or args.example_ids_file)
+
+
+def _read_example_ids_file(path: Path) -> list[str]:
+    ids: list[str] = []
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        ids.append(stripped)
+    return ids
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
 
 
 def _first_example_id(per_example: list[dict]) -> str | None:

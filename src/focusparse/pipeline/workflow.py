@@ -705,6 +705,7 @@ class FocusWorkflow:
             backend_client=verifier_client,
             recorder=recorder,
             step_counter=step_counter,
+            question_family=plan.question_family,
         )
 
         # --- RETRY LOOP ----------------------------------------------------
@@ -910,6 +911,7 @@ class FocusWorkflow:
                 recorder=recorder,
                 step_counter=step_counter,
                 retry_attempt=retries_used,
+                question_family=plan.question_family,
             )
             if not verdict.supported and _is_better_unsupported_answer(
                 answer_event,
@@ -1557,12 +1559,14 @@ class FocusWorkflow:
         recorder: TrajectoryRecorder,
         step_counter: _StepCounter,
         retry_attempt: int = 0,
+        question_family: str | None = None,
     ) -> tuple[VerdictEvent, ModelResponse | None]:
         verdict, verify_response = await verify_answer(
             question_event,
             evidence,
             answer_event,
             backend_client=backend_client,
+            question_family=question_family,
         )
         recorder.record(
             TrajectoryStep(
@@ -2038,6 +2042,8 @@ def _should_allow_reasoner_shape_retry(
         return False
     if not answer.citations:
         return False
+    if _verdict_has_answer_shape_failure(verdict):
+        return True
     reason = verdict.reason.lower()
     if _question_requests_single_entity(question_event.question) and _answer_looks_list_like(
         answer.answer
@@ -2058,6 +2064,26 @@ def _should_allow_reasoner_shape_retry(
         answer.answer,
         answer_type=question_event.answer_type,
         verifier_reason=verdict.reason,
+    )
+
+
+def _verdict_has_answer_shape_failure(verdict: VerdictEvent) -> bool:
+    raw = verdict.diagnostics.get("answer_shape_failure")
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, list):
+        values = [str(value) for value in raw if isinstance(value, str)]
+    else:
+        values = []
+    return any(
+        value
+        in {
+            "missing_field",
+            "label_value_mismatch",
+            "wrong_row_risk",
+            "legend_binding_risk",
+        }
+        for value in values
     )
 
 

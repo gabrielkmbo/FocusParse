@@ -2,6 +2,16 @@
 
 ## 2026-05-15
 
+- Added a gold-free answer-contract layer for post-evidence verification. The
+  contract is inferred from question text, domain, answer type, and planner
+  family, then passed to the reasoner and verifier prompts. A deterministic
+  verifier guard now blocks severe false accepts for missing fields and
+  label-vs-value mismatches, emits `answer_shape_failure` diagnostics such as
+  `wrong_row_risk` / `legend_binding_risk`, and allows one same-evidence
+  reasoner retry for contract failures without forcing broader retrieval.
+- `scripts/run_hf_eval.py` now accepts `--example-ids-file` for mixed
+  target/control slices, preserving duplicate dataset rows while filtering by
+  newline-delimited ids.
 - Added an agent-eyes audit builder that renders wrong rows as inspectable HTML:
   page overlays, selected/candidate crops, packet text, multi-scale/context
   crop refs, answer history, verifier payloads, and trajectory steps. The

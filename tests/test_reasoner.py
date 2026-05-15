@@ -907,6 +907,19 @@ def test_answer_shape_formats_page_reference() -> None:
     )
 
 
+def test_answer_shape_formats_min_typ_max_list() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "min=0.697V; typ=0.704V; max=0.711V",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "min: 0.697 V, typ: 0.704 V, max: 0.711 V"
+    )
+
+
 def test_answer_shape_does_not_parenthesize_tickers() -> None:
     from focusparse.pipeline.reasoner import _normalize_answer_shape
 

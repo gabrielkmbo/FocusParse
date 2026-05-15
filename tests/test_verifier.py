@@ -213,6 +213,97 @@ async def test_verify_prompt_includes_packet_summary_and_citations():
     assert "lowest/highest/min/max" in system
 
 
+async def test_verify_prompt_includes_question_answer_contract():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "single scalar is incomplete", '
+        '"next_action": "escalate_reasoner", "confidence": 0.8}'
+    )
+    question = _question(domain="datasheet")
+    question.question = (
+        "Which value (min, typ, or max) should be used, and what is the corresponding voltage?"
+    )
+    await verify_answer(
+        question,
+        _evidence(_packet(snippet="FB Error Comparator Threshold 0.697 0.704 0.711 V")),
+        _answer(answer="0.697"),
+        backend_client=client,
+        question_family="spec_table_cell_retrieval",
+    )
+
+    prompt = client.calls[0]["prompt"]
+    assert "Question answer contract" in prompt
+    assert "include every field requested" in prompt
+    assert "min/typ/max" in prompt
+
+
+async def test_verify_contract_guard_overrides_false_accept_for_missing_field():
+    client = _FakeVerifierClient(
+        '{"supported": true, "reason": "value appears in the row", '
+        '"next_action": "accept", "confidence": 0.9}'
+    )
+    question = _question(domain="datasheet")
+    question.question = (
+        "Which value (min, typ, or max) should be used, and what is the corresponding voltage?"
+    )
+    verdict, _ = await verify_answer(
+        question,
+        _evidence(_packet(snippet="FB Error Comparator Threshold 0.697 0.704 0.711 V")),
+        _answer(answer="0.697"),
+        backend_client=client,
+        question_family="spec_table_cell_retrieval",
+    )
+
+    assert verdict.supported is False
+    assert verdict.next_action == "escalate_reasoner"
+    assert "missing_field" in verdict.diagnostics["answer_shape_failure"]
+    assert "wrong_row_risk" in verdict.diagnostics["answer_shape_failure"]
+    assert "answer contract" in verdict.reason
+
+
+async def test_verify_contract_guard_overrides_false_accept_for_label_value_mismatch():
+    client = _FakeVerifierClient(
+        '{"supported": true, "reason": "label is present", '
+        '"next_action": "accept", "confidence": 0.9}'
+    )
+    question = _question(domain="datasheet")
+    question.question = (
+        "Which value should be used when comparing the single pulse avalanche "
+        "energy rating of this MOSFET?"
+    )
+    verdict, _ = await verify_answer(
+        question,
+        _evidence(_packet(snippet="Single Pulse Avalanche Energy 315 mJ")),
+        _answer(answer="Single Pulse Avalanche Energy (Thermally Limited)"),
+        backend_client=client,
+    )
+
+    assert verdict.supported is False
+    assert verdict.next_action == "escalate_reasoner"
+    assert "label_value_mismatch" in verdict.diagnostics["answer_shape_failure"]
+    assert "wrong_row_risk" in verdict.diagnostics["answer_shape_failure"]
+
+
+async def test_verify_preserves_answer_shape_failure_diagnostics():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "nearby row is plausible but wrong", '
+        '"next_action": "escalate_reasoner", "confidence": 0.78, '
+        '"diagnostics": {"answer_shape_failure": ["row_confusion"]}}'
+    )
+    question = _question(domain="datasheet")
+    question.question = "Among the visually similar part number rows, which package is lowest?"
+    verdict, _ = await verify_answer(
+        question,
+        _evidence(_packet(snippet="RTQ2510-QA VDFN3x3-8 3.3 V")),
+        _answer(answer="RTQ2510-QB"),
+        backend_client=client,
+    )
+
+    assert verdict.supported is False
+    assert verdict.next_action == "escalate_reasoner"
+    assert verdict.diagnostics["answer_shape_failure"] == ["wrong_row_risk"]
+    assert "row_disambiguation_cues" in verdict.diagnostics
+
+
 async def test_verify_prompt_keeps_enough_table_text_for_math_verdict():
     client = _FakeVerifierClient(
         '{"supported": false, "reason": "math error", '
