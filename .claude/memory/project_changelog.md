@@ -2,6 +2,14 @@
 
 ## 2026-05-15
 
+- Added corresponding-row and checkbox-binding cues to the gold-free answer
+  contract. Reasoner/verifier prompts now explicitly bind source row/year/entity
+  before reading a corresponding output field, and bind checkbox marks to their
+  nearest Yes/No or status label. The verifier accepts/propagates
+  `checkbox_binding_risk` diagnostics for one same-evidence reasoner retry.
+  Also extended the leading code-identifier normalizer to handle semicolon
+  explanations such as `DPD MODE1; ...`. Focused tests and ruff checks passed;
+  a new slice gate is still needed before any full n=148 claim.
 - Added a gold-free answer-contract layer for post-evidence verification. The
   contract is inferred from question text, domain, answer type, and planner
   family, then passed to the reasoner and verifier prompts. A deterministic
