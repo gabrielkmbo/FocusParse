@@ -33,6 +33,25 @@
   failed the gate with 7 prior-correct control regressions (net -1). Do not run
   full n=148 from this checkpoint; the next mechanism should be gated
   adjudication/repair that preserves scorer-shaped concise answers.
+- Added disk-light slice support via `scripts/run_hf_eval.py --minimal-artifacts`.
+  Focus evals can now skip per-row prediction-cache JSONs and agentic summary
+  tiles while preserving `run.json`, `per_example.jsonl`, and the wrapper JSON.
+  This was added after the worktree filesystem filled during a 60-row slice.
+- Model retry classification now treats 429/rate-limit responses as transient
+  provider failures so evals can use `FOCUSPARSE_MODEL_RETRY_ATTEMPTS` and
+  `FOCUSPARSE_MODEL_RETRY_SLEEP_S` backoff instead of counting throttling as
+  benchmark failures.
+- Added additional gold-free answer-shape normalization after reasoner parsing:
+  verbose boolean collapse, verbose finance accounting negatives, OCR-ish
+  hex/register spans, and leading code-like identifiers followed by explanatory
+  text.
+- The best clean post-evidence slice after these guards was
+  `results/hf/sprint-2026-05-15/answer-shape-guard-minifacts-slice-run1/`:
+  22/60 = 36.7% on the hard mixed slice, 4 recoveries and 2 regressions
+  versus the 60.14% baseline rows, net +2. It still failed the gate because
+  both regressions were prior-correct controls. Follow-up run2 after the
+  leading-identifier patch fell to 20/60 with 3 recoveries and 3 control
+  regressions, so no full n=148 run should be claimed from this checkpoint.
 - Added an agent-eyes audit builder that renders wrong rows as inspectable HTML:
   page overlays, selected/candidate crops, packet text, multi-scale/context
   crop refs, answer history, verifier payloads, and trajectory steps. The

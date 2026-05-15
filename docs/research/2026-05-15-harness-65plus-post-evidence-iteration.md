@@ -53,6 +53,21 @@ Commit `02ce712`: restored packet-level descriptors alongside evidence groups
 in the reasoner prompt after grouped-only prompting caused over-abstention and
 control regressions.
 
+Commit `400ca53`: added additional gold-free answer-shape normalization for
+verbose boolean answers, verbose finance accounting negatives, and OCR-ish
+hex/register spans such as `OxFF (SERDINO to SERDIN7)`.
+
+Commit `4296de2`: added `--minimal-artifacts` for disk-constrained slice
+experiments. This keeps the wrapper JSON, `run.json`, and `per_example.jsonl`
+while skipping per-row prediction-cache JSONs and agentic tile PNGs.
+
+Commit `32331a1`: treated 429/rate-limit responses as transient model errors
+so eval runs can use the existing retry/backoff environment variables instead
+of counting provider throttling as benchmark failures.
+
+Commit `2b145a9`: added a narrow exact-match normalizer for leading code-like
+identifiers followed by explanations, e.g. `DPD MODE1. ...` -> `DPD_MODE1`.
+
 ## Slice Results
 
 | Run | Correct | Accuracy | Cost | Cost/correct | Latency mean | Page recall | Bbox IoU | Lazy rate | Recoveries | Regressions | Net | Control regressions |
@@ -60,9 +75,18 @@ control regressions.
 | contract guard | 17/60 | 28.3% | $0.843 | $0.050 | 4.43s | 0.942 | 0.934 | 0.017 | 3 | 6 | -3 | 6 |
 | evidence groups | 16/60 | 26.7% | $0.827 | $0.052 | 4.08s | 0.903 | 0.835 | 0.067 | 3 | 7 | -4 | 7 |
 | hybrid groups + packets | 19/60 | 31.7% | $0.905 | $0.048 | 4.14s | 0.931 | 0.911 | 0.033 | 6 | 7 | -1 | 7 |
+| answer-shape guard minifacts run1 | 22/60 | 36.7% | $0.851 | $0.039 | 3.95s | 0.961 | 0.900 | 0.017 | 4 | 2 | +2 | 2 |
+| leading identifier minifacts run2 | 20/60 | 33.3% | $0.848 | $0.042 | 4.09s | 0.978 | 0.933 | 0.000 | 3 | 3 | 0 | 3 |
 
-None passed the mixed-slice gate, so I did not run a full n=148 validation run
-from these checkpoints.
+The first disk-light answer-shape run was the best clean slice so far, but it
+still failed the mixed-slice gate because prior-correct control regressions
+were 2, above the <=1 threshold. A follow-up run after the leading identifier
+patch was worse (net 0, 3 control regressions), showing that the remaining
+control failures are not only deterministic shape normalization issues.
+
+One earlier disk-light attempt was discarded as invalid: it hit an Anthropic
+429 rate-limit error mid-run and the harness converted affected rows to error
+records. Those rows are not counted as evidence for accuracy or flips.
 
 ## Qualitative Flips
 
@@ -87,6 +111,11 @@ Representative regressions:
   `OxFF (SERDINO to SERDIN7)`.
 - `dat-Arm_EE382N_4-0001`: baseline `60%` regressed to `40%`, showing that
   grouping did not solve all visual/diagram proportion ambiguities.
+- `fin-aapl-20250927-0002`: baseline `180,683; typical` regressed to
+  `169,148; minimum`, a wrong-row table/column selection issue.
+- `fin-aapl-20250927-0010`: baseline `yes` regressed to `no` in run2,
+  indicating that boolean controls still need evidence-grounded adjudication,
+  not just answer-shape collapse.
 
 ## Interpretation
 
@@ -95,6 +124,11 @@ post-evidence packaging and contracts do recover high-recall/high-IoU failures,
 especially label-vs-value and multi-field rows. However, prompt-only grouping
 also increases answer verbosity, over-abstention, and OCR-looking span drift on
 previously correct controls.
+
+The best clean slice now shows positive net flips (+2), which is encouraging,
+but the control-regression gate still blocks a full n=148 run. The remaining
+regressions are mostly wrong-row / wrong-series decisions, not syntax-only
+shape mistakes.
 
 The next mechanism should not be broader retrieval or another prompt-only full
 run. The next step should be gated repair/adjudication:
@@ -113,6 +147,7 @@ questions; several regressions were semantically plausible but shape-wrong.
 ## Decision
 
 Do not claim progress toward 65% from these runs yet. The implementation
-created useful infrastructure, but all three slices failed the regression gate.
-Full n=148 should wait until the repair/adjudication layer shows positive net
-flips with <=1 prior-correct control regression on the mixed slice.
+created useful infrastructure and the best clean slice improved to 22/60 on a
+hard target/control mix, but every slice still failed the regression gate. Full
+n=148 should wait until the repair/adjudication layer shows positive net flips
+with <=1 prior-correct control regression on the mixed slice.
