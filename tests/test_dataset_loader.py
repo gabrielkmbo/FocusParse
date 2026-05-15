@@ -32,6 +32,56 @@ def test_loader_rejects_bad_source():
         BenchmarkLoader(source="invalid")
 
 
+def test_hf_split_name_maps_legacy_local_names():
+    from focusparse.dataset.loader import hf_split_name
+
+    assert hf_split_name("dev") == "train"
+    assert hf_split_name("test") == "validation"
+    assert hf_split_name("holdout") == "test"
+    assert hf_split_name("validation") == "validation"
+
+
+def test_row_to_example_normalizes_current_hf_shape(parser_bench_submodule_present):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for schema")
+    from focusparse.dataset.loader import _row_to_example
+
+    ex = _row_to_example(
+        {
+            "id": "dat-smoke-0001",
+            "domain": "datasheet",
+            "source_pdf": "smoke.pdf",
+            "page_images": [object()],
+            "question": "What is the value?",
+            "answer": "1",
+            "answer_type": "numeric",
+            "answer_unit": None,
+            "tolerance": None,
+            "supporting_pages": "[1]",
+            "supporting_bboxes": "[]",
+            "alternate_bboxes": "[]",
+            "evidence_relations": "[]",
+            "multi_region_required": False,
+            "requires_visual": True,
+            "difficulty_visual": 2,
+            "difficulty_reasoning": 1,
+            "difficulty_localization": 3,
+            "question_family": "smoke",
+            "stress_type": "none",
+            "original_bboxes": "[]",
+            "split": "dev",
+            "reasoning_chain": None,
+            "evidence_page_spread": 0,
+            "distractor_region_ids": "[]",
+            "adversarial_type": None,
+        }
+    )
+
+    assert ex.page_images == []
+    assert ex.difficulty.visual == 2
+    assert ex.supporting_pages == [1]
+
+
 @pytest.mark.slow
 def test_hf_streaming_yields_examples(parser_bench_submodule_present):
     if not parser_bench_submodule_present:

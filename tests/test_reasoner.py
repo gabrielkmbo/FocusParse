@@ -456,6 +456,64 @@ def test_exact_match_format_hint_phase6a_tightening_rules_present() -> None:
     assert "[15:14]=b00" in hint
 
 
+def test_exact_match_format_hint_default_is_datasheet_strict() -> None:
+    """Phase 3a (2026-05-13 sprint): the default (no-domain) prompt stays on
+    the datasheet-strict variant — back-compat for callers that haven't
+    plumbed `domain` yet."""
+    hint = _format_hint("exact_match")
+    hint_datasheet = _format_hint("exact_match", domain="datasheet")
+    hint_datasheet_enum = _format_hint("exact_match", domain="Domain.DATASHEET")
+    assert hint == hint_datasheet == hint_datasheet_enum
+    # Datasheet strict prompt: rule 1 says "Output ONLY the answer span"
+    assert "Output ONLY the answer span" in hint
+    # Tied-answer rule (Phase 3a addendum) is present in the datasheet prompt
+    assert "tied" in hint.lower()
+
+
+def test_exact_match_format_hint_finance_sentence_form_variant_fires_only_for_specific_families() -> (
+    None
+):
+    """Phase 3a v2 (2026-05-13 sprint): the relaxed finance variant is gated
+    on question_family. Sentence-form-prone families
+    (`chart_caption_fusion`, `multi_chart_comparison`, etc.) get the relaxed
+    prompt that allows descriptive clauses; everything else stays strict.
+
+    Why: the v1 release blindly relaxed all finance prompts, which caused
+    over-extraction on short-label finance golds (author names, ticker
+    strings) — e.g. 'Stephanie Aliaga' became 'Stephanie Aliaga — her
+    portrait is in the leftmost column'. v2 routes by question_family so
+    short-label finance answers keep the strict datasheet prompt."""
+    relaxed = _format_hint("exact_match", domain="finance", question_family="chart_caption_fusion")
+    assert "descriptive sentence" in relaxed.lower() or "descriptive clause" in relaxed.lower()
+    assert "Output ONLY the answer span" not in relaxed
+    assert (
+        "do not pad short answers" in relaxed.lower() or "favor a short answer" in relaxed.lower()
+    )
+
+    # Finance + non-sentence-form family -> strict datasheet variant
+    strict = _format_hint("exact_match", domain="finance", question_family="direct_label_reading")
+    assert "Output ONLY the answer span" in strict
+    assert strict == _format_hint("exact_match", domain="datasheet")
+
+    # Finance + None family -> falls back to strict (conservative)
+    assert _format_hint("exact_match", domain="finance", question_family=None) == strict
+
+    # Datasheet + ANY question_family -> always strict, regardless of family
+    for fam in ("chart_caption_fusion", "spec_table_cell_retrieval", None):
+        assert _format_hint("exact_match", domain="datasheet", question_family=fam) == strict
+
+
+def test_exact_match_format_hint_unknown_domain_falls_back_to_datasheet() -> None:
+    """Phase 3a (2026-05-13 sprint): unknown / None domain falls back to the
+    datasheet strict prompt, which is what main-stack-run1 used."""
+    assert _format_hint("exact_match", domain=None) == _format_hint(
+        "exact_match", domain="datasheet"
+    )
+    assert _format_hint("exact_match", domain="unknown") == _format_hint(
+        "exact_match", domain="datasheet"
+    )
+
+
 def test_parse_reasoner_response_canonicalizes_bit_assignments() -> None:
     answer, citations, confidence = _parse_reasoner_response(
         (
@@ -557,3 +615,306 @@ def test_system_prompt_explains_neighbor_layout() -> None:
     assert "context_window" in _SYSTEM_PROMPT
     assert "zoomed" in _SYSTEM_PROMPT
     assert "context" in _SYSTEM_PROMPT.lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3b (2026-05-14 sprint): K-sample self-consistency
+# ---------------------------------------------------------------------------
+
+
+def test_phase3b_sample_variant_addendum_empty_for_variant_zero() -> None:
+    """Phase 3b: variant 0 is the back-compat default — no prompt change."""
+    from focusparse.pipeline.reasoner import _sample_variant_addendum
+
+    assert _sample_variant_addendum(0) == ""
+
+
+def test_phase3b_sample_variant_addendum_variant_one_has_verbatim_grounding() -> None:
+    """Phase 3b: variant 1 nudges the model to anchor its answer in the
+    cited packet's verbatim wording. K=2 with same prompt on a low-temp
+    model usually returns identical samples; this addendum gives variant
+    1 a different angle so the K samples explore independent paths."""
+    from focusparse.pipeline.reasoner import _sample_variant_addendum
+
+    text = _sample_variant_addendum(1)
+    assert "exact span" in text.lower()
+    assert "cited packet" in text.lower() or "cited packets" in text.lower()
+
+
+def test_phase3b_sample_variant_addendum_variant_two_has_skeptical_reread() -> None:
+    """Phase 3b (2026-05-15 expansion for K=3): variant 2 asks the model
+    to enumerate competing readings before picking the most concrete
+    answer. Targets close-numeric estimation failures (`0.4 vs 0.5`
+    chart reads) where the picker can't disambiguate from confidence
+    alone. Distinct from variant 1's verbatim-grounding angle."""
+    from focusparse.pipeline.reasoner import _sample_variant_addendum
+
+    text = _sample_variant_addendum(2)
+    # Variant 2 must be a non-empty distinct prompt from variants 0 and 1.
+    assert text != ""
+    assert text != _sample_variant_addendum(1)
+    # The defining mechanism: enumerate competing readings, then pick the
+    # most concrete / axis-anchored one.
+    assert "enumerate" in text.lower() or "1-3" in text or "axis" in text.lower()
+
+
+def test_phase3b_sample_variant_addendum_over_k_cycles_to_empty() -> None:
+    """Phase 3b: variants 3+ fall back to the empty (variant-0)
+    addendum so K>3 still works without unbounded prompt drift —
+    additional samples just exploit model stochasticity."""
+    from focusparse.pipeline.reasoner import _sample_variant_addendum
+
+    assert _sample_variant_addendum(3) == ""
+    assert _sample_variant_addendum(5) == ""
+
+
+def test_phase3b_pick_best_answer_prefers_non_unanswerable() -> None:
+    """Picker rule 1: any concrete answer beats `Unanswerable`."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="Unanswerable", citations=["pkt_000"], confidence=0.9),
+        AnswerEvent(answer="0x3FFFF8", citations=["pkt_000"], confidence=0.5),
+    ]
+    assert pick_best_answer(samples, answer_type="exact_match") == 1
+
+
+def test_phase3b_pick_best_answer_prefers_more_citations() -> None:
+    """Picker rule 2: more citations wins (citation count ranks before length
+    and confidence)."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="b0010", citations=["pkt_000"], confidence=0.9),
+        AnswerEvent(answer="b0010", citations=["pkt_000", "pkt_001"], confidence=0.5),
+    ]
+    assert pick_best_answer(samples, answer_type="exact_match") == 1
+
+
+def test_phase3b_pick_best_answer_prefers_shorter_for_exact_match() -> None:
+    """Picker rule 3: for exact_match / numeric the format hints push for
+    a concise span — a verbose sample is the model padding. Pick the
+    shorter answer when citation counts are equal."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(
+            answer="Stephanie Aliaga — her portrait is in the leftmost column",
+            citations=["pkt_000"],
+            confidence=0.7,
+        ),
+        AnswerEvent(answer="Stephanie Aliaga", citations=["pkt_000"], confidence=0.7),
+    ]
+    assert pick_best_answer(samples, answer_type="exact_match") == 1
+
+
+def test_phase3b_pick_best_answer_higher_confidence_breaks_tie() -> None:
+    """Picker rule 4: when non-Unanswerable, citation count, and length all
+    tie, higher self-reported confidence wins."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="70%", citations=["pkt_000"], confidence=0.4),
+        AnswerEvent(answer="70%", citations=["pkt_000"], confidence=0.9),
+    ]
+    assert pick_best_answer(samples, answer_type="exact_match") == 1
+
+
+def test_phase3b_pick_best_answer_index_zero_breaks_final_tie() -> None:
+    """Picker rule 5: total tie → keep sample 0 (back-compat with k=1
+    behavior)."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="70%", citations=["pkt_000"], confidence=0.5),
+        AnswerEvent(answer="70%", citations=["pkt_000"], confidence=0.5),
+    ]
+    assert pick_best_answer(samples, answer_type="exact_match") == 0
+
+
+def test_phase3b_pick_best_answer_does_not_prefer_short_for_freeform() -> None:
+    """For answer types without a concise-span format hint (None /
+    unknown), shorter is NOT preferred — only citation count + confidence
+    matter. This keeps the picker from arbitrarily truncating valid long
+    answers."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(
+            answer="A very long, detailed answer that is correct.",
+            citations=["pkt_000"],
+            confidence=0.5,
+        ),
+        AnswerEvent(answer="short wrong answer", citations=["pkt_000"], confidence=0.5),
+    ]
+    # No answer_type → no preference for shorter, so index 0 wins on tie.
+    assert pick_best_answer(samples, answer_type=None) == 0
+
+
+def test_phase3b_pick_best_answer_single_sample_returns_zero() -> None:
+    """Picker on a single sample is a no-op."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [AnswerEvent(answer="x", citations=[], confidence=0.5)]
+    assert pick_best_answer(samples, answer_type="exact_match") == 0
+
+
+def test_phase3b_v2_consensus_wins_over_outlier_confidence() -> None:
+    """Phase 3b v2 (2026-05-15): K=3 with majority-agreement should pick
+    the consensus answer even when a high-confidence outlier disagrees.
+    This is the lever for close-numeric chart reads where the model's
+    spread is ['0.4', '0.4', '0.5'] — heuristic-only picker prefers
+    confidence; consensus picker prefers the 2-vote answer."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="0.4", citations=["pkt_000"], confidence=0.5),
+        AnswerEvent(answer="0.4", citations=["pkt_000"], confidence=0.5),
+        AnswerEvent(answer="0.5", citations=["pkt_000"], confidence=0.95),
+    ]
+    # Consensus is "0.4" (2/3). Picker should return index 0 or 1 (both
+    # match), not index 2 (the high-confidence outlier).
+    assert pick_best_answer(samples, answer_type="numeric") in (0, 1)
+
+
+def test_phase3b_v2_consensus_normalizes_whitespace_and_case() -> None:
+    """Phase 3b v2: consensus bucketing collapses whitespace and case
+    so trivial formatting differences don't split the vote. Samples
+    [' 0.4 ', '0.4', '0.5'] still vote as ['0.4', '0.4', '0.5'] =
+    majority '0.4'."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer=" 0.4 ", citations=["pkt_000"], confidence=0.6),
+        AnswerEvent(answer="0.4", citations=["pkt_000"], confidence=0.6),
+        AnswerEvent(answer="0.5", citations=["pkt_000"], confidence=0.9),
+    ]
+    assert pick_best_answer(samples, answer_type="numeric") in (0, 1)
+
+
+def test_phase3b_v2_no_consensus_falls_back_to_heuristic() -> None:
+    """Phase 3b v2: when K=3 produces three distinct answers (no
+    majority), the heuristic ordering takes over (citation count,
+    confidence, length, index)."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="A", citations=["pkt_000"], confidence=0.5),
+        AnswerEvent(answer="B", citations=["pkt_000"], confidence=0.8),
+        AnswerEvent(answer="C", citations=["pkt_000"], confidence=0.6),
+    ]
+    # No consensus → heuristic falls through to confidence; B wins.
+    assert pick_best_answer(samples, answer_type="exact_match") == 1
+
+
+def test_phase3b_v2_consensus_excludes_unanswerable() -> None:
+    """Phase 3b v2: Unanswerable doesn't count toward consensus. With
+    ['Unanswerable', 'Unanswerable', '42'] the picker should still
+    prefer the concrete '42' over the abstention majority."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="Unanswerable", citations=["pkt_000"], confidence=0.5),
+        AnswerEvent(answer="Unanswerable", citations=["pkt_000"], confidence=0.5),
+        AnswerEvent(answer="42", citations=["pkt_000"], confidence=0.7),
+    ]
+    # Consensus excludes Unanswerable → falls back to heuristic →
+    # non-Unanswerable wins (rule 1).
+    assert pick_best_answer(samples, answer_type="numeric") == 2
+
+
+def test_phase3b_v2_k_equals_two_skips_consensus() -> None:
+    """Phase 3b v2: K=2 doesn't use consensus (no majority possible from
+    2 samples) and falls straight to the heuristic. Existing K=2
+    behavior is preserved."""
+    from focusparse.pipeline.events import AnswerEvent
+    from focusparse.pipeline.reasoner import pick_best_answer
+
+    samples = [
+        AnswerEvent(answer="A", citations=["pkt_000"], confidence=0.4),
+        AnswerEvent(answer="A", citations=["pkt_000"], confidence=0.9),
+    ]
+    # Both samples agree on "A", but K=2 skips consensus and uses
+    # heuristic; higher confidence wins → index 1.
+    assert pick_best_answer(samples, answer_type="exact_match") == 1
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-15: scorer-compatible answer-shape normalization
+# ---------------------------------------------------------------------------
+
+
+def test_answer_shape_normalizes_finance_accounting_negative() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "$(40) million",
+            answer_type="numeric",
+            domain="finance",
+        )
+        == "-40"
+    )
+
+
+def test_answer_shape_leaves_datasheet_parentheses_alone() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "(40) kΩ",
+            answer_type="numeric",
+            domain="datasheet",
+        )
+        == "(40) kΩ"
+    )
+
+
+def test_answer_shape_spaces_variable_value_units() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Vgs=2.9V",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "Vgs = 2.9 V"
+    )
+
+
+def test_answer_shape_formats_page_reference() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Cache type register and TCM type register on page B3-10",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "Cache type register and TCM type register; page B3-10"
+    )
+
+
+def test_answer_shape_does_not_parenthesize_tickers() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "GOOG",
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "GOOG"
+    )

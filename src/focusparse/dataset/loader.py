@@ -15,11 +15,18 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from focusparse._parser_bench import BenchmarkExample
+
+_HF_SPLIT_ALIASES = {
+    "dev": "train",
+    "test": "validation",
+    "holdout": "test",
+}
 
 
 class BenchmarkLoader:
@@ -76,14 +83,12 @@ class BenchmarkLoader:
 
         ds = load_dataset(
             self.hf_repo,
-            split=split,
+            split=hf_split_name(split),
             revision=self.revision,
             streaming=True,
         )
-        count = 0
-        for row in ds:
+        for count, row in enumerate(ds, start=1):
             yield _row_to_example(row)
-            count += 1
             if limit is not None and count >= limit:
                 return
 
@@ -138,8 +143,20 @@ def _row_to_example(row: dict[str, Any]) -> BenchmarkExample:
     ):
         value = normalized.get(field_name)
         if isinstance(value, str):
-            try:
+            with suppress(json.JSONDecodeError):
                 normalized[field_name] = json.loads(value)
-            except json.JSONDecodeError:
-                pass
+    if "difficulty" not in normalized or normalized.get("difficulty") in (None, ""):
+        normalized["difficulty"] = {
+            "visual": int(normalized.get("difficulty_visual", 1) or 1),
+            "reasoning": int(normalized.get("difficulty_reasoning", 1) or 1),
+            "localization": int(normalized.get("difficulty_localization", 1) or 1),
+        }
+    page_images = normalized.get("page_images")
+    if isinstance(page_images, list):
+        normalized["page_images"] = [p for p in page_images if isinstance(p, str)]
     return _BE.model_validate(normalized)
+
+
+def hf_split_name(split: str) -> str:
+    """Map legacy parser-bench local split names to current HF split names."""
+    return _HF_SPLIT_ALIASES.get(split, split)

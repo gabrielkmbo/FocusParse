@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from focusparse.eval.pricing import compute_usd
+from focusparse.models._retry import retry_transient_model_call
 from focusparse.models._timeouts import model_timeout_s
 from focusparse.models.base import ModelResponse
 from focusparse.models.images import read_model_image_bytes
@@ -64,8 +65,12 @@ class AnthropicClient:
             kwargs["system"] = system
 
         t0 = time.perf_counter()
-        async with asyncio.timeout(timeout_s):
-            resp = await client.messages.create(**kwargs)
+
+        async def _create_message():
+            async with asyncio.timeout(timeout_s):
+                return await client.messages.create(**kwargs)
+
+        resp = await retry_transient_model_call("anthropic", _create_message)
         latency_ms = int((time.perf_counter() - t0) * 1000)
 
         text = ""

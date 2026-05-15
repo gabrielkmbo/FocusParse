@@ -129,6 +129,38 @@ are directional evidence that harder evidence construction is working, especiall
 in finance, but they also raise cost/correct from $0.0176 to about $0.025-0.027
 and latency from 2.5s to about 3.6s.
 
+### 2026-05-13 Full-Run Update
+
+After the Modal layout migration and dynamic initial tool gating, the latest
+full validation run is
+`results/hf/sprint-2026-05-13/full-modal-compact-normalized-run1/` on HF
+revision `3774c67f8b814392b6d04c939e904f749a3f52eb`.
+
+| Metric | Value |
+| --- | ---: |
+| Raw accuracy | 48.6% (72/148) |
+| Completed-row accuracy | 52.6% (72/137) |
+| Provider/network failures | 11/148 |
+| Cost/correct | $0.0245 |
+| Mean latency | 3.53s |
+| Page recall | 87.6% |
+| Bbox IoU | 80.4% |
+| Lazy rate | 8.1% |
+
+This run is a useful scientific correction to the earlier n=30 slice. The n=30
+checkpoint reached 66.7%, but the full n=148 run exposes harder finance charts,
+multi-page evidence, dense tables, and figure-level visual reasoning. The main
+degradation is not the Modal endpoint: Modal returned healthy responses, page
+recall and IoU stayed strong, and the largest completed-row miss bucket was
+answer/scorer/reasoning rather than layout detection. The full failure audit is
+`docs/research/2026-05-13-full-run-failure-audit.md`.
+
+A follow-up retry of the 11 null infrastructure rows with planner/router
+tier-overridden from Gemini cheap to the mid tier recovered 6/11 examples. If
+substituted into the full run, raw accuracy would become 78/148 = 52.7%. That is
+useful reliability evidence, but it confirms that provider recovery alone does
+not close the gap to 60%.
+
 ## 4. Mechanism Signals
 
 From `results/hf/sprint-2026-05-11/phase4-run1/diagnostics.md`:

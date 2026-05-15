@@ -114,8 +114,13 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 ## Known sharp edges
 
-- Layout HF endpoint (`jqkx3k3gn4ciymvi…`) returns a **single full-page bbox stub** on failure.
-  Signal: "whole page crops only". Check `HF_TOKEN` + backoff logs first; `tools/layout_detect.py` must raise on stub, not succeed silently.
+- Layout endpoint is Modal by default:
+  `https://llamaindex--layout-v3-triton-layoutv3triton-serve.modal.run`.
+  Use `LAYOUT_EXTRACTION_V3_MODAL_TOKEN`; `HF_TOKEN` is only a temporary
+  fallback for older local setups. The endpoint returns a **single full-page bbox
+  stub** on failure. Signal: "whole page crops only". Check the Modal token +
+  backoff logs first; `tools/layout_detect.py` must raise on stub, not succeed
+  silently.
 - NFS path uses SSH alias `llama-nfs` — must exist in `~/.ssh/config`. macOS `openrsync` needs `shlex.quote`'d remote paths (lift from parser-bench `scripts/run_generate.py` `_rsync`).
 - HF dataset revision is **not** pinned yet (plan §8.4 deferred). Benchmark is still being hardened (contact-sheet bbox fix + 300 dpi oracle crops per parser-bench slide deck 2026-04-13). Re-run baselines whenever the dataset advances; note advances here with the new revision SHA.
 - Layout endpoint is **shared** with parser-bench. Rate-limit to ≤ 2 req/s; cache layout output on disk under `cache/layout/<doc_sha>.json` so eval sweeps don't burn shared quota.
@@ -124,12 +129,148 @@ The SFT training target (future FocusTrain repo) also cares about focus-stage tr
 
 - **8.1 parser-bench schema dep**: git submodule at `third_party/parser-bench/`.
 - **8.2 visual rerank**: skipped in v1 — FTS-only router. `visual_rerank.py` is a stub seam.
-- **8.3 layout endpoint**: cache-on-disk + rate-limited fallback to shared parser-bench endpoint.
+- **8.3 layout endpoint**: cache-on-disk + rate-limited fallback to shared Modal parser-bench endpoint.
 - **8.4 HF revision pin**: deferred; `FOCUSPARSE_DATASET_REVISION` env var wired for one-line flip later.
 
 ## Changelog
 
 Newest first. Append an entry after any substantive change — new pipeline stage, new tool, new tier, new env var, new HF endpoint, trajectory schema bump, new failure mode. Skip typos and lint-only fixes.
+
+### 2026-05-14 — Phase 3b K=2 negative result + K-sample telemetry fix
+
+Branch `phase3b-self-consistency` tested full-table K=2 reasoner
+self-consistency on the canonical 148 validation rows:
+`results/hf/sprint-2026-05-14/self-consistency-k2-oai-run1/`. Result:
+**78/148 = 52.7%**, worse than the current best shape-gated run
+`results/hf/sprint-2026-05-14/escalate-shape-retry-oai-run1/`
+(**85/148 = 57.4%**). Domain split: datasheet **60/101 = 59.4%** and
+finance **18/47 = 38.3%**. Common-set flip analysis vs the current best
+(147 shared rows): **5** prior-wrong recoveries but **12** prior-correct
+regressions, net **-7**. Decision: keep `--reasoner-self-consistency-k` opt-in;
+do not make K=2 default. The heuristic picker is too weak because a second
+sample can choose a plausible but scorer-wrong span.
+
+The run also exposed a K-sample pricing telemetry bug: `_run_answer` recorded
+the aggregate K-sample cost on the trajectory `llm_call_k` step, but returned
+the chosen sample's `ModelResponse`, so per-example answer telemetry and
+headline `usd` counted only the chosen sample. `src/focusparse/pipeline/workflow.py`
+now returns an aggregated `ModelResponse` for K-sample answer telemetry
+(summed tokens/cost, max parallel latency, chosen text). `tests/test_workflow.py`
+pins the telemetry and trace-step totals. Historical K=2 run JSONs before this
+fix understate K-sample pricing.
+
+Expanded technical single-entity retry vocabulary was also tested on all 29
+rows from the current best run whose initial verifier action was
+`escalate_reasoner`:
+`results/hf/sprint-2026-05-14/escalate-vocab-gate-slice-run1/`. It was neutral
+(old **13/29**, new **13/29**; 3 recoveries and 3 regressions), and the flips
+had `retries_used=0`, so it was mostly initial-answer variance rather than a
+verified retry mechanism. Decision: do not ship that broader gate.
+
+Same branch also tested the current Phase 3e strict-shape verifier v2 prompt at
+K=1:
+`results/hf/sprint-2026-05-14/strict-shape-v2-oai-run1/`. Result:
+**84/148 = 56.8%**, below the current best **85/148 = 57.4%**. Domain split:
+datasheet **63/101 = 62.4%** and finance **21/47 = 44.7%**. Unique-id flips vs
+current best: **9** recovered and **10** regressed, net **-1**. Useful recoveries
+included `dat-DS5091D-00-0011` (`0x00h`), `dat-adrv9040-...-0041`
+(`DPD_MODE1`), and `fin-aapl-20250927-0034` (`September 2022, $21`), but
+regressions included losing punctuation/tie structure on
+`dat-adrv9040-...-0032` and `dat-adrv9040-...-0052`. Decision: keep Phase 3e as
+diagnostic/opt-in; do not make prompt-only strict-shape behavior the default
+claim.
+
+Full-table multi-scale packet test:
+`results/hf/sprint-2026-05-14/multiscale-k1-oai-run1/`. Result:
+**83/148 = 56.1%**, below the current best **85/148 = 57.4%** and with much
+higher reported answer-stage cost (**$4.39**, **$0.053/correct**, mean latency
+**6.84s**). Domain split: datasheet **62/101 = 61.4%**, finance
+**21/47 = 44.7%**. Unique-id flips vs current best: **7** recovered and **9**
+regressed, net **-2**. Multi-scale helped some intended cases
+(`dat-ads1299-0057`, `dat-gmsl2-...-0023`) but introduced visual distractors
+(`dat-JESD204B-...-0029`, `dat-ads1299-0064`). Decision: keep
+`--multi-scale-packets` off by default; only revisit as a verifier-gated or
+question-family-gated evidence repair.
+
+### 2026-05-14 — gated reasoner-escalation slice vs broad retry negative control
+
+Branch `harness-60plus-iteration` added a narrow default reasoner retry for
+verifier-rejected answer-shape failures in `FocusWorkflow`. Generic
+`escalate_reasoner` still stays behind the explicit full-loop budget, but
+`_should_allow_reasoner_shape_retry` now also allows one default retry when the
+answer cites evidence, the answer type is exact/numeric/string, the answer is
+long explanatory prose, and the verifier reason is about direct-answer/format
+failure. The previous singular-entity/list-like exception remains. Tests added
+in `tests/test_workflow.py` pin verbose numeric retry, concise exact-answer
+non-retry, boolean non-retry, and the end-to-end default retry path.
+
+Non-cherry-picked control set: the 24 rows from
+`60plus-3a-3d-oai-nano-run1` whose first verifier action was
+`escalate_reasoner` (10 wrong + 14 already scorer-correct). Shape-gated default
+slice at
+`results/hf/sprint-2026-05-14/escalate-shape-retry-slice-run1/` scored
+**19/24 = 79.2%**, +5 rows vs that prior run, with **5/10** prior wrong rows
+recovered and **0/14** prior-correct rows regressed. Caveat: several recoveries
+had `retries_used=0`, so the +5 includes upstream sampling variance; the safer
+claim is that the guard did not damage prior-correct verifier false-negatives.
+
+Negative control: broad full-loop retry with `--max-retries 1` on the same 24
+rows at
+`results/hf/sprint-2026-05-14/escalate-all-reasoner-slice-run1/` scored
+**13/24 = 54.2%**, -1 row vs prior, with **3/10** recoveries but **4/14**
+prior-correct regressions. Concrete regressions: `dat-spruhm8k-0002`
+(`3 lines` -> `8`), `fin-aapl-20250927-0034`
+(`September 2022, $21` -> `September 2023, $19`), and
+`fin-bis_qr_2024_sep-0050` (`FX bonds` -> `C. FX bonds and D. FX loans`).
+Decision: keep tool/retry use dynamic and gated; do not retry every verifier
+escalation and do not force all +4 tools.
+
+### 2026-05-13 — full Modal run audit + transient provider retry
+
+Full validation run after the Modal layout migration and dynamic tool gating:
+`results/hf/sprint-2026-05-13/full-modal-compact-normalized-run1/`, HF revision
+`3774c67f8b814392b6d04c939e904f749a3f52eb`, 148 canonical validation rows after
+filtering 71 stress rows. Raw accuracy was **48.6%** (72/148); completed-row
+accuracy excluding 11 provider/network failures was **52.6%** (72/137). Cost was
+**$1.766** total, **$0.0245/correct**, mean latency **3.53s**, page recall
+**87.6%**, bbox IoU **80.4%**, lazy answer rate **8.1%**.
+
+Failure taxonomy: 72 correct, 11 infrastructure failures, 9 page/routing misses,
+9 region/evidence misses, and 47 answer/scorer/reasoning misses. The degradation
+from the earlier n=30 slice is therefore not primarily the Modal layout endpoint:
+Modal returned healthy 200s, and the largest completed-row bucket is post-evidence
+answer/scorer/reasoning. The new scientific audit is
+`docs/research/2026-05-13-full-run-failure-audit.md`; it also lists HF/scorer
+audit candidates such as abstention wording, part-number alternatives, country
+abbreviations, and equivalent zero formats.
+
+Dynamic tool use did not force all +4 tools: 55 rows used only `inspect_region`
+(58.2% accuracy, $0.606, 3.47s mean latency), 82 rows used
+`inspect_region+expand_context` (48.8%, $1.160, 4.05s), and the 11 no-tool rows
+were infra failures. Interpret the weaker expand bucket as harder-case routing
+until a matched difficulty control says otherwise.
+
+HF split drift: the live dataset now exposes `train`, `validation`, and `test`,
+while older FocusParse commands/tests still ask for parser-bench local names
+`dev`, `test`, and `holdout`. `BenchmarkLoader` maps `dev -> train`,
+`test -> validation`, and `holdout -> test` for HF streaming so legacy smoke
+commands keep working.
+
+Provider-failover smoke: the default retry of `dat-ads1299-0023` still failed
+before planning because Gemini cheap tier returned `429 RESOURCE_EXHAUSTED`.
+Running the 11 previously-null infra rows with
+`--tier-override planner=mid --tier-override router=mid` produced real
+predictions for all 11 and recovered **6/11**. The adjusted full-run score would
+be **78/148 = 52.7%**, so provider reliability explains the raw-vs-completed gap
+but not the path to 60%. The remaining lift is answer/scorer/reasoning plus hard
+visual evidence.
+
+To keep provider flakiness from being counted as harness reasoning failure,
+`src/focusparse/models/{openai,anthropic,gemini}.py` now wrap one provider
+operation in transient retry. New env vars: `FOCUSPARSE_MODEL_RETRY_ATTEMPTS`
+(default 2, max 5; legacy fallback `FOCUSPARSE_MODEL_RETRIES`) and
+`FOCUSPARSE_MODEL_RETRY_SLEEP_S` (default 0.5, exponential backoff). This is
+paired with the existing `FOCUSPARSE_MODEL_TIMEOUT_S` timeout guard.
 
 ### 2026-05-11 (afternoon) — Phase 4 slice analysis + Phase 5 trigger tightening
 

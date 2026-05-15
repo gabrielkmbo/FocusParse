@@ -77,6 +77,28 @@ def _protocol_matches_agent(agent: str, protocol: str) -> bool:
     return protocol in _SIMPLE_PROTOCOLS
 
 
+def _parse_planner_tier_by_domain(raw: str | None) -> dict[str, str] | None:
+    """Parse `domain=tier,domain=tier` into a dict for FocusWorkflow.
+
+    Returns None if `raw` is None or empty, so the workflow default
+    (single-tier planner per `roles.planner`) stays in effect. Raises
+    ValueError on malformed input — better to fail fast than silently
+    fall back when the user opts in.
+    """
+    if not raw:
+        return None
+    out: dict[str, str] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            raise ValueError(f"--planner-tier-by-domain entry {entry!r} must be 'domain=tier'")
+        dom, tier = entry.split("=", 1)
+        out[dom.strip().lower()] = tier.strip()
+    return out or None
+
+
 def main() -> int:
     args = _parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -212,6 +234,8 @@ def main() -> int:
                 strict_layout_detection=not args.allow_layout_fallbacks,
                 layout_max_retries=args.layout_detect_retries,
                 layout_timeout_s=args.layout_detect_timeout_s,
+                reasoner_self_consistency_k=args.reasoner_self_consistency_k,
+                planner_tier_by_domain=_parse_planner_tier_by_domain(args.planner_tier_by_domain),
             )
         )
     elif args.agent in ("react", "agent_baseline"):
@@ -427,6 +451,28 @@ def _parse_args() -> argparse.Namespace:
         "questions. The reasoner sees the extracted CSV alongside the crop. "
         "Default off; gated by question family + figure_class so cost stays "
         "bounded. Predicted +2-4pp on Finance accuracy.",
+    )
+    parser.add_argument(
+        "--reasoner-self-consistency-k",
+        type=int,
+        default=1,
+        help="Phase 3b (2026-05-14 sprint): run K parallel reasoner samples "
+        "on the INITIAL answer call (retries stay k=1). The picker prefers "
+        "non-Unanswerable, more citations, shorter for exact_match/numeric, "
+        "and higher confidence. k=2 doubles initial reasoner spend "
+        "(~+$1.50 per n=148) and targets the 45 wrong_extraction_other rows "
+        "in the main-stack triage. Predicted +2-3pp on top of Phase 3a v2 "
+        "+ Phase 3d. Default 1 (off / back-compat).",
+    )
+    parser.add_argument(
+        "--planner-tier-by-domain",
+        default=None,
+        help="Phase 3f (2026-05-15 sprint): comma-separated domain=tier pairs "
+        "for per-domain planner tier routing. Example: "
+        "'datasheet=frontier,finance=mid'. The 2026-05-13 sprint hybrid "
+        "with this exact config hit 60.14%% on n=148 (datasheet frontier "
+        "67/101, finance Haiku 22/47 = 89/148). Unmatched domains fall "
+        "back to the default `roles.planner` tier in configs/default.yaml.",
     )
     parser.add_argument(
         "--tool-set",

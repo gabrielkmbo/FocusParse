@@ -1,7 +1,7 @@
 """PROPOSE_REGIONS stage — layout-driven region proposals with deterministic fallback.
 
 Phase 2 sub-phase 2e replaces the skeleton full-page placeholder with a call
-to the HF layout endpoint per candidate page. Detected boxes are translated
+to the layout endpoint per candidate page. Detected boxes are translated
 into `RegionCandidate`s with normalized bboxes. By default, any endpoint
 failure (`LayoutEndpointUnavailable` or `StubResponseError`) degrades to the
 old full-page skeleton region for *that page only*, so the workflow always has
@@ -74,8 +74,8 @@ async def propose_regions(
         images_by_page: 1-indexed page number -> PNG path. When omitted (or a
             page is missing), the full-page skeleton region is emitted for
             that page so downstream stages never see an empty candidate set.
-        layout_endpoint_url: override the default HF layout endpoint.
-        hf_token: override the `$HF_TOKEN` env var.
+        layout_endpoint_url: override the default layout endpoint.
+        hf_token: override the layout bearer token.
         cache_dir: where `detect_layout` persists responses. If None, no cache.
         confidence_threshold: drop detector boxes below this score.
         allow_endpoint_fallback: when False, endpoint outage/stub errors are

@@ -31,7 +31,11 @@ from focusparse.pipeline.expander import expand_context
 from focusparse.pipeline.inspector import _FINE_DETAIL_QUESTION_FAMILIES, inspect_regions
 from focusparse.pipeline.localizer import propose_regions
 from focusparse.pipeline.planner import plan_question
-from focusparse.pipeline.reasoner import answer_from_evidence
+from focusparse.pipeline.reasoner import (
+    answer_from_evidence,
+    answer_from_evidence_k_samples,
+    pick_best_answer,
+)
 from focusparse.pipeline.region_reranker import rerank_regions
 from focusparse.pipeline.router import route_pages
 from focusparse.pipeline.verifier import verify_answer
@@ -76,6 +80,38 @@ _EXPAND_RETRY_FACTOR = 1.5  # multiplied each retry → wider neighbor net
 _MAX_ADJACENCY_PAD = 0.30  # cap so the pad stays meaningful
 _RETRY_SELECTION_CONFIDENCE_MARGIN = 0.15
 _ABSTAIN_OVERRIDE_MIN_CONFIDENCE = 0.45
+_VERBOSE_SHAPE_RETRY_MAX_CHARS = 90
+_VERBOSE_SHAPE_RETRY_MAX_WORDS = 12
+_VERBOSE_SHAPE_RETRY_ANSWER_TYPES = frozenset({"exact_match", "numeric", "string"})
+_VERBOSE_SHAPE_RETRY_PHRASES = (
+    "incorrectly report",
+    "instead of",
+    "rather than",
+    "because",
+    "you should",
+    "should report",
+    "should answer",
+    "should use",
+    "the answer is",
+    "the correct answer",
+    "this means",
+    "shown in",
+    "based on",
+)
+_VERBOSE_SHAPE_RETRY_REASON_PHRASES = (
+    "too verbose",
+    "concise",
+    "answer format",
+    "does not provide",
+    "did not provide",
+    "does not directly answer",
+    "did not directly answer",
+    "actual question",
+    "mis-read",
+    "misread",
+    "omits",
+    "instead",
+)
 
 # Phase 2 of harness-growth-sprint (2026-05-11): hard-case dispatch for the
 # LLM-driven inspector. When `use_react_inspector=True`, the workflow routes
@@ -257,6 +293,9 @@ class FocusWorkflow:
         allow_layout_endpoint_fallback: bool = True,
         layout_max_retries: int | None = None,
         layout_timeout_s: float | None = None,
+        proactive_non_abstain_retry: bool = True,
+        reasoner_self_consistency_k: int = 1,
+        planner_tier_by_domain: dict[str, str] | None = None,
     ) -> None:
         self.backend_client = backend_client
         self.config = config
@@ -312,17 +351,73 @@ class FocusWorkflow:
         self.allow_layout_endpoint_fallback = allow_layout_endpoint_fallback
         self.layout_max_retries = layout_max_retries
         self.layout_timeout_s = layout_timeout_s
+        # Phase 3d (2026-05-13 sprint): proactive non-abstain retry. When the
+        # initial reasoner answer is 'Unanswerable' but the reasoner cited >= 2
+        # evidence packets (i.e. it found candidate evidence but gave up on
+        # extraction), force one extra reasoner call with a 'do not abstain'
+        # hint before letting the verifier see the abstention. On n=148
+        # main-stack the lazy_answer_rate is 8.1% (12/148) and every lazy row
+        # has a concrete non-null gold — so this is overwhelmingly harness
+        # error, not benchmark error. Costs ~+8% of a reasoner call/example.
+        self.proactive_non_abstain_retry = proactive_non_abstain_retry
+        # Phase 3b (2026-05-14 sprint): K-sample reasoner self-consistency.
+        # When k > 1, the initial answer step runs `k` parallel reasoner calls
+        # with diversified prompt variants and picks the best via
+        # `reasoner.pick_best_answer` (non-Unanswerable, more citations,
+        # shorter for exact_match/numeric, higher confidence). Retry-loop
+        # answer calls stay k=1 — only the initial pass uses self-consistency,
+        # because retries already have the verifier's reason as guidance.
+        # Cost: ~k× initial reasoner spend; predicted +2-3pp on the 45-row
+        # wrong_extraction_other bucket at k=2.
+        if reasoner_self_consistency_k < 1:
+            raise ValueError(
+                f"reasoner_self_consistency_k must be >= 1, got {reasoner_self_consistency_k!r}"
+            )
+        self.reasoner_self_consistency_k = reasoner_self_consistency_k
+        # Phase 3f (2026-05-15 sprint): domain-aware planner tier routing.
+        # The 2026-05-15 ablation showed frontier (gpt-5.4) as planner helps
+        # datasheet (+2.9pp) but hurts finance (-4.2pp) vs Haiku as planner.
+        # Per-domain routing picks the best planner per domain, recovering
+        # +1pp on top of the better single-tier choice and landing at
+        # ~60.1% on the 2026-05-13 sprint n=148 hybrid.
+        #
+        # Schema: {domain_lowercase: tier_name}, e.g.
+        #   {"datasheet": "frontier", "finance": "mid"}
+        # When the example's domain matches a key, `_client_for("planner",
+        # example_domain=domain_str)` resolves through tier_router using that
+        # tier override. Unmatched domains fall back to the default
+        # `roles.planner` mapping in default.yaml.
+        self.planner_tier_by_domain: dict[str, str] = {}
+        if planner_tier_by_domain:
+            for k, v in planner_tier_by_domain.items():
+                self.planner_tier_by_domain[k.lower()] = v
 
-    def _client_for(self, role: str) -> ModelClient | None:
+    def _client_for(self, role: str, *, example_domain: str | None = None) -> ModelClient | None:
         """Resolve a role-scoped client via `tier_router`, else return None.
 
         Used by non-reasoner stages that may or may not have a cheap/mid-tier
         client wired. The reasoner still uses `self.backend_client` directly
         so existing `FocusWorkflow(backend_client=...)` call sites keep
         working without a tier router.
+
+        Phase 3f (2026-05-15 sprint): when `role == "planner"` and
+        `example_domain` matches a key in `self.planner_tier_by_domain`,
+        resolve through the per-domain tier override instead of the
+        default `roles.planner` mapping. This is how the 60.1% headline
+        result is reached — datasheet planning uses frontier (gpt-5.4),
+        finance planning uses mid (Haiku).
         """
         if self.tier_router is None:
             return None
+        # Per-domain planner override (Phase 3f).
+        if role == "planner" and example_domain and self.planner_tier_by_domain:
+            dom_key = example_domain.replace("Domain.", "").lower().strip()
+            tier_name = self.planner_tier_by_domain.get(dom_key)
+            if tier_name and hasattr(self.tier_router, "client_for_tier"):
+                try:
+                    return self.tier_router.client_for_tier(tier_name)
+                except KeyError:
+                    pass
         try:
             return self.tier_router.client_for(role)
         except KeyError:
@@ -420,7 +515,9 @@ class FocusWorkflow:
         )
 
         budget = getattr(self.config, "budget", None) if self.config is not None else None
-        planner_client = self._client_for("planner")
+        # Phase 3f (2026-05-15 sprint): thread example_domain so the planner
+        # tier can vary by domain when planner_tier_by_domain is set.
+        planner_client = self._client_for("planner", example_domain=domain_str)
 
         # --- PLAN ----------------------------------------------------------
         plan, plan_response = await plan_question(
@@ -544,7 +641,62 @@ class FocusWorkflow:
             escalation_hint=None,
             recorder=recorder,
             step_counter=step_counter,
+            question_family=plan.question_family,
         )
+
+        # Phase 3d (2026-05-13 sprint): proactive non-abstain retry.
+        # When the initial answer is 'Unanswerable' but the reasoner cited
+        # at least one packet, the evidence is present and the reasoner gave
+        # up on extraction. Re-prompt once with a 'do not abstain' hint
+        # before the verifier sees the abstention. Citation-gated so cases
+        # with zero citations (the model genuinely saw nothing) do not
+        # trigger a hallucination-prone retry. Default-on; gated by a config
+        # flag so we can A/B if needed.
+        if (
+            self.proactive_non_abstain_retry
+            and _answer_looks_unanswerable(answer_event.answer)
+            and len(answer_event.citations) >= 1
+            and len(evidence.packets) >= 1
+        ):
+            non_abstain_hint = (
+                "Your previous answer was 'Unanswerable' but you cited "
+                f"{len(answer_event.citations)} evidence packet(s). The "
+                "verifier will compare your answer against those packets — "
+                "they likely contain the answer. Re-read the cited packets "
+                "carefully, look at the attached neighbor / context-window "
+                "crops if present, and produce a concrete answer drawn "
+                "directly from the packet contents. Only return "
+                "'Unanswerable' if you can explicitly confirm that no "
+                "relevant data appears in any of the cited packets."
+            )
+            retry_answer, retry_response = await self._run_answer(
+                question_event,
+                evidence,
+                escalation_hint=non_abstain_hint,
+                recorder=recorder,
+                step_counter=step_counter,
+                retry_attempt=0,
+                evidence_scope="full",
+                question_family=plan.question_family,
+            )
+            if not _answer_looks_unanswerable(retry_answer.answer):
+                _add_debug_event(
+                    recorder,
+                    stage="answer",
+                    event_type="selection",
+                    retry_attempt=0,
+                    payload={
+                        "selected": "proactive_non_abstain_retry",
+                        "discarded_answer": answer_event.answer,
+                        "discarded_confidence": answer_event.confidence,
+                        "selected_answer": retry_answer.answer,
+                        "selected_confidence": retry_answer.confidence,
+                        "n_cited_packets": len(answer_event.citations),
+                    },
+                )
+                answer_event = retry_answer
+                reasoner_response = retry_response
+
         verifier_client = self._client_for("verifier")
         verdict, verify_response = await self._run_verify(
             question_event,
@@ -747,6 +899,7 @@ class FocusWorkflow:
                 step_counter=step_counter,
                 retry_attempt=retries_used,
                 evidence_scope=_evidence_scope(evidence, retry_answer_evidence),
+                question_family=plan.question_family,
             )
             answer_evidence = retry_answer_evidence
             verdict, verify_response = await self._run_verify(
@@ -1252,12 +1405,112 @@ class FocusWorkflow:
         step_counter: _StepCounter,
         retry_attempt: int = 0,
         evidence_scope: str = "full",
+        question_family: str | None = None,
     ) -> tuple[AnswerEvent, ModelResponse]:
+        # Phase 3b (2026-05-14 sprint): K-sample self-consistency on the
+        # initial answer call only. Retry calls already have verifier
+        # guidance and stay k=1 so retry budgets aren't blown.
+        use_self_consistency = (
+            self.reasoner_self_consistency_k > 1 and retry_attempt == 0 and not escalation_hint
+        )
+
+        if use_self_consistency:
+            answer_events, responses = await answer_from_evidence_k_samples(
+                question_event,
+                evidence,
+                backend_client=self.backend_client,
+                k=self.reasoner_self_consistency_k,
+                escalation_hint=escalation_hint,
+                question_family=question_family,
+            )
+            best_idx = pick_best_answer(answer_events, answer_type=question_event.answer_type)
+            answer_event = answer_events[best_idx]
+            chosen_response = responses[best_idx]
+            # Sum token + cost telemetry across all K samples — the run
+            # paid for every call, not just the chosen one. Latency stays
+            # the max of the K (asyncio.gather runs them in parallel).
+            total_tokens_in = sum(r.tokens_in or 0 for r in responses)
+            total_tokens_out = sum(r.tokens_out or 0 for r in responses)
+            total_usd = sum(r.usd or 0.0 for r in responses)
+            max_latency_ms = max((r.latency_ms or 0) for r in responses)
+            reasoner_response = ModelResponse(
+                text=chosen_response.text,
+                tokens_in=total_tokens_in,
+                tokens_out=total_tokens_out,
+                usd=total_usd,
+                latency_ms=max_latency_ms,
+                raw={
+                    "chosen_index": best_idx,
+                    "sample_usd": [r.usd for r in responses],
+                    "chosen_raw": chosen_response.raw,
+                },
+            )
+            sample_log = [
+                {
+                    "sample_variant": i,
+                    "answer": ev.answer,
+                    "n_citations": len(ev.citations or []),
+                    "confidence": ev.confidence,
+                    "chosen": i == best_idx,
+                }
+                for i, ev in enumerate(answer_events)
+            ]
+            _add_debug_event(
+                recorder,
+                stage="answer",
+                event_type="self_consistency",
+                retry_attempt=retry_attempt,
+                payload={
+                    "k": self.reasoner_self_consistency_k,
+                    "chosen_index": best_idx,
+                    "samples": sample_log,
+                    "all_agree": len({(ev.answer or "").strip() for ev in answer_events}) == 1,
+                },
+            )
+            recorder.record(
+                TrajectoryStep(
+                    step_index=step_counter.next(),
+                    stage="answer",
+                    tier="reasoner",
+                    action="llm_call_k",
+                    args={
+                        "n_packets": len(evidence.packets),
+                        "retry_attempt": retry_attempt,
+                        "had_escalation_hint": bool(escalation_hint),
+                        "evidence_scope": evidence_scope,
+                        "self_consistency_k": self.reasoner_self_consistency_k,
+                        "chosen_index": best_idx,
+                    },
+                    obs_summary=(reasoner_response.text[:200] if reasoner_response.text else None),
+                    tokens_in=total_tokens_in,
+                    tokens_out=total_tokens_out,
+                    latency_ms=max_latency_ms,
+                    usd=total_usd,
+                    confidence=answer_event.confidence,
+                )
+            )
+            _add_debug_event(
+                recorder,
+                stage="answer",
+                event_type="answer",
+                retry_attempt=retry_attempt,
+                payload={
+                    "answer": answer_event.answer,
+                    "citations": list(answer_event.citations),
+                    "confidence": answer_event.confidence,
+                    "had_escalation_hint": bool(escalation_hint),
+                    "evidence_scope": evidence_scope,
+                    "self_consistency_k": self.reasoner_self_consistency_k,
+                },
+            )
+            return answer_event, reasoner_response
+
         answer_event, reasoner_response = await answer_from_evidence(
             question_event,
             evidence,
             backend_client=self.backend_client,
             escalation_hint=escalation_hint,
+            question_family=question_family,
         )
         recorder.record(
             TrajectoryStep(
@@ -1705,6 +1958,37 @@ def _answer_looks_list_like(answer: str | None) -> bool:
     return len(_answer_selection_tokens(normalized)) > 3
 
 
+def _answer_looks_verbose_shape_mismatch(
+    answer: str | None,
+    *,
+    answer_type: str | None,
+    verifier_reason: str | None,
+) -> bool:
+    if not answer:
+        return False
+    normalized_type = str(answer_type or "").strip().lower()
+    if normalized_type not in _VERBOSE_SHAPE_RETRY_ANSWER_TYPES:
+        return False
+    if _answer_type_is_unanswerable(normalized_type):
+        return False
+
+    text = re.sub(r"\s+", " ", str(answer)).strip()
+    if not text or _answer_looks_unanswerable(text):
+        return False
+    normalized = text.lower()
+    word_count = len(re.findall(r"[a-z0-9]+", normalized))
+    too_long = (
+        len(text) > _VERBOSE_SHAPE_RETRY_MAX_CHARS or word_count > _VERBOSE_SHAPE_RETRY_MAX_WORDS
+    )
+    if not too_long:
+        return False
+
+    reason = str(verifier_reason or "").lower()
+    phrase_hit = any(phrase in normalized for phrase in _VERBOSE_SHAPE_RETRY_PHRASES)
+    reason_hit = any(phrase in reason for phrase in _VERBOSE_SHAPE_RETRY_REASON_PHRASES)
+    return phrase_hit or reason_hit
+
+
 def _should_keep_best_unsupported_on_retry_abstain(
     answer: AnswerEvent | None,
     *,
@@ -1742,10 +2026,11 @@ def _should_allow_reasoner_shape_retry(
     """Allow a narrow default reasoner retry for verifier-detected answer shape.
 
     Generic `escalate_reasoner` stays behind `max_retries`: it spends another
-    frontier call without improving evidence packets. This exception is scoped
-    to the common chart/table failure where the evidence is present, the
-    question asks for one entity, and the answer is list-like; the verifier
-    hint usually fixes that without another inspect/expand mutation.
+    frontier call without improving evidence packets. These exceptions are
+    scoped to verifier-rejected answers where evidence is cited but the final
+    answer shape is likely wrong: either a singular-entity question got a
+    list-like answer, or an exact/numeric benchmark answer is explanatory prose
+    when the verifier is already asking the reasoner to repair format/extraction.
     """
     if max_evidence_retries <= 0 or action != "escalate_reasoner":
         return False
@@ -1753,22 +2038,26 @@ def _should_allow_reasoner_shape_retry(
         return False
     if not answer.citations:
         return False
-    if not _question_requests_single_entity(question_event.question):
-        return False
-    if not _answer_looks_list_like(answer.answer):
-        return False
     reason = verdict.reason.lower()
-    return bool(
-        "single" in reason
-        or "one " in reason
-        or "two " in reason
-        or "multiple" in reason
-        or "does not quantify" in reason
-        or "did not answer" in reason
-        or "actual question" in reason
-        or "which variable" in reason
-        or "y-axis variable" in reason
-        or "y axis variable" in reason
+    if _question_requests_single_entity(question_event.question) and _answer_looks_list_like(
+        answer.answer
+    ):
+        return bool(
+            "single" in reason
+            or "one " in reason
+            or "two " in reason
+            or "multiple" in reason
+            or "does not quantify" in reason
+            or "did not answer" in reason
+            or "actual question" in reason
+            or "which variable" in reason
+            or "y-axis variable" in reason
+            or "y axis variable" in reason
+        )
+    return _answer_looks_verbose_shape_mismatch(
+        answer.answer,
+        answer_type=question_event.answer_type,
+        verifier_reason=verdict.reason,
     )
 
 

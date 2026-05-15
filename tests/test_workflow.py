@@ -383,6 +383,92 @@ def test_variable_question_allows_reasoner_shape_retry():
     )
 
 
+def test_verbose_numeric_answer_allows_reasoner_shape_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The answer is too verbose and does not directly provide the scalar value.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+    )
+    answer = AnswerEvent(
+        answer=(
+            'You might incorrectly report "10%", but the table note shows that '
+            "the requested percentage should be reported as 0%."
+        ),
+        citations=["pkt_003"],
+        confidence=0.72,
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="What percentage should be reported for the prior-period adjustment?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="numeric",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
+def test_concise_exact_answer_blocks_reasoner_shape_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The verifier thinks the answer misread the cited table cell.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+    )
+    answer = AnswerEvent(answer="ADRV9040_FW.bin", citations=["pkt_003"], confidence=0.72)
+    question = QuestionEvent(
+        example_id="ex",
+        question="What firmware file is loaded?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+    )
+
+    assert not _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
+def test_boolean_answer_blocks_verbose_reasoner_shape_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The answer is verbose and does not directly answer the question.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+    )
+    answer = AnswerEvent(
+        answer="No, VOUT2 does not dip below the LDO threshold in the timing waveform.",
+        citations=["pkt_003"],
+        confidence=0.72,
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="Does VOUT2 dip below the LDO threshold?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="boolean",
+    )
+
+    assert not _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
 # ---------------------------------------------------------------------------
 # FocusWorkflow.run end-to-end (requires parser-bench submodule)
 # ---------------------------------------------------------------------------
@@ -1437,6 +1523,55 @@ async def test_loop_escalate_reasoner_is_not_default_evidence_retry(
     assert stage_counts["expand_context"] == 1
 
 
+async def test_loop_allows_verbose_numeric_shape_retry(tmp_path, parser_bench_submodule_present):
+    """Verifier-rejected explanatory numeric prose gets one hinted retry by default."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            (
+                '{"answer": "You might incorrectly report 10%, but the table '
+                'shows the requested percentage should be 0%.", '
+                '"citations": ["pkt_000"], "confidence": 0.72}'
+            ),
+            '{"answer": "0%", "citations": ["pkt_000"], "confidence": 0.86}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="escalate_reasoner",
+                reason="The answer is too verbose and does not directly provide the scalar value.",
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+    example = _make_example().model_copy(
+        update={
+            "question": "What percentage should be reported?",
+            "answer_type": "numeric",
+        }
+    )
+
+    result = await workflow.run(
+        example, [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "0%"
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["evidence_retries_used"] == 0
+    stage_counts = _stage_counts(result)
+    assert stage_counts["answer"] == 2
+    assert stage_counts["verify"] == 2
+    assert stage_counts["expand_context"] == 1
+    assert "Keep the answer field concise" in reasoner.calls[1]["prompt"]
+
+
 async def test_loop_allows_single_entity_shape_retry(tmp_path, parser_bench_submodule_present):
     """A list-like answer to a singular entity question gets one hinted retry."""
     if not parser_bench_submodule_present:
@@ -1482,6 +1617,251 @@ async def test_loop_allows_single_entity_shape_retry(tmp_path, parser_bench_subm
     answer_steps = [s for s in result.trace.steps if s.stage == "answer"]
     assert len(answer_steps) == 2
     assert "Keep the answer field concise" in reasoner.calls[1]["prompt"]
+
+
+async def test_phase3d_proactive_non_abstain_retry_recovers_lazy_answer(
+    tmp_path, parser_bench_submodule_present
+):
+    """Phase 3d (2026-05-13 sprint): when the initial answer is 'Unanswerable'
+    but the reasoner cited at least one evidence packet (i.e. evidence is
+    present and the reasoner gave up on extraction), a single proactive
+    retry with a 'do not abstain' hint fires before the verifier sees the
+    abstention. If the retry produces a concrete answer, it replaces the
+    abstention."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            # Initial: lazy abstain with 1 citation (citations get filtered to
+            # the set of actual packet ids; test setup yields packet pkt_000).
+            '{"answer": "Unanswerable", "citations": ["pkt_000"], "confidence": 0.3}',
+            # Proactive retry: concrete answer
+            '{"answer": "0x3FFFF8", "citations": ["pkt_000"], "confidence": 0.9}',
+        ]
+    )
+    verifier = _FakeClient(_verdict_json(supported=True, next_action="accept"))
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        proactive_non_abstain_retry=True,
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "0x3FFFF8"
+    # citations are page/bbox dicts, not packet_id strings
+    assert len(result.citations) >= 1
+    # The proactive retry produced a debug selection event with the right reason.
+    selection_events = [
+        e for e in result.trace.debug_events if e.stage == "answer" and e.event_type == "selection"
+    ]
+    assert any(s.payload.get("selected") == "proactive_non_abstain_retry" for s in selection_events)
+    # Verify both reasoner calls happened: initial (no hint) + proactive retry (with hint).
+    assert len(reasoner.calls) == 2
+    assert "Your previous answer was 'Unanswerable'" in reasoner.calls[1]["prompt"]
+
+
+async def test_phase3d_skips_retry_when_initial_answer_has_no_citations(
+    tmp_path, parser_bench_submodule_present
+):
+    """Phase 3d guard: when the initial 'Unanswerable' answer cites zero
+    packets, the model didn't find candidate evidence so we trust its
+    abstention rather than spending a reasoner call on a likely
+    hallucinated retry."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            # Initial: abstain with no citations -> no proactive retry.
+            '{"answer": "Unanswerable", "citations": [], "confidence": 0.2}',
+        ]
+    )
+    verifier = _FakeClient(_verdict_json(supported=False, next_action="abstain"))
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        proactive_non_abstain_retry=True,
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    # Only one reasoner call was made (no proactive retry).
+    assert len(reasoner.calls) == 1
+    assert result.answer == "Unanswerable"
+
+
+async def test_phase3d_flag_off_preserves_legacy_behavior(tmp_path, parser_bench_submodule_present):
+    """Phase 3d is gated by `proactive_non_abstain_retry`; passing False
+    restores the pre-Phase-3d flow (no proactive retry on lazy abstain)."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            # Initial: abstain with 2 citations — pre-Phase-3d would NOT retry
+            '{"answer": "Unanswerable", "citations": ["pkt_000", "pkt_001"], "confidence": 0.3}',
+        ]
+    )
+    verifier = _FakeClient(_verdict_json(supported=False, next_action="abstain"))
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        proactive_non_abstain_retry=False,
+    )
+
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    # Only one reasoner call (flag off — no proactive retry).
+    assert len(reasoner.calls) == 1
+    assert result.answer == "Unanswerable"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3b (2026-05-14 sprint): reasoner K-sample self-consistency
+# ---------------------------------------------------------------------------
+
+
+async def test_phase3b_k_equals_two_runs_two_reasoner_calls_and_picks_best(
+    tmp_path, parser_bench_submodule_present
+):
+    """Phase 3b: K=2 self-consistency runs both reasoner samples and the
+    picker selects the better one (more citations / shorter for
+    exact_match). Cost telemetry sums across all K samples."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            # Sample 0: variant-0 prompt, longer / less-cited answer
+            '{"answer": "0x3FFFF8 (the computed translation table base address)", '
+            '"citations": ["pkt_000"], "confidence": 0.7}',
+            # Sample 1: variant-1 prompt, concise + better-cited answer
+            '{"answer": "0x3FFFF8", "citations": ["pkt_000"], "confidence": 0.9}',
+        ]
+    )
+    verifier = _FakeClient(_verdict_json(supported=True, next_action="accept"))
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        reasoner_self_consistency_k=2,
+        proactive_non_abstain_retry=False,  # isolate Phase 3b from Phase 3d
+    )
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    # Both reasoner calls were made (K=2).
+    assert len(reasoner.calls) == 2
+    # Sample 1 has the verbatim-grounding addendum (variant-1 prompt).
+    assert "exact span" in reasoner.calls[1]["prompt"].lower()
+    # Sample 0 does not.
+    assert "exact span" not in reasoner.calls[0]["prompt"].lower()
+    # Picker chose sample 1 (shorter + higher confidence + same citations).
+    assert result.answer == "0x3FFFF8"
+    assert result.telemetry["tokens_in"] == 200
+    assert result.telemetry["tokens_out"] == 50
+    assert result.telemetry["usd"] == pytest.approx(0.002)
+    sc_events = [
+        e
+        for e in result.trace.debug_events
+        if e.stage == "answer" and e.event_type == "self_consistency"
+    ]
+    assert sc_events, "expected a self_consistency debug event"
+    payload = sc_events[0].payload
+    assert payload["k"] == 2
+    assert payload["chosen_index"] == 1
+    assert payload["all_agree"] is False
+    assert len(payload["samples"]) == 2
+    answer_step = next(
+        s for s in result.trace.steps if s.stage == "answer" and s.action == "llm_call_k"
+    )
+    assert answer_step.tokens_in == 200
+    assert answer_step.tokens_out == 50
+    assert answer_step.usd == pytest.approx(0.002)
+
+
+async def test_phase3b_default_k_one_preserves_legacy_behavior(
+    tmp_path, parser_bench_submodule_present
+):
+    """Phase 3b default is k=1; the workflow falls back to the single-shot
+    `answer_from_evidence` path with no self_consistency debug event."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "0x3FFFF8", "citations": ["pkt_000"], "confidence": 0.9}')
+    verifier = _FakeClient(_verdict_json(supported=True, next_action="accept"))
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        # reasoner_self_consistency_k defaults to 1
+    )
+    result = await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    # Single reasoner call; no Phase 3b debug event.
+    assert len(reasoner.calls) == 1
+    sc_events = [
+        e
+        for e in result.trace.debug_events
+        if e.stage == "answer" and e.event_type == "self_consistency"
+    ]
+    assert sc_events == []
+
+
+async def test_phase3b_invalid_k_raises_value_error() -> None:
+    """K must be >= 1; 0 / negative is a config error."""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        FocusWorkflow(
+            backend_client=_FakeClient('{"answer": "x", "citations": [], "confidence": 0.5}'),
+            reasoner_self_consistency_k=0,
+        )
+
+
+async def test_phase3b_skips_self_consistency_on_retry_calls(
+    tmp_path, parser_bench_submodule_present
+):
+    """Phase 3b runs K samples on the INITIAL answer only. Retry-loop
+    answer calls (with escalation_hint) stay k=1 — retries already have
+    verifier guidance and double-K-ing them would blow the retry budget."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            # Initial: K=2 samples
+            '{"answer": "wrong-A", "citations": ["pkt_000"], "confidence": 0.4}',
+            '{"answer": "wrong-B", "citations": ["pkt_000"], "confidence": 0.5}',
+            # Retry: k=1 (no extra samples)
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="expand_context",
+                reason="missing caption context",
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        reasoner_self_consistency_k=2,
+        proactive_non_abstain_retry=False,
+    )
+    await workflow.run(
+        _make_example(), [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    # 2 initial samples + 1 retry call = 3 total reasoner calls.
+    assert len(reasoner.calls) == 3
 
 
 async def test_loop_abstain_terminates_with_unanswerable(tmp_path, parser_bench_submodule_present):

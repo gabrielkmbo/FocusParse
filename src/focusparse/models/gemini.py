@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from focusparse.eval.pricing import compute_usd
+from focusparse.models._retry import retry_transient_model_call
 from focusparse.models._timeouts import model_timeout_s
 from focusparse.models.base import ModelResponse
 from focusparse.models.images import read_model_image_bytes
@@ -65,12 +66,17 @@ class GeminiClient:
             gen_config_kwargs["system_instruction"] = system
 
         t0 = time.perf_counter()
-        async with asyncio.timeout(model_timeout_s()):
-            response = await client.aio.models.generate_content(
-                model=self.model,
-                contents=[types.Content(parts=parts, role="user")],
-                config=types.GenerateContentConfig(**gen_config_kwargs),
-            )
+        timeout_s = model_timeout_s()
+
+        async def _generate_content():
+            async with asyncio.timeout(timeout_s):
+                return await client.aio.models.generate_content(
+                    model=self.model,
+                    contents=[types.Content(parts=parts, role="user")],
+                    config=types.GenerateContentConfig(**gen_config_kwargs),
+                )
+
+        response = await retry_transient_model_call("gemini", _generate_content)
         latency_ms = int((time.perf_counter() - t0) * 1000)
 
         text = response.text or ""

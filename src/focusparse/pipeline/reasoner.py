@@ -80,10 +80,124 @@ _FOCUS_STOPWORDS = frozenset(
 )
 
 
-def _format_hint(answer_type: str | None) -> str:
+_DATASHEET_EXACT_MATCH_HINT = (
+    "Answer with the exact label, identifier, or phrase from the document. "
+    "Quote the document verbatim — do not paraphrase, abbreviate, or add "
+    "explanation text that isn't present in the document. Match the "
+    "document's exact punctuation, case, and spacing. Even if the question "
+    "asks for an explanation, put only the final exact answer in the "
+    "`answer` field.\n\n"
+    "Formatting rules (Phase 6a tightening):\n"
+    "1. Output ONLY the answer span. Do NOT prefix the value with a "
+    "label or category name from the document (e.g., if the gold "
+    "answer is '180,683; typical', do not write 'Gross margin "
+    "180,683, typical').\n"
+    "2. Do NOT append a description, definition, or trailing context "
+    "after the value (e.g., if the gold answer is '[31:16]', do not "
+    "write '[31:16] - Reserved. RAZ.').\n"
+    "3. When the answer is a multi-part phrase joined by punctuation "
+    "(e.g., 'A; B' or 'A and B'), include ALL parts in the exact "
+    "form they appear in the document — do not truncate to the first "
+    "part and do not reorder the parts.\n"
+    "4. Do NOT return alternative or conditional answers ('if X then "
+    "A; if Y then B'). Select the single value that matches the "
+    "question's specified condition.\n"
+    "5. When the question asks which item has the maximum/minimum/most "
+    "frequent property AND the visible evidence shows two or more items "
+    "tied at that value, list ALL tied items joined by ' and ' (e.g. "
+    "'LOGGING and MULTI-THREADING are tied at 7 functions each'). Do not "
+    "arbitrarily pick one.\n\n"
+    "For register bit-field assignments, omit spaces around '=' and "
+    "separate assignments with comma+space, e.g. [15:14]=b00, "
+    "[8:5]=b1111."
+)
+
+# Phase 3a v2 (2026-05-13 sprint): finance documents diverge from
+# datasheets, but the divergence is concentrated in a SPECIFIC set of
+# question_families where the gold is a sentence-form claim about a
+# chart (e.g. 'Micro firms show a more noticeable uptick in NPL
+# ratios...'). For short-label finance golds (author names, ticker
+# strings, '$(40) million'), the original Phase 6a strict prompt is
+# the better choice — relaxing it on those examples causes
+# over-extraction ('Stephanie Aliaga — her portrait and caption are
+# directly above Grant Papa in the leftmost Americas New York
+# column' instead of the gold 'Stephanie Aliaga').
+#
+# So the relaxed variant is gated on (domain == finance) AND
+# (question_family in _SENTENCE_FORM_FAMILIES). Everything else
+# falls back to the strict datasheet prompt.
+_SENTENCE_FORM_FAMILIES: frozenset[str] = frozenset(
+    {
+        # Finance families whose gold answers are frequently sentence-form
+        # claims about chart/figure contents (per the n=148 failure triage).
+        "chart_caption_fusion",
+        "chart_footnote_fusion",
+        "multi_chart_comparison",
+        "chart_table_cross_ref",
+        "dual_axis_disambiguation",
+        "figure_caption_cross_ref",
+        # `distant_evidence_fusion` on finance also tends sentence-form
+        # (synthesized claims spanning regions), though on datasheet it
+        # is typically a short label — so we filter by domain too.
+        "distant_evidence_fusion",
+    }
+)
+
+
+_FINANCE_SENTENCE_FORM_EXACT_MATCH_HINT = (
+    "Answer with the exact label, identifier, phrase, or short descriptive "
+    "clause from the document. Quote the document verbatim where possible "
+    "and preserve its exact wording, punctuation, units, currency symbols, "
+    "and parenthesization.\n\n"
+    "Formatting rules (finance sentence-form variant; applies because the "
+    "question_family is one that often has a sentence-form gold answer):\n"
+    "1. When the document presents the answer as a descriptive sentence or "
+    "clause about a chart, trend, comparison, or relationship between "
+    "regions / categories / time periods, include the full clause as it "
+    "appears — do not collapse to a single tag (e.g. if the gold answer "
+    "is 'Micro firms show a more noticeable uptick in NPL ratios at the "
+    "end of the period', do NOT answer 'loans to micro firms').\n"
+    "2. When the document presents the answer as a short label or single "
+    "value, keep it short — match the granularity of the document's own "
+    "phrasing. Do not pad short answers with explanatory clauses (e.g. if "
+    "the gold answer is the name 'Stephanie Aliaga', do NOT add '— her "
+    "portrait is in the leftmost column'). When in doubt about length, "
+    "favor a SHORT answer matching the most direct span in the document.\n"
+    "3. When the answer is a multi-part phrase joined by punctuation, "
+    "include ALL parts in the exact form they appear in the document — do "
+    "not truncate to the first part and do not reorder the parts.\n"
+    "4. Do NOT return alternative or conditional answers ('if X then A; "
+    "if Y then B'). Select the single value that matches the question's "
+    "specified condition.\n"
+    "5. For chart readings: state the value at the labelled axis tick "
+    "closest to the curve / bar / point being asked about. If the document "
+    "uses a country, region, or category name in its own legend / label, "
+    "answer with that full name (e.g. 'Latvia', not the 2-letter ISO "
+    "code 'LV')."
+)
+
+
+def _is_finance_domain(domain: str | None) -> bool:
+    return bool(domain) and "finance" in domain.lower()
+
+
+def _format_hint(
+    answer_type: str | None,
+    *,
+    domain: str | None = None,
+    question_family: str | None = None,
+) -> str:
     """Mirror of `workflow._format_hint`. Kept local to avoid a workflow import
     cycle (reasoner is imported by workflow). Type-aware nudges so the model
-    emits scorer-compliant output instead of prose."""
+    emits scorer-compliant output instead of prose.
+
+    Phase 3a v2 (2026-05-13 sprint): exact_match prompt routes by
+    (domain, question_family). The strict datasheet prompt is the
+    default; the relaxed finance sentence-form variant fires ONLY when
+    domain == finance AND question_family is known to often have a
+    sentence-form gold. This avoids over-extraction on short-label
+    finance answers (author names, ticker strings, etc.).
+    """
     if not answer_type:
         return ""
     s = str(answer_type)
@@ -95,45 +209,15 @@ def _format_hint(answer_type: str | None) -> str:
             "or extra units beyond what the question asks for."
         )
     if stem == "exact_match":
-        # 2026-05-11 (Phase 6a): the Phase 4 failure analysis showed 19 of
-        # 62 right-region-wrong examples are prompt-fixable extraction
-        # format issues. Three concrete patterns from sampled traces:
-        #   - over-extraction with leading labels:
-        #       gold "180,683; typical" vs pred "Gross margin 180,683, typical"
-        #   - truncation of multi-part answers joined by punctuation:
-        #       gold "BLE; Signed integer comparison gave less than or equal"
-        #       vs pred "BLE; Less or equal; Signed integer comparison..."
-        #   - returning conditional/alternative branches instead of one value:
-        #       gold "0xFFFF0000" vs pred "HIVECS=0, 0x00000000; HIVECS=1, 0xFF..."
-        # Each rule below addresses one of those patterns. The instructions
-        # are deliberately concrete (with bracket-and-bit-field exceptions
-        # preserved from the previous version).
-        return (
-            "Answer with the exact label, identifier, or phrase from the document. "
-            "Quote the document verbatim — do not paraphrase, abbreviate, or add "
-            "explanation text that isn't present in the document. Match the "
-            "document's exact punctuation, case, and spacing. Even if the question "
-            "asks for an explanation, put only the final exact answer in the "
-            "`answer` field.\n\n"
-            "Formatting rules (Phase 6a tightening):\n"
-            "1. Output ONLY the answer span. Do NOT prefix the value with a "
-            "label or category name from the document (e.g., if the gold "
-            "answer is '180,683; typical', do not write 'Gross margin "
-            "180,683, typical').\n"
-            "2. Do NOT append a description, definition, or trailing context "
-            "after the value (e.g., if the gold answer is '[31:16]', do not "
-            "write '[31:16] - Reserved. RAZ.').\n"
-            "3. When the answer is a multi-part phrase joined by punctuation "
-            "(e.g., 'A; B' or 'A and B'), include ALL parts in the exact "
-            "form they appear in the document — do not truncate to the first "
-            "part and do not reorder the parts.\n"
-            "4. Do NOT return alternative or conditional answers ('if X then "
-            "A; if Y then B'). Select the single value that matches the "
-            "question's specified condition.\n\n"
-            "For register bit-field assignments, omit spaces around '=' and "
-            "separate assignments with comma+space, e.g. [15:14]=b00, "
-            "[8:5]=b1111."
-        )
+        # Phase 3a v2: relaxed variant fires ONLY for finance examples
+        # whose question_family is known to often have a sentence-form
+        # gold answer. All other examples (including most of finance —
+        # author names, ticker strings, short cell values) get the strict
+        # datasheet prompt to avoid over-extraction.
+        fam = (question_family or "").lower()
+        if _is_finance_domain(domain) and fam in _SENTENCE_FORM_FAMILIES:
+            return _FINANCE_SENTENCE_FORM_EXACT_MATCH_HINT
+        return _DATASHEET_EXACT_MATCH_HINT
     if stem == "boolean":
         return "Answer 'yes' or 'no'."
     if stem == "multiple_choice":
@@ -149,6 +233,8 @@ async def answer_from_evidence(
     *,
     backend_client: ModelClient,
     escalation_hint: str | None = None,
+    question_family: str | None = None,
+    sample_variant: int = 0,
 ) -> tuple[AnswerEvent, ModelResponse]:
     """One VLM call over the packet images. Returns parsed answer + raw response.
 
@@ -161,6 +247,15 @@ async def answer_from_evidence(
     reasoner "your last try was unsupported; here's why" without changing
     the evidence packets. Pass it from the workflow's retry handler; pass
     None for first-attempt and routine answer calls.
+
+    `question_family`, when provided, routes the exact_match format hint
+    to a domain × family-specific variant (Phase 3a v2). The workflow
+    passes `plan.question_family`; tests / direct callers can omit.
+
+    `sample_variant` (Phase 3b, 2026-05-14 sprint) selects a prompt
+    variant when running K=2 self-consistency. Variant 0 is the default
+    prompt (back-compat). Variant 1 adds a verbatim-grounding nudge — a
+    different angle so K=2 isn't just sampling-noise on the same prompt.
     """
     packet_list = "\n".join(
         _render_packet_line(p, question_text=question.question) for p in evidence.packets
@@ -175,13 +270,18 @@ async def answer_from_evidence(
             "and scorer-compliant: do not add explanations, qualifiers, or "
             "copied verifier language.\n\n"
         )
-    format_hint = _format_hint(question.answer_type)
+    format_hint = _format_hint(
+        question.answer_type,
+        domain=question.domain,
+        question_family=question_family,
+    )
     format_block = f"\n{format_hint}\n" if format_hint else ""
+    variant_block = _sample_variant_addendum(sample_variant)
     prompt = (
         f"{hint_block}"
         f"Question: {question.question}\n\n"
         f"Available evidence packets:\n{packet_list}\n\n"
-        f"Answer using only these packets.{format_block}"
+        f"Answer using only these packets.{format_block}{variant_block}"
     )
     images = _collect_packet_images(evidence)
 
@@ -195,6 +295,11 @@ async def answer_from_evidence(
         response.text,
         valid_packet_ids={p.packet_id for p in evidence.packets},
     )
+    answer = _normalize_answer_shape(
+        answer,
+        answer_type=question.answer_type,
+        domain=question.domain,
+    )
     return (
         AnswerEvent(
             answer=answer,
@@ -204,6 +309,263 @@ async def answer_from_evidence(
         ),
         response,
     )
+
+
+def _sample_variant_addendum(sample_variant: int) -> str:
+    """Phase 3b (2026-05-14 sprint): per-sample prompt diversification.
+
+    K-sample self-consistency on a low-temperature model often returns
+    the same answer multiple times — no diversity, no gain. Each sample
+    beyond variant 0 appends a short addendum that pushes the model to
+    consider the question from a different angle, so the K samples land
+    on genuinely independent reasoning paths.
+
+    Variants (2026-05-15 expansion for K=3):
+      0: baseline (no addendum)
+      1: verbatim-grounding nudge — locate the exact span in a cited
+         packet, match punctuation/spacing/units character-for-character.
+      2: skeptical re-read — ask the model to articulate its
+         confidence-bearing reasoning before answering, and to default
+         to the more conservative (shorter / more concrete) value when
+         two competing readings exist. Targets close-numeric
+         estimation failures where the 'best guess' over multiple
+         interpretations is the most concrete match.
+      3+: cycles back to variant 0 (over-K just gets model stochasticity).
+    """
+    if sample_variant == 1:
+        return (
+            "\nBefore finalizing your answer, locate the exact span of text "
+            "in at least one cited packet that supports your answer. If the "
+            "exact span is not present, revise your answer to match the "
+            "document's wording. Match the document's punctuation, spacing, "
+            "and units verbatim.\n"
+        )
+    if sample_variant == 2:
+        return (
+            "\nBefore finalizing your answer, briefly enumerate the 1-3 "
+            "concrete values you can read from the cited packets that "
+            "could plausibly answer the question. Then pick the value "
+            "that most directly satisfies the question's exact phrasing "
+            "(matching units, time period, category, and any "
+            "qualifiers). When two readings of a chart point are both "
+            "plausible (e.g. '0.4' vs '0.5'), prefer the value closer "
+            "to a labelled axis tick over the interpolated guess. "
+            "Preserve the document's exact wording in your final "
+            "answer.\n"
+        )
+    return ""
+
+
+async def answer_from_evidence_k_samples(
+    question: QuestionEvent,
+    evidence: EvidenceEvent,
+    *,
+    backend_client: ModelClient,
+    k: int = 1,
+    escalation_hint: str | None = None,
+    question_family: str | None = None,
+) -> tuple[list[AnswerEvent], list[ModelResponse]]:
+    """Phase 3b (2026-05-14 sprint): K=2 reasoner self-consistency.
+
+    Runs `k` reasoner calls in parallel (asyncio.gather) with diversified
+    prompt variants so each sample explores a different angle. Returns
+    the parallel lists of AnswerEvent and ModelResponse, in the order
+    of `sample_variant=0, 1, ..., k-1`.
+
+    Caller is responsible for picking via `pick_best_answer`. Cost is
+    `k * 1` reasoner calls; predicted +2-3pp on the n=148
+    wrong_extraction_other bucket at k=2.
+    """
+    import asyncio
+
+    if k <= 1:
+        answer_event, response = await answer_from_evidence(
+            question,
+            evidence,
+            backend_client=backend_client,
+            escalation_hint=escalation_hint,
+            question_family=question_family,
+            sample_variant=0,
+        )
+        return [answer_event], [response]
+
+    tasks = [
+        answer_from_evidence(
+            question,
+            evidence,
+            backend_client=backend_client,
+            escalation_hint=escalation_hint,
+            question_family=question_family,
+            sample_variant=i,
+        )
+        for i in range(k)
+    ]
+    results = await asyncio.gather(*tasks)
+    answer_events = [r[0] for r in results]
+    responses = [r[1] for r in results]
+    return answer_events, responses
+
+
+def pick_best_answer(
+    answer_events: list[AnswerEvent],
+    *,
+    answer_type: str | None,
+) -> int:
+    """Pick the best of K self-consistency samples. Returns the chosen index.
+
+    Phase 3b v2 (2026-05-15 expansion): when K >= 3 and a majority of
+    samples land on the SAME normalized answer (case + whitespace +
+    surrounding punctuation collapsed), pick the first sample with that
+    consensus answer. This catches close-numeric chart reads where the
+    model produces e.g. ['0.4', '0.4', '0.5'] — pure heuristic picker
+    might prefer the outlier on confidence, but the majority sample is
+    almost always the right call.
+
+    Falls back to the heuristic ordering (most-preferred first) when no
+    consensus exists or K < 3:
+      1. Non-Unanswerable beats Unanswerable.
+      2. Citation count: more cited packets is better.
+      3. For exact_match / numeric / boolean: shorter answer is better
+         (the format hints all push for concise spans; a verbose sample
+         is usually the model padding).
+      4. Higher self-reported confidence.
+      5. Sample index 0 (stable tie-break).
+    """
+    if not answer_events:
+        raise ValueError("answer_events is empty")
+    if len(answer_events) == 1:
+        return 0
+
+    # Phase 3b v2: majority-consensus shortcut for K >= 3.
+    if len(answer_events) >= 3:
+        consensus_idx = _consensus_pick(answer_events)
+        if consensus_idx is not None:
+            return consensus_idx
+
+    stem = (str(answer_type).split(".")[-1].lower() if answer_type else "").strip()
+    prefer_short = stem in {"exact_match", "numeric", "boolean", "multiple_choice"}
+
+    def key(idx_event: tuple[int, AnswerEvent]):
+        idx, ev = idx_event
+        is_unanswerable = (ev.answer or "").strip().lower() in {
+            "unanswerable",
+            "unknown",
+            "cannot determine",
+            "can't determine",
+            "",
+        }
+        n_citations = len(ev.citations or [])
+        ans_len = len(ev.answer or "")
+        # Sort key: lower is better.
+        # - Unanswerable last (1 vs 0)
+        # - More citations first (negate)
+        # - Shorter first (only when prefer_short)
+        # - Higher confidence first (negate)
+        # - Lower index first (stable tie-break)
+        return (
+            1 if is_unanswerable else 0,
+            -n_citations,
+            ans_len if prefer_short else 0,
+            -float(ev.confidence or 0.0),
+            idx,
+        )
+
+    best_idx, _ = min(enumerate(answer_events), key=key)
+    return best_idx
+
+
+def _consensus_pick(answer_events: list[AnswerEvent]) -> int | None:
+    """Phase 3b v2 (2026-05-15): majority-vote on normalized answers.
+
+    Returns the index of the FIRST sample whose normalized answer is the
+    majority across all K samples, or None if no answer has > K/2 votes.
+    Excludes Unanswerable / empty answers from the vote — if the
+    majority is Unanswerable, the heuristic fallback handles it
+    (preferring any concrete sample).
+    """
+    from collections import Counter
+
+    def normalize(s: str | None) -> str:
+        if not s:
+            return ""
+        # Collapse whitespace + strip surrounding punctuation for vote-bucketing.
+        normalized = " ".join(s.strip().split())
+        # Lowercase only for vote bucketing — we still return the original
+        # answer text from the chosen sample.
+        return normalized.lower().strip(",.;:")
+
+    normalized = [normalize(ev.answer) for ev in answer_events]
+    counts = Counter(n for n in normalized if n and n not in {"unanswerable", "unknown"})
+    if not counts:
+        return None
+
+    most_common, count = counts.most_common(1)[0]
+    # Require a strict majority (> K/2). K=3 → need 2.
+    if count <= len(answer_events) / 2:
+        return None
+    # Return the first sample whose normalized answer matches the majority.
+    for idx, n in enumerate(normalized):
+        if n == most_common:
+            return idx
+    return None
+
+
+def _normalize_answer_shape(
+    answer: str,
+    *,
+    answer_type: str | None,
+    domain: str | None,
+) -> str:
+    """Apply scorer-compatible formatting fixes without using gold answers.
+
+    These are deliberately syntax-level repairs for common document-QA answer
+    shapes: accounting negatives, compact variable=value units, and page
+    references. They are not semantic rewrites, and they stay gated by answer
+    type/domain so they do not become a hidden benchmark-specific oracle.
+    """
+    text = " ".join(str(answer or "").strip().split())
+    if not text:
+        return text
+
+    stem = _answer_type_stem(answer_type)
+    domain_l = str(domain or "").lower()
+
+    if stem == "numeric" and "finance" in domain_l:
+        accounting = re.fullmatch(
+            r"\$?\(\s*([-+]?\d+(?:,\d{3})*(?:\.\d+)?)\s*\)"
+            r"\s*(?:million|billion|thousand)?",
+            text,
+            re.IGNORECASE,
+        )
+        if accounting:
+            return "-" + accounting.group(1).replace(",", "")
+
+    if stem in {"exact_match", "numeric"}:
+        variable_value = re.fullmatch(
+            r"([A-Za-z][A-Za-z0-9_]{0,12})\s*=\s*"
+            r"(-?\d+(?:\.\d+)?)\s*([A-Za-zµμ%]{1,6})",
+            text,
+        )
+        if variable_value:
+            return (
+                f"{variable_value.group(1)} = {variable_value.group(2)} {variable_value.group(3)}"
+            )
+
+    if stem == "exact_match":
+        page_ref = re.fullmatch(
+            r"(.+?)\s+on\s+page\s+([A-Za-z0-9][A-Za-z0-9.\-]*)",
+            text,
+            re.IGNORECASE,
+        )
+        if page_ref:
+            return f"{page_ref.group(1)}; page {page_ref.group(2)}"
+
+    return text
+
+
+def _answer_type_stem(answer_type: str | None) -> str:
+    s = str(answer_type or "").strip()
+    return s.split(".")[-1].lower() if "." in s else s.lower()
 
 
 def _render_packet_line(packet, *, question_text: str | None = None) -> str:

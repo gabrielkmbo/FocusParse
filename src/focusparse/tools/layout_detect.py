@@ -1,7 +1,7 @@
-"""layout_detect — HTTP client for the shared HuggingFace layout endpoint.
+"""layout_detect — HTTP client for the shared Modal layout endpoint.
 
 Mirrors parser-bench's contract:
-  - POST PNG bytes with `Content-Type: image/png` + `Authorization: Bearer $HF_TOKEN`.
+  - POST PNG bytes with `Content-Type: image/png` + bearer auth.
   - Parse { pred_boxes, pred_labels, scores, figure_classifications? }.
   - Retry 3× exponential backoff on 502/503/504/429/timeouts.
   - **Raise** on the single-full-page stub response — do not silently succeed.
@@ -29,7 +29,9 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ENDPOINT = "https://jqkx3k3gn4ciymvi.us-east-1.aws.endpoints.huggingface.cloud"
+DEFAULT_ENDPOINT = "https://llamaindex--layout-v3-triton-layoutv3triton-serve.modal.run"
+LAYOUT_TOKEN_ENV = "LAYOUT_EXTRACTION_V3_MODAL_TOKEN"
+LEGACY_HF_TOKEN_ENV = "HF_TOKEN"
 
 _RETRYABLE_STATUS = {502, 503, 504, 429}
 _DEFAULT_TIMEOUT_S = 180.0
@@ -86,9 +88,10 @@ class StubResponseError(RuntimeError):
 
 
 class LayoutEndpointUnavailable(RuntimeError):
-    """Raised when the endpoint cannot be reached after retries, or HF_TOKEN
-    is not set. Localizer catches this and falls back to a deterministic
-    skeleton region — the workflow stays on the rails either way.
+    """Raised when the endpoint cannot be reached after retries, or token is missing.
+
+    Localizer catches this and falls back to a deterministic skeleton region —
+    the workflow stays on the rails either way.
     """
 
 
@@ -106,7 +109,7 @@ async def detect_layout(
     timeout_s: float = _DEFAULT_TIMEOUT_S,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> LayoutDetectionOutput:
-    """Call the HF layout endpoint and return structured boxes.
+    """Call the layout endpoint and return structured boxes.
 
     Args:
         page_png_bytes: PNG bytes of the rendered page.
@@ -115,7 +118,9 @@ async def detect_layout(
             used to detect the full-page stub response.
         endpoint_url: override the default endpoint. Falls back to
             `$FOCUSPARSE_LAYOUT_ENDPOINT_URL` then `DEFAULT_ENDPOINT`.
-        hf_token: override the token. Falls back to `$HF_TOKEN`.
+        hf_token: legacy explicit token override. Defaults to
+            `$LAYOUT_EXTRACTION_V3_MODAL_TOKEN`, then `$HF_TOKEN` for older
+            local setups.
         cache_dir: where to persist responses. If None, no caching.
         confidence_threshold: drop boxes below this score.
         transport: inject a mock transport for tests; if None, httpx picks its
@@ -123,13 +128,16 @@ async def detect_layout(
 
     Raises:
         StubResponseError: endpoint returned the single full-page stub shape.
-        LayoutEndpointUnavailable: HF_TOKEN missing, or endpoint failed after
+        LayoutEndpointUnavailable: layout token missing, or endpoint failed after
             `max_retries` attempts.
     """
     endpoint = endpoint_url or os.environ.get("FOCUSPARSE_LAYOUT_ENDPOINT_URL") or DEFAULT_ENDPOINT
-    token = hf_token if hf_token is not None else os.environ.get("HF_TOKEN")
+    token = hf_token if hf_token is not None else _layout_token_from_env()
     if not token:
-        raise LayoutEndpointUnavailable("HF_TOKEN not set; cannot call the layout endpoint.")
+        raise LayoutEndpointUnavailable(
+            f"{LAYOUT_TOKEN_ENV} not set; cannot call the layout endpoint. "
+            f"{LEGACY_HF_TOKEN_ENV} is still accepted as a temporary fallback."
+        )
 
     cache_path: Path | None = None
     if cache_dir is not None:
@@ -163,6 +171,11 @@ async def detect_layout(
         height=image_height,
         confidence_threshold=confidence_threshold,
     )
+
+
+def _layout_token_from_env() -> str | None:
+    """Return the preferred Modal token, with HF_TOKEN as a temporary fallback."""
+    return os.environ.get(LAYOUT_TOKEN_ENV) or os.environ.get(LEGACY_HF_TOKEN_ENV)
 
 
 # ---------------------------------------------------------------------------
