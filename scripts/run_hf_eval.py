@@ -241,6 +241,8 @@ def main() -> int:
                 layout_timeout_s=args.layout_detect_timeout_s,
                 reasoner_self_consistency_k=args.reasoner_self_consistency_k,
                 planner_tier_by_domain=_parse_planner_tier_by_domain(args.planner_tier_by_domain),
+                write_prediction_cache=not args.minimal_artifacts,
+                compose_agentic_tiles=not args.minimal_artifacts,
             )
         )
     elif args.agent in ("react", "agent_baseline"):
@@ -402,6 +404,17 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--resume", dest="resume", action="store_true", default=True)
     parser.add_argument("--no-resume", dest="resume", action="store_false")
+    parser.add_argument(
+        "--minimal-artifacts",
+        action="store_true",
+        default=False,
+        help=(
+            "For disk-constrained slice experiments, skip per-example prediction "
+            "cache JSONs and agentic summary tile PNGs. Still writes the wrapper "
+            "JSON, run.json, and per_example.jsonl. Resume is ignored for focus "
+            "runs in this mode."
+        ),
+    )
     parser.add_argument(
         "--max-retries",
         type=int,

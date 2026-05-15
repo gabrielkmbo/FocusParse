@@ -119,6 +119,62 @@ async def test_run_focus_eval_scores_correct_answer(tmp_path, parser_bench_submo
     assert manifest["n_examples"] == 2
 
 
+async def test_run_focus_eval_minimal_artifacts_skips_prediction_cache(
+    tmp_path, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    result = await run_focus_eval(
+        [_make_example("ex-minimal-artifacts")],
+        backend_client=client,
+        backend="fake",
+        model="fake-1",
+        protocol="focus_default",
+        output_dir=tmp_path / "run",
+        images_root=tmp_path,
+        write_prediction_cache=False,
+    )
+
+    assert result["aggregate"].n == 1
+    assert not (tmp_path / "run" / "predictions").exists()
+    assert (tmp_path / "run" / "run.json").exists()
+    assert (tmp_path / "run" / "per_example.jsonl").exists()
+    manifest = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert manifest["artifact_policy"]["write_prediction_cache"] is False
+
+
+async def test_run_focus_eval_minimal_artifacts_skips_agentic_tiles(
+    tmp_path, monkeypatch, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    def fail_prepare_images(*args, **kwargs):
+        raise AssertionError("_prepare_images should not run when compose_agentic_tiles=False")
+
+    monkeypatch.setattr("focusparse.eval.harness._prepare_images", fail_prepare_images)
+    result = await run_focus_eval(
+        [_make_example("ex-no-tiles")],
+        backend_client=_FakeClient(
+            '{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}'
+        ),
+        backend="fake",
+        model="fake-1",
+        protocol="agentic_multi_page",
+        output_dir=tmp_path / "run",
+        images_root=tmp_path,
+        write_prediction_cache=False,
+        compose_agentic_tiles=False,
+    )
+
+    assert result["aggregate"].n == 1
+    assert not (tmp_path / "run" / "tiles").exists()
+    manifest = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert manifest["artifact_policy"]["compose_agentic_tiles"] is False
+
+
 async def test_run_focus_eval_records_focus_metrics(tmp_path, parser_bench_submodule_present):
     if not parser_bench_submodule_present:
         pytest.skip("parser-bench submodule required")

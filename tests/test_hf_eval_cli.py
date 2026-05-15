@@ -361,6 +361,17 @@ def test_argparse_example_ids_file(script_mod, monkeypatch, tmp_path):
     assert args.example_ids_file == ids_file
 
 
+def test_argparse_minimal_artifacts(script_mod, monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_hf_eval.py", "--protocol", "agentic_multi_page", "--minimal-artifacts"],
+    )
+
+    args = script_mod._parse_args()
+    assert args.minimal_artifacts is True
+
+
 def test_argparse_layout_preflight_flags(script_mod, monkeypatch):
     monkeypatch.setattr(
         sys,
