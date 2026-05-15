@@ -2,6 +2,12 @@
 
 ## 2026-05-15
 
+- Eval harnesses now abort on provider throttling/quota failures instead of
+  converting those rows into benchmark failures. Daily quota exhaustion is no
+  longer retried as a transient model error, while ordinary non-throttle local
+  backend failures still produce error rows for development. This preserves
+  slice/full-run validity after the row-binding slice attempt hit Gemini
+  free-tier quota.
 - Added corresponding-row and checkbox-binding cues to the gold-free answer
   contract. Reasoner/verifier prompts now explicitly bind source row/year/entity
   before reading a corresponding output field, and bind checkbox marks to their

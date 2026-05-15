@@ -77,6 +77,12 @@ nearest Yes/No or status labels. The verifier now propagates
 Commit `16192a9`: recorded the row-binding contract checkpoint in project
 memory.
 
+Commit `72b41f9`: made eval runs fail fast on provider throttle/quota
+failures instead of converting those rows into benchmark failures. Daily quota
+exhaustion is no longer retried as a transient model error. This is a validity
+guard, not an accuracy mechanism: it prevents contaminated slice/full-run
+artifacts after provider quota is exhausted.
+
 ## Slice Results
 
 | Run | Correct | Accuracy | Cost | Cost/correct | Latency mean | Page recall | Bbox IoU | Lazy rate | Recoveries | Regressions | Net | Control regressions |
