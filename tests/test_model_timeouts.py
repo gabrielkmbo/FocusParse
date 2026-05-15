@@ -74,6 +74,15 @@ def test_transient_model_error_detects_network_unreachable():
     assert is_transient_model_error(OSError(51, "Network is unreachable"))
 
 
+def test_transient_model_error_detects_rate_limit_marker():
+    class ProviderRateLimitError(Exception):
+        pass
+
+    assert is_transient_model_error(
+        ProviderRateLimitError("429 Too Many Requests: rate_limit_error")
+    )
+
+
 async def test_openai_client_wraps_provider_call_in_timeout(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("FOCUSPARSE_MODEL_TIMEOUT_S", "0.01")

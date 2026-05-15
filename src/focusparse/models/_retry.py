@@ -60,6 +60,7 @@ def is_transient_model_error(exc: Exception) -> bool:
     if "auth" in name or "permission" in name:
         return False
     transient_markers = (
+        "429",
         "timeout",
         "timed out",
         "connection",
@@ -68,6 +69,9 @@ def is_transient_model_error(exc: Exception) -> bool:
         "cannot connect",
         "nodename nor servname",
         "temporarily unavailable",
+        "rate limit",
+        "rate_limit",
+        "too many requests",
         "connection reset",
         "connection aborted",
     )
