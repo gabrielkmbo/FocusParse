@@ -2090,8 +2090,8 @@ async def test_chart_to_table_fires_for_expanded_finance_families(family, tmp_pa
 
     Finance is the weak domain in the headline (32-43% vs 50% datasheets) and
     most finance failures are chart-table cross-references. The gate stays
-    safe because `_region_is_chart(region)` still has to be true — non-chart
-    regions cannot trigger extraction even if their family is listed.
+    safe because explicit chart subclasses still pass normally, while generic
+    chart candidates need a strong reranker signal before extraction fires.
     """
     _install_fake_tools(monkeypatch, inspect_calls=[], text_calls=[])
 
@@ -2135,6 +2135,106 @@ async def test_chart_to_table_fires_for_expanded_finance_families(family, tmp_pa
 
     assert len(chart_calls) == 1, f"chart_to_table did not fire for family={family!r}"
     assert ev.packets[0].chart_csv == "x_value,y_value\n0,1\n1,2"
+
+
+async def test_chart_to_table_falls_back_for_primary_other_chart_candidate(tmp_path, monkeypatch):
+    """A chart-family question can extract from a generic `other` visual only
+    when the reranker says that visual is the primary answer carrier."""
+    inspect_calls: list = []
+    text_calls: list = []
+    _install_fake_tools(monkeypatch, inspect_calls=inspect_calls, text_calls=text_calls)
+
+    chart_calls: list = []
+
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None, backend_client=None):
+        from focusparse.tools.chart_to_table import ChartToTableOutput
+
+        chart_calls.append({"crop_ref": inp.crop_ref})
+        return ChartToTableOutput(
+            table_csv="x_value,y_value\nA,3\nB,9",
+            confidence=0.8,
+            n_points=2,
+        )
+
+    monkeypatch.setattr(
+        "focusparse.tools.chart_to_table.chart_to_table",
+        _fake_chart_to_table,
+    )
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    other_visual = _region(
+        region_id="chartish",
+        page=1,
+        bbox_norm=(0.10, 0.20, 0.50, 0.60),
+        score=0.9,
+        region_type="picture",
+        supporting_signals=["figure_class=other"],
+    ).model_copy(update={"needed_for": "primary", "relevance": 0.82})
+    plan = _plan().model_copy(
+        update={"question_family": "chart_caption_fusion", "evidence_types": ["chart"]}
+    )
+
+    ev = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=[other_visual]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=True,
+        multi_scale=False,
+    )
+
+    assert len(chart_calls) == 1
+    assert ev.packets[0].chart_csv == "x_value,y_value\nA,3\nB,9"
+    assert "chart_to_table:attempt" in ev.packets[0].provenance.args_hash
+    assert "inspect_region:chart_context" in ev.packets[0].provenance.args_hash
+    assert ev.packets[0].ocr_snippet.startswith("Chart packet: figure_class=other")
+
+
+async def test_chart_to_table_skips_weak_other_visual_candidate(tmp_path, monkeypatch):
+    """Generic visual fallback is reranker-gated; weak `other` pictures do not
+    spend chart extraction calls even for chart-family questions."""
+    _install_fake_tools(monkeypatch, inspect_calls=[], text_calls=[])
+    chart_calls: list = []
+
+    async def _fake_chart_to_table(inp, *, crop_cache_dir=None, backend_client=None):
+        from focusparse.tools.chart_to_table import ChartToTableOutput
+
+        chart_calls.append({"crop_ref": inp.crop_ref})
+        return ChartToTableOutput(table_csv="x,y\n0,0", confidence=0.5, n_points=1)
+
+    monkeypatch.setattr(
+        "focusparse.tools.chart_to_table.chart_to_table",
+        _fake_chart_to_table,
+    )
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    weak_other = _region(
+        region_id="weak-other",
+        page=1,
+        bbox_norm=(0.10, 0.20, 0.50, 0.60),
+        score=0.9,
+        region_type="picture",
+        supporting_signals=["figure_class=other"],
+    ).model_copy(update={"relevance": 0.35})
+    plan = _plan().model_copy(update={"question_family": "chart_caption_fusion"})
+
+    ev = await inspect_regions(
+        _q(),
+        plan,
+        RegionsEvent(candidates=[weak_other]),
+        images_by_page={1: tmp_path / "p1.png"},
+        pdf_path=pdf,
+        chart_to_table_enabled=True,
+        multi_scale=False,
+    )
+
+    assert chart_calls == []
+    assert ev.packets[0].chart_csv is None
+    assert "chart_to_table:attempt" not in ev.packets[0].provenance.args_hash
+    assert "inspect_region:chart_context" not in ev.packets[0].provenance.args_hash
 
 
 async def test_chart_to_table_skipped_for_non_chart_family_even_with_flag(tmp_path, monkeypatch):
