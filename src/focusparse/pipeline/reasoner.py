@@ -557,10 +557,15 @@ def _normalize_answer_shape(
     stem = _answer_type_stem(answer_type)
     domain_l = str(domain or "").lower()
 
+    if stem == "boolean":
+        boolean = _normalize_boolean_shape(text)
+        if boolean:
+            return boolean
+
     if stem == "numeric" and "finance" in domain_l:
-        accounting = re.fullmatch(
+        accounting = re.match(
             r"\$?\(\s*([-+]?\d+(?:,\d{3})*(?:\.\d+)?)\s*\)"
-            r"\s*(?:million|billion|thousand)?",
+            r"\s*(?:million|billion|thousand)?\b",
             text,
             re.IGNORECASE,
         )
@@ -568,6 +573,10 @@ def _normalize_answer_shape(
             return "-" + accounting.group(1).replace(",", "")
 
     if stem in {"exact_match", "numeric"}:
+        hex_value = _normalize_hex_value_shape(text)
+        if hex_value:
+            return hex_value
+
         min_typ_max = _normalize_min_typ_max_shape(text)
         if min_typ_max:
             return min_typ_max
@@ -597,6 +606,64 @@ def _normalize_answer_shape(
 def _answer_type_stem(answer_type: str | None) -> str:
     s = str(answer_type or "").strip()
     return s.split(".")[-1].lower() if "." in s else s.lower()
+
+
+def _normalize_boolean_shape(text: str) -> str | None:
+    boolean = re.match(
+        r"^(?:the\s+answer\s+is\s+)?(?P<value>yes|no|true|false)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if not boolean:
+        return None
+    value = boolean.group("value").lower()
+    return "yes" if value in {"yes", "true"} else "no"
+
+
+def _normalize_hex_value_shape(text: str) -> str | None:
+    """Normalize a single OCR-ish hex value after a label prefix.
+
+    This is intentionally narrow: it only returns the hex span when it is the
+    whole answer or follows a label-like semicolon/colon prefix. That keeps
+    register phrases such as "r0 (0x5)" intact while still removing verbose
+    labels like "Serializer Lanes Enabled; OxFF (...)".
+    """
+    matches = list(
+        re.finditer(
+            r"(?<![A-Za-z0-9])(?P<prefix>[0Oo])x(?P<digits>[0-9A-Fa-f]+)"
+            r"(?P<context>\s*\([^)]{0,120}\))?",
+            text,
+        )
+    )
+    if len(matches) != 1:
+        return None
+
+    match = matches[0]
+    prefix_text = text[: match.start()].strip()
+    if prefix_text and not prefix_text.endswith((";", ":")):
+        return None
+
+    suffix_text = text[match.end() :].strip()
+    if suffix_text and suffix_text[0] not in ",;.":
+        return None
+
+    digits = match.group("digits").upper()
+    context = match.group("context") or ""
+    if context:
+        context = _normalize_terminal_o_digit_in_identifier(context)
+    return f"0x{digits}{context}"
+
+
+def _normalize_terminal_o_digit_in_identifier(text: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        token = match.group(0)
+        prefix = token[:-1]
+        sibling_digit = re.search(rf"\b{re.escape(prefix)}\d+\b", text, re.IGNORECASE)
+        if sibling_digit:
+            return f"{prefix}0"
+        return token
+
+    return re.sub(r"\b[A-Za-z][A-Za-z0-9_]*[Oo]\b", repl, text)
 
 
 def _normalize_min_typ_max_shape(text: str) -> str | None:

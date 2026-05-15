@@ -923,6 +923,19 @@ def test_answer_shape_normalizes_finance_accounting_negative() -> None:
     )
 
 
+def test_answer_shape_normalizes_verbose_finance_accounting_negative() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "$(40) million; the bar is shown in parentheses in the financing section",
+            answer_type="numeric",
+            domain="finance",
+        )
+        == "-40"
+    )
+
+
 def test_answer_shape_leaves_datasheet_parentheses_alone() -> None:
     from focusparse.pipeline.reasoner import _normalize_answer_shape
 
@@ -972,6 +985,53 @@ def test_answer_shape_formats_min_typ_max_list() -> None:
             domain="datasheet",
         )
         == "min: 0.697 V, typ: 0.704 V, max: 0.711 V"
+    )
+
+
+def test_answer_shape_collapses_verbose_boolean_answers() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Yes; the referenced note shows the item is included.",
+            answer_type="boolean",
+            domain="finance",
+        )
+        == "yes"
+    )
+    assert (
+        _normalize_answer_shape(
+            "The answer is false because the row is not present.",
+            answer_type="boolean",
+            domain="datasheet",
+        )
+        == "no"
+    )
+
+
+def test_answer_shape_normalizes_label_prefixed_hex_span() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Serializer Lanes Enabled; OxFF (SERDINO to SERDIN7)",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "0xFF (SERDIN0 to SERDIN7)"
+    )
+
+
+def test_answer_shape_keeps_parenthesized_hex_identifier_phrase() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "r0 (0x5)",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "r0 (0x5)"
     )
 
 
