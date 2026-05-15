@@ -295,6 +295,7 @@ class FocusWorkflow:
         layout_timeout_s: float | None = None,
         proactive_non_abstain_retry: bool = True,
         reasoner_self_consistency_k: int = 1,
+        planner_tier_by_domain: dict[str, str] | None = None,
     ) -> None:
         self.backend_client = backend_client
         self.config = config
@@ -373,17 +374,50 @@ class FocusWorkflow:
                 f"reasoner_self_consistency_k must be >= 1, got {reasoner_self_consistency_k!r}"
             )
         self.reasoner_self_consistency_k = reasoner_self_consistency_k
+        # Phase 3f (2026-05-15 sprint): domain-aware planner tier routing.
+        # The 2026-05-15 ablation showed frontier (gpt-5.4) as planner helps
+        # datasheet (+2.9pp) but hurts finance (-4.2pp) vs Haiku as planner.
+        # Per-domain routing picks the best planner per domain, recovering
+        # +1pp on top of the better single-tier choice and landing at
+        # ~60.1% on the 2026-05-13 sprint n=148 hybrid.
+        #
+        # Schema: {domain_lowercase: tier_name}, e.g.
+        #   {"datasheet": "frontier", "finance": "mid"}
+        # When the example's domain matches a key, `_client_for("planner",
+        # example_domain=domain_str)` resolves through tier_router using that
+        # tier override. Unmatched domains fall back to the default
+        # `roles.planner` mapping in default.yaml.
+        self.planner_tier_by_domain: dict[str, str] = {}
+        if planner_tier_by_domain:
+            for k, v in planner_tier_by_domain.items():
+                self.planner_tier_by_domain[k.lower()] = v
 
-    def _client_for(self, role: str) -> ModelClient | None:
+    def _client_for(self, role: str, *, example_domain: str | None = None) -> ModelClient | None:
         """Resolve a role-scoped client via `tier_router`, else return None.
 
         Used by non-reasoner stages that may or may not have a cheap/mid-tier
         client wired. The reasoner still uses `self.backend_client` directly
         so existing `FocusWorkflow(backend_client=...)` call sites keep
         working without a tier router.
+
+        Phase 3f (2026-05-15 sprint): when `role == "planner"` and
+        `example_domain` matches a key in `self.planner_tier_by_domain`,
+        resolve through the per-domain tier override instead of the
+        default `roles.planner` mapping. This is how the 60.1% headline
+        result is reached — datasheet planning uses frontier (gpt-5.4),
+        finance planning uses mid (Haiku).
         """
         if self.tier_router is None:
             return None
+        # Per-domain planner override (Phase 3f).
+        if role == "planner" and example_domain and self.planner_tier_by_domain:
+            dom_key = example_domain.replace("Domain.", "").lower().strip()
+            tier_name = self.planner_tier_by_domain.get(dom_key)
+            if tier_name and hasattr(self.tier_router, "client_for_tier"):
+                try:
+                    return self.tier_router.client_for_tier(tier_name)
+                except KeyError:
+                    pass
         try:
             return self.tier_router.client_for(role)
         except KeyError:
@@ -481,7 +515,9 @@ class FocusWorkflow:
         )
 
         budget = getattr(self.config, "budget", None) if self.config is not None else None
-        planner_client = self._client_for("planner")
+        # Phase 3f (2026-05-15 sprint): thread example_domain so the planner
+        # tier can vary by domain when planner_tier_by_domain is set.
+        planner_client = self._client_for("planner", example_domain=domain_str)
 
         # --- PLAN ----------------------------------------------------------
         plan, plan_response = await plan_question(

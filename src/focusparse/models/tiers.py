@@ -158,6 +158,24 @@ class TierRouter:
             frozenset(cached_roles) if cached_roles is not None else DEFAULT_CACHED_ROLES
         )
 
+    def client_for_tier(self, tier_name: str) -> ModelClient:
+        """Resolve a client by explicit tier name (Phase 3f domain override).
+
+        Used by `FocusWorkflow._client_for` when `planner_tier_by_domain`
+        is configured and the example's domain matches. Bypasses the
+        role-to-tier mapping so a single workflow run can use different
+        planner tiers for different examples.
+
+        Raises KeyError when `tier_name` is not in `self.config.tiers`.
+        """
+        if tier_name not in self.config.tiers:
+            raise KeyError(f"Tier {tier_name!r} not in config.tiers")
+        tier_spec = self.config.tiers[tier_name]
+        cache_key = tier_name
+        if cache_key not in self._cache:
+            self._cache[cache_key] = _build_client(tier_spec)
+        return self._cache[cache_key]
+
     def client_for(self, role: str, *, escalate: bool = False) -> ModelClient:
         tier_spec = self.config.tier_for(role)
         tier_name = self._tier_name_for_spec(tier_spec)

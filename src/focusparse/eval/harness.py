@@ -332,6 +332,7 @@ async def run_focus_eval(
     layout_max_retries: int | None = None,
     layout_timeout_s: float | None = None,
     reasoner_self_consistency_k: int = 1,
+    planner_tier_by_domain: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run `FocusWorkflow` over an iterable of examples.
 
@@ -419,6 +420,11 @@ async def run_focus_eval(
         # Costs ~k× initial reasoner spend on n=148. The workflow constructor
         # validates k >= 1.
         workflow_kwargs["reasoner_self_consistency_k"] = reasoner_self_consistency_k
+    if planner_tier_by_domain:
+        # Phase 3f (2026-05-15 sprint): per-domain planner tier. Datasheet ->
+        # frontier (gpt-5.4) gains +2.9pp on datasheet; finance -> mid (Haiku)
+        # gains +4.2pp on finance vs the single-tier alternatives.
+        workflow_kwargs["planner_tier_by_domain"] = planner_tier_by_domain
     workflow = FocusWorkflow(**workflow_kwargs)
     available_tools = workflow.available_tools()
     per_example: list[dict[str, Any]] = []
