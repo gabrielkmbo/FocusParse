@@ -314,14 +314,24 @@ async def answer_from_evidence(
 def _sample_variant_addendum(sample_variant: int) -> str:
     """Phase 3b (2026-05-14 sprint): per-sample prompt diversification.
 
-    K=2 self-consistency with the same prompt on a low-temperature model
-    often returns the same answer twice — no diversity, no gain. Each
-    sample beyond variant 0 appends a short addendum that pushes the
-    model to consider the question from a different angle, so the K
-    samples land on genuinely independent reasoning paths.
+    K-sample self-consistency on a low-temperature model often returns
+    the same answer multiple times — no diversity, no gain. Each sample
+    beyond variant 0 appends a short addendum that pushes the model to
+    consider the question from a different angle, so the K samples land
+    on genuinely independent reasoning paths.
+
+    Variants (2026-05-15 expansion for K=3):
+      0: baseline (no addendum)
+      1: verbatim-grounding nudge — locate the exact span in a cited
+         packet, match punctuation/spacing/units character-for-character.
+      2: skeptical re-read — ask the model to articulate its
+         confidence-bearing reasoning before answering, and to default
+         to the more conservative (shorter / more concrete) value when
+         two competing readings exist. Targets close-numeric
+         estimation failures where the 'best guess' over multiple
+         interpretations is the most concrete match.
+      3+: cycles back to variant 0 (over-K just gets model stochasticity).
     """
-    if sample_variant == 0:
-        return ""
     if sample_variant == 1:
         return (
             "\nBefore finalizing your answer, locate the exact span of text "
@@ -329,6 +339,19 @@ def _sample_variant_addendum(sample_variant: int) -> str:
             "exact span is not present, revise your answer to match the "
             "document's wording. Match the document's punctuation, spacing, "
             "and units verbatim.\n"
+        )
+    if sample_variant == 2:
+        return (
+            "\nBefore finalizing your answer, briefly enumerate the 1-3 "
+            "concrete values you can read from the cited packets that "
+            "could plausibly answer the question. Then pick the value "
+            "that most directly satisfies the question's exact phrasing "
+            "(matching units, time period, category, and any "
+            "qualifiers). When two readings of a chart point are both "
+            "plausible (e.g. '0.4' vs '0.5'), prefer the value closer "
+            "to a labelled axis tick over the interpolated guess. "
+            "Preserve the document's exact wording in your final "
+            "answer.\n"
         )
     return ""
 

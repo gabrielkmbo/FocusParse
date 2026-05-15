@@ -641,6 +641,33 @@ def test_phase3b_sample_variant_addendum_variant_one_has_verbatim_grounding() ->
     assert "cited packet" in text.lower() or "cited packets" in text.lower()
 
 
+def test_phase3b_sample_variant_addendum_variant_two_has_skeptical_reread() -> None:
+    """Phase 3b (2026-05-15 expansion for K=3): variant 2 asks the model
+    to enumerate competing readings before picking the most concrete
+    answer. Targets close-numeric estimation failures (`0.4 vs 0.5`
+    chart reads) where the picker can't disambiguate from confidence
+    alone. Distinct from variant 1's verbatim-grounding angle."""
+    from focusparse.pipeline.reasoner import _sample_variant_addendum
+
+    text = _sample_variant_addendum(2)
+    # Variant 2 must be a non-empty distinct prompt from variants 0 and 1.
+    assert text != ""
+    assert text != _sample_variant_addendum(1)
+    # The defining mechanism: enumerate competing readings, then pick the
+    # most concrete / axis-anchored one.
+    assert "enumerate" in text.lower() or "1-3" in text or "axis" in text.lower()
+
+
+def test_phase3b_sample_variant_addendum_over_k_cycles_to_empty() -> None:
+    """Phase 3b: variants 3+ fall back to the empty (variant-0)
+    addendum so K>3 still works without unbounded prompt drift —
+    additional samples just exploit model stochasticity."""
+    from focusparse.pipeline.reasoner import _sample_variant_addendum
+
+    assert _sample_variant_addendum(3) == ""
+    assert _sample_variant_addendum(5) == ""
+
+
 def test_phase3b_pick_best_answer_prefers_non_unanswerable() -> None:
     """Picker rule 1: any concrete answer beats `Unanswerable`."""
     from focusparse.pipeline.events import AnswerEvent
