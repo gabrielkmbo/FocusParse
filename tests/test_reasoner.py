@@ -1022,6 +1022,32 @@ def test_answer_shape_normalizes_label_prefixed_hex_span() -> None:
     )
 
 
+def test_answer_shape_collapses_leading_code_identifier_explanation() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "DPD MODE1. The model is updated when the rms power exceeds the previous maximum.",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "DPD_MODE1"
+    )
+
+
+def test_answer_shape_does_not_collapse_plain_sentence_explanation() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Primary mode. The table describes the setting.",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "Primary mode. The table describes the setting."
+    )
+
+
 def test_answer_shape_keeps_parenthesized_hex_identifier_phrase() -> None:
     from focusparse.pipeline.reasoner import _normalize_answer_shape
 

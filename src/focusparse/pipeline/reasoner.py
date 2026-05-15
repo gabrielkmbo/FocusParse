@@ -592,6 +592,10 @@ def _normalize_answer_shape(
             )
 
     if stem == "exact_match":
+        identifier = _normalize_leading_code_identifier_shape(text)
+        if identifier:
+            return identifier
+
         page_ref = re.fullmatch(
             r"(.+?)\s+on\s+page\s+([A-Za-z0-9][A-Za-z0-9.\-]*)",
             text,
@@ -664,6 +668,21 @@ def _normalize_terminal_o_digit_in_identifier(text: str) -> str:
         return token
 
     return re.sub(r"\b[A-Za-z][A-Za-z0-9_]*[Oo]\b", repl, text)
+
+
+def _normalize_leading_code_identifier_shape(text: str) -> str | None:
+    leading = re.match(
+        r"^(?P<identifier>[A-Z][A-Z0-9]*(?:[ _-]+[A-Z0-9]*[0-9][A-Z0-9]*)*)"
+        r"\.\s+.+$",
+        text,
+    )
+    if not leading:
+        return None
+
+    identifier = leading.group("identifier").strip(" _-")
+    if not any(ch.isdigit() for ch in identifier):
+        return None
+    return re.sub(r"[ -]+", "_", identifier)
 
 
 def _normalize_min_typ_max_shape(text: str) -> str | None:
