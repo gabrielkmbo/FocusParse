@@ -8,7 +8,9 @@
   get multi-field completion guidance, checkbox risks get nearest-label
   binding guidance, and chart risks get legend/series/panel/axis binding
   guidance. The retry still outputs one concise scorer-shaped answer and does
-  not force broader retrieval.
+  not force broader retrieval. The hint now includes an internal
+  same-evidence repair worksheet with Candidate A/B/C slots so the retry does
+  bounded adjudication without K-sampling.
 - A diagnostic-only 3-row smoke using OpenAI cheap planner/router fallbacks
   (`FOCUSPARSE_TIER_PLANNER=cheap_oai`, `FOCUSPARSE_TIER_ROUTER=cheap_oai`)
   scored 3/3 on the targeted row-binding/checkbox/DPD controls, but this is not

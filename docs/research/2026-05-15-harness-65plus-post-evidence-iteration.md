@@ -88,8 +88,10 @@ reasoner retries. The hint includes the previous answer/citations and converts
 diagnostics into concrete repair instructions: multi-field completion,
 label-vs-value extraction, corresponding-row/table-row candidate adjudication,
 checkbox nearest-label binding, and chart legend/series/panel/axis binding.
-This implements the first adjudication layer without adding broad retrieval or
-generic self-consistency.
+It also adds an internal same-evidence repair worksheet with Candidate A/B/C
+slots: previous answer, same-row/series/label-completed answer, and nearby
+confusable row/series/checkbox binding. This implements the first adjudication
+layer without adding broad retrieval or generic self-consistency.
 
 ## Slice Results
 

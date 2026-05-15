@@ -2139,8 +2139,42 @@ def _build_reasoner_repair_hint(
             "Adjudicate the current answer against the alternate nearby series using "
             "only the same evidence."
         )
+    if failures:
+        parts.append(_repair_candidate_worksheet(failures))
 
     return "\n".join(dict.fromkeys(parts))
+
+
+def _repair_candidate_worksheet(failures: set[str]) -> str:
+    """Prompt a bounded candidate adjudication pass without extra model samples."""
+
+    candidate_b = (
+        "Candidate B = same cited row/entity/series, repaired to include every requested field"
+    )
+    candidate_c = "Candidate C = nearest plausible alternative from the same evidence"
+    if "wrong_row_risk" in failures:
+        candidate_c = "Candidate C = nearby confusable row/entity using the same headers/units"
+    elif "checkbox_binding_risk" in failures:
+        candidate_b = "Candidate B = checkbox marks bound to nearest labels for every condition"
+        candidate_c = "Candidate C = alternate Yes/No binding if the mark is visually ambiguous"
+    elif "legend_binding_risk" in failures:
+        candidate_b = "Candidate B = current series after checking legend, caption, axes, footnotes"
+        candidate_c = "Candidate C = alternate nearby series/panel using the same evidence"
+    elif "label_value_mismatch" in failures:
+        candidate_b = "Candidate B = requested value read from the same cited row/header"
+    elif "missing_field" in failures:
+        candidate_b = "Candidate B = same answer completed with all requested fields"
+
+    return (
+        "Same-evidence repair worksheet (do internally; do not include this worksheet "
+        "in the final answer):\n"
+        "- Candidate A = previous answer.\n"
+        f"- {candidate_b}.\n"
+        f"- {candidate_c}.\n"
+        "- Select the candidate that exactly satisfies the question answer contract "
+        "and is best supported by cited packet text/crops.\n"
+        "- Return only the selected concise scorer-shaped answer JSON."
+    )
 
 
 def _verdict_answer_shape_failures(verdict: VerdictEvent) -> tuple[str, ...]:

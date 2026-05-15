@@ -499,6 +499,9 @@ def test_reasoner_repair_hint_targets_corresponding_row_adjudication():
     assert "Previous cited packet_ids: pkt_003" in hint
     assert "Targeted corresponding-row repair" in hint
     assert "Adjudicate candidates internally" in hint
+    assert "Same-evidence repair worksheet" in hint
+    assert "Candidate A = previous answer" in hint
+    assert "nearby confusable row/entity" in hint
 
 
 def test_reasoner_repair_hint_targets_checkbox_binding():
@@ -523,6 +526,8 @@ def test_reasoner_repair_hint_targets_checkbox_binding():
     assert "Previous answer: no" in hint
     assert "Targeted checkbox repair" in hint
     assert "nearest Yes/No" in hint
+    assert "Candidate B = checkbox marks bound to nearest labels" in hint
+    assert "alternate Yes/No binding" in hint
 
 
 def test_concise_exact_answer_blocks_reasoner_shape_retry():
@@ -1731,6 +1736,11 @@ async def test_loop_allows_contract_guard_retry(tmp_path, parser_bench_submodule
     assert "Previous answer: 0.697" in reasoner.calls[1]["prompt"]
     assert "Targeted multi-field repair" in reasoner.calls[1]["prompt"]
     assert "Adjudicate candidates internally" in reasoner.calls[1]["prompt"]
+    assert "Same-evidence repair worksheet" in reasoner.calls[1]["prompt"]
+    assert (
+        "Candidate B = same answer completed with all requested fields"
+        in reasoner.calls[1]["prompt"]
+    )
 
 
 async def test_loop_allows_single_entity_shape_retry(tmp_path, parser_bench_submodule_present):
