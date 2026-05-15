@@ -198,6 +198,8 @@ async def test_verify_prompt_includes_packet_summary_and_citations():
         backend_client=client,
     )
     prompt = client.calls[0]["prompt"]
+    assert "Grouped evidence objects the reasoner had access to" in prompt
+    assert "Binding frame" in prompt
     assert "pA" in prompt
     assert "pB" in prompt
     assert "VCC max 3.6 V" in prompt

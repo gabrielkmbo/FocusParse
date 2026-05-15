@@ -8,6 +8,7 @@ image inputs (and is told so in the packet descriptor line).
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from focusparse.evidence.packet import (
@@ -15,13 +16,15 @@ from focusparse.evidence.packet import (
     EvidencePacket,
     PacketProvenance,
 )
-from focusparse.pipeline.events import EvidenceEvent
+from focusparse.models.base import ModelResponse
+from focusparse.pipeline.events import EvidenceEvent, QuestionEvent
 from focusparse.pipeline.reasoner import (
     _MAX_PACKET_TEXT_CHARS,
     _collect_packet_images,
     _format_hint,
     _parse_reasoner_response,
     _render_packet_line,
+    answer_from_evidence,
 )
 
 
@@ -32,6 +35,7 @@ def _packet(
     bbox: tuple[float, float, float, float] = (0.1, 0.2, 0.5, 0.6),
     local_crop_ref: str = "/cache/crops/abc.png",
     page_thumbnail_ref: str = "/cache/pages/p3.png",
+    region_type: str | None = None,
     multi_scale: list[CropRef] | None = None,
     linked_crop_refs: list[str] | None = None,
     linked_neighbor_types: list[str] | None = None,
@@ -42,6 +46,7 @@ def _packet(
         packet_id=packet_id,
         page=page,
         bbox_norm=bbox,
+        region_type=region_type,
         page_thumbnail_ref=page_thumbnail_ref,
         local_crop_ref=local_crop_ref,
         multi_scale_crops=multi_scale or [],
@@ -51,6 +56,21 @@ def _packet(
         ocr_snippet=ocr_snippet,
         provenance=PacketProvenance(tool="t", args_hash=""),
     )
+
+
+class _FakeReasonerClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def predict(
+        self,
+        prompt: str,
+        images: list[Path] | None = None,
+        system: str | None = None,
+        max_tokens: int | None = None,
+    ) -> ModelResponse:
+        self.calls.append({"prompt": prompt, "images": images, "system": system})
+        return ModelResponse(text='{"answer":"0.697 V","citations":["pkt_000"],"confidence":0.8}')
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +301,40 @@ def test_render_packet_line_legacy_packet() -> None:
     assert "pkt_000" in line
     assert "page 3" in line
     assert "image scales" not in line
+
+
+def test_reasoner_prompt_uses_grouped_evidence_objects() -> None:
+    client = _FakeReasonerClient()
+    question = QuestionEvent(
+        example_id="ex",
+        question="Which value (min, typ, or max) should be used?",
+        doc_id="doc",
+        pages_available=1,
+        domain="datasheet",
+        answer_type="exact_match",
+    )
+    packet = _packet(
+        region_type="Table",
+        text_layer_snippet=(
+            "Parameter Test Conditions Min Typ Max Unit\n"
+            "FB Error Comparator Threshold DEM 0.697 0.704 0.711 V\n"
+            "Context [caption_context]: Vcc = 5V"
+        ),
+    )
+
+    asyncio.run(
+        answer_from_evidence(
+            question,
+            EvidenceEvent(packets=[packet]),
+            backend_client=client,
+        )
+    )
+
+    prompt = client.calls[0]["prompt"]
+    assert "Available grouped evidence objects" in prompt
+    assert "group_pkt_000 [table]" in prompt
+    assert "Binding frame" in prompt
+    assert "cite the primary packet ids, not group ids" in prompt
 
 
 def test_render_packet_line_multi_scale_packet() -> None:

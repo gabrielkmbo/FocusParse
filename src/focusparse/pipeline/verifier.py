@@ -45,6 +45,7 @@ from focusparse.pipeline.events import (
     QuestionEvent,
     VerdictEvent,
 )
+from focusparse.pipeline.evidence_groups import build_evidence_groups, render_evidence_groups
 
 _VALID_NEXT_ACTIONS = frozenset(
     {
@@ -222,6 +223,20 @@ def _build_verifier_prompt(
 ) -> str:
     cited_packet_ids = set(answer.citations)
     focus_text = f"{question.question}\nProposed answer: {answer.answer}"
+    contract = contract or build_answer_contract(
+        question.question,
+        answer_type=question.answer_type,
+        domain=question.domain,
+    )
+    evidence_group_block = render_evidence_groups(
+        build_evidence_groups(
+            evidence.packets,
+            question_text=focus_text,
+            contract=contract,
+        ),
+        contract=contract,
+        cited_packet_ids=cited_packet_ids,
+    )
     packet_lines = [
         _summarize_packet(
             p,
@@ -238,16 +253,13 @@ def _build_verifier_prompt(
 
     citations = ", ".join(answer.citations) if answer.citations else "(none)"
     domain_line = f"Document domain: {question.domain}\n" if question.domain else ""
-    contract = contract or build_answer_contract(
-        question.question,
-        answer_type=question.answer_type,
-        domain=question.domain,
-    )
     contract_block = render_answer_contract(contract)
     return (
         f"{domain_line}"
         f"Question: {question.question}\n\n"
         f"Question answer contract:\n{contract_block}\n\n"
+        "Grouped evidence objects the reasoner had access to:\n"
+        f"{evidence_group_block}\n\n"
         f"Evidence packets the reasoner had access to:\n{packet_block}\n\n"
         f"Reasoner's answer: {answer.answer}\n"
         f"Reasoner's cited packet_ids: {citations}\n"

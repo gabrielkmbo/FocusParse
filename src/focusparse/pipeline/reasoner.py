@@ -17,6 +17,7 @@ from pathlib import Path
 from focusparse.models.base import ModelClient, ModelResponse
 from focusparse.pipeline.answer_contract import build_answer_contract, render_answer_contract
 from focusparse.pipeline.events import AnswerEvent, EvidenceEvent, QuestionEvent
+from focusparse.pipeline.evidence_groups import build_evidence_groups, render_evidence_groups
 
 _SYSTEM_PROMPT = (
     "You are answering a question about a document using the provided evidence packets. "
@@ -258,9 +259,6 @@ async def answer_from_evidence(
     prompt (back-compat). Variant 1 adds a verbatim-grounding nudge — a
     different angle so K=2 isn't just sampling-noise on the same prompt.
     """
-    packet_list = "\n".join(
-        _render_packet_line(p, question_text=question.question) for p in evidence.packets
-    )
     hint_block = ""
     if escalation_hint:
         hint_block = (
@@ -283,14 +281,24 @@ async def answer_from_evidence(
         question_family=question_family,
     )
     contract_block = render_answer_contract(answer_contract)
+    evidence_group_block = render_evidence_groups(
+        build_evidence_groups(
+            evidence.packets,
+            question_text=question.question,
+            contract=answer_contract,
+        ),
+        contract=answer_contract,
+    )
     format_block = f"\n{format_hint}\n" if format_hint else ""
     variant_block = _sample_variant_addendum(sample_variant)
     prompt = (
         f"{hint_block}"
         f"Question: {question.question}\n\n"
         f"Question answer contract:\n{contract_block}\n\n"
-        f"Available evidence packets:\n{packet_list}\n\n"
-        f"Answer using only these packets.{format_block}{variant_block}"
+        "Available grouped evidence objects "
+        "(cite the primary packet ids, not group ids):\n"
+        f"{evidence_group_block}\n\n"
+        f"Answer using only these evidence groups.{format_block}{variant_block}"
     )
     images = _collect_packet_images(evidence)
 

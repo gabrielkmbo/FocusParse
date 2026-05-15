@@ -12,6 +12,15 @@
 - `scripts/run_hf_eval.py` now accepts `--example-ids-file` for mixed
   target/control slices, preserving duplicate dataset rows while filtering by
   newline-delimited ids.
+- Contract-only slice gate failed on
+  `results/hf/sprint-2026-05-15/contract-guard-slice-run1/`: the 60-row mixed
+  slice recovered 3 prior-wrong target rows but regressed 6 prior-correct
+  controls, net -3, so it should not be full-run as-is.
+- Added derived evidence groups for reasoner/verifier prompts without changing
+  `EvidenceEvent`: table groups bind row/header/unit/test-condition/note/caption,
+  and chart groups bind plot/legend/axis/caption/footnote. This is the next
+  post-evidence packaging layer after the contract-only slice showed too many
+  regressions.
 - Added an agent-eyes audit builder that renders wrong rows as inspectable HTML:
   page overlays, selected/candidate crops, packet text, multi-scale/context
   crop refs, answer history, verifier payloads, and trajectory steps. The
