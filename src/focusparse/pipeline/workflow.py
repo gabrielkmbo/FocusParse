@@ -27,6 +27,7 @@ from focusparse.pipeline.events import (
     RegionsEvent,
     VerdictEvent,
 )
+from focusparse.pipeline.evidence_repair import build_same_evidence_repair_context
 from focusparse.pipeline.expander import expand_context
 from focusparse.pipeline.inspector import _FINE_DETAIL_QUESTION_FAMILIES, inspect_regions
 from focusparse.pipeline.localizer import propose_regions
@@ -881,6 +882,7 @@ class FocusWorkflow:
                     verdict,
                     answer_event=answer_event,
                     question_event=question_event,
+                    evidence=retry_answer_evidence,
                 )
             elif action == "escalate_reasoner":
                 # No state change — just feed the verifier's reason into the
@@ -890,6 +892,7 @@ class FocusWorkflow:
                     verdict,
                     answer_event=answer_event,
                     question_event=question_event,
+                    evidence=retry_answer_evidence,
                 )
             else:
                 # Unknown action (future verifier extension) — accept the
@@ -2080,6 +2083,7 @@ def _build_reasoner_repair_hint(
     *,
     answer_event: AnswerEvent,
     question_event: QuestionEvent,
+    evidence: EvidenceEvent | None = None,
 ) -> str:
     """Build targeted same-evidence repair guidance from verifier diagnostics."""
 
@@ -2140,6 +2144,14 @@ def _build_reasoner_repair_hint(
             "only the same evidence."
         )
     if failures:
+        repair_context = build_same_evidence_repair_context(
+            question_event,
+            evidence,
+            answer_event,
+            failures,
+        )
+        if repair_context:
+            parts.append(repair_context)
         parts.append(_repair_candidate_worksheet(failures))
 
     return "\n".join(dict.fromkeys(parts))

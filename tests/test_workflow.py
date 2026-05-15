@@ -492,12 +492,38 @@ def test_reasoner_repair_hint_targets_corresponding_row_adjudication():
         pages_available=1,
         answer_type="exact_match",
     )
+    evidence = EvidenceEvent(
+        packets=[
+            EvidencePacket(
+                packet_id="pkt_003",
+                page=1,
+                bbox_norm=(0.1, 0.1, 0.8, 0.8),
+                page_thumbnail_ref="/tmp/page.png",
+                local_crop_ref="/tmp/crop.png",
+                text_layer_snippet=(
+                    "Products net sales 297,392 220,747 198,270\n"
+                    "Services net sales 96,169 85,200 78,129\n"
+                    "Gross margin 169,148 180,683 170,782"
+                ),
+                provenance=PacketProvenance(tool="test", args_hash=""),
+            )
+        ]
+    )
 
-    hint = _build_reasoner_repair_hint(verdict, answer_event=answer, question_event=question)
+    hint = _build_reasoner_repair_hint(
+        verdict,
+        answer_event=answer,
+        question_event=question,
+        evidence=evidence,
+    )
 
     assert "Previous answer: 169,148; minimum" in hint
     assert "Previous cited packet_ids: pkt_003" in hint
     assert "Targeted corresponding-row repair" in hint
+    assert "Same-evidence repair context" in hint
+    assert "Products net sales" in hint
+    assert "Gross margin" in hint
+    assert "Services net sales" not in hint
     assert "Adjudicate candidates internally" in hint
     assert "Same-evidence repair worksheet" in hint
     assert "Candidate A = previous answer" in hint
@@ -520,11 +546,34 @@ def test_reasoner_repair_hint_targets_checkbox_binding():
         pages_available=1,
         answer_type="boolean",
     )
+    evidence = EvidenceEvent(
+        packets=[
+            EvidencePacket(
+                packet_id="pkt_003",
+                page=1,
+                bbox_norm=(0.1, 0.1, 0.8, 0.8),
+                page_thumbnail_ref="/tmp/page.png",
+                local_crop_ref="/tmp/crop.png",
+                text_layer_snippet=(
+                    "Large accelerated filer Yes [X] No [ ]\n"
+                    "Filed all required reports Yes [X] No [ ]"
+                ),
+                provenance=PacketProvenance(tool="test", args_hash=""),
+            )
+        ]
+    )
 
-    hint = _build_reasoner_repair_hint(verdict, answer_event=answer, question_event=question)
+    hint = _build_reasoner_repair_hint(
+        verdict,
+        answer_event=answer,
+        question_event=question,
+        evidence=evidence,
+    )
 
     assert "Previous answer: no" in hint
     assert "Targeted checkbox repair" in hint
+    assert "Same-evidence repair context" in hint
+    assert "Filed all required reports Yes [X] No [ ]" in hint
     assert "nearest Yes/No" in hint
     assert "Candidate B = checkbox marks bound to nearest labels" in hint
     assert "alternate Yes/No binding" in hint

@@ -2,6 +2,15 @@
 
 ## 2026-05-15
 
+- Verifier-directed reasoner retries now include deterministic same-evidence
+  repair context derived from the packets already available to the reasoner.
+  Row/multi-field/label-value/checkbox diagnostics surface compact candidate
+  rows and checkbox lines; chart diagnostics surface chart CSV, legend, axis,
+  caption, and footnote lines. This is prompt-side repair packaging only: it
+  does not retrieve new evidence, use gold answers, add example-id logic, or
+  enable generic chart extraction everywhere. Focused workflow/evidence tests,
+  targeted Ruff checks for changed files, and full `uv run pytest` passed; a
+  canonical mixed slice is still required before any accuracy claim.
 - Verifier-directed reasoner retries now receive targeted same-evidence repair
   hints derived from `answer_shape_failure` diagnostics. Wrong-row risks get
   corresponding-row/table-row candidate adjudication guidance, missing fields

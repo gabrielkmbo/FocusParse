@@ -93,6 +93,25 @@ slots: previous answer, same-row/series/label-completed answer, and nearby
 confusable row/series/checkbox binding. This implements the first adjudication
 layer without adding broad retrieval or generic self-consistency.
 
+Current implementation checkpoint: verifier-directed retries now also receive
+deterministic repair context built from the same `EvidencePacket` list already
+available to the reasoner. For row/multi-field/label-value/checkbox failures,
+the context surfaces compact candidate rows/lines from the cited packets,
+filtering out generic weak matches such as unrelated `net sales` rows when the
+question has stronger cues like `Products` and `Gross margin`. For chart
+legend-binding failures, it surfaces chart CSV plus legend, axis, caption,
+panel, and footnote lines. This is still gold-free and same-evidence only: it
+does not run broader retrieval, force `chart_to_table`, or add example-id
+logic. The expected mechanism is lower verifier false-accept/regression risk
+when a retry is already justified by contract diagnostics; the next evidence
+gate remains the mixed 60-row slice before any full n=148 run.
+
+Verification for this checkpoint: focused repair/workflow tests passed, targeted
+Ruff checks and format checks passed for the changed files, and full
+`uv run pytest` passed with 788 passed / 156 skipped. Full repo-wide Ruff
+checks remain blocked by pre-existing unrelated lint/format issues in files
+outside this patch, so they are not evidence against this specific change.
+
 ## Slice Results
 
 | Run | Correct | Accuracy | Cost | Cost/correct | Latency mean | Page recall | Bbox IoU | Lazy rate | Recoveries | Regressions | Net | Control regressions |
