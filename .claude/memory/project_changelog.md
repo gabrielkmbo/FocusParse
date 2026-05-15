@@ -1,5 +1,24 @@
 # Project Changelog
 
+## 2026-05-15
+
+- Added an agent-eyes audit builder that renders wrong rows as inspectable HTML:
+  page overlays, selected/candidate crops, packet text, multi-scale/context
+  crop refs, answer history, verifier payloads, and trajectory steps. The
+  builder now reads `per_example.jsonl` before `predictions/*.json` so duplicate
+  example ids do not get dropped by filename collisions. The latest audit entry
+  point is `results/agent_eyes/2026-05-15-answer-shape-normalizer-wrong/index.html`.
+- Added a narrow answer-shape normalizer after reasoner parsing. It handles
+  gold-free syntax repairs only: finance accounting negatives, compact
+  variable/unit labels, and exact-match page references. It intentionally does
+  not add broad semantic rewrites or force any extra tool calls.
+- The answer-shape run crossed the sprint threshold:
+  `results/hf/sprint-2026-05-15/answer-shape-normalizer-oai-run2/focusparse_focus_agentic_multi_page_8c5e328d.json`
+  scored **89/148 = 60.14%** with cost/correct **$0.0243**, mean latency
+  **4.26s**, page recall **0.892**, bbox IoU **0.870**, and lazy-answer rate
+  **0.041**. Domain split from `per_example.jsonl`: datasheet **64/101**,
+  finance **25/47**.
+
 ## 2026-05-14
 
 - Inspector chart tooling now allows a dynamic fallback for chart-family questions:

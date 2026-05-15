@@ -30,10 +30,26 @@ from focusparse.traces.viewer import DEFAULT_STAGING_ROOT, build_view_model, ren
 
 
 def load_prediction_records(spec_dir: Path) -> list[dict[str, Any]]:
+    per_example = spec_dir / "per_example.jsonl"
+    if per_example.is_file():
+        records: list[dict[str, Any]] = []
+        for line_no, line in enumerate(per_example.read_text().splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "example_id" not in record:
+                record["example_id"] = f"row-{line_no:04d}"
+            records.append(record)
+        _assign_artifact_ids(records)
+        return records
+
     pred_dir = spec_dir / "predictions"
     if not pred_dir.is_dir():
         raise FileNotFoundError(f"prediction directory not found: {pred_dir}")
-    records: list[dict[str, Any]] = []
+    records = []
     for path in sorted(pred_dir.glob("*.json")):
         try:
             record = json.loads(path.read_text())
@@ -42,7 +58,18 @@ def load_prediction_records(spec_dir: Path) -> list[dict[str, Any]]:
         if "example_id" not in record:
             record["example_id"] = path.stem
         records.append(record)
+    _assign_artifact_ids(records)
     return records
+
+
+def _assign_artifact_ids(records: list[dict[str, Any]]) -> None:
+    """Give every row a unique viewer filename, even duplicate example ids."""
+    seen: dict[str, int] = {}
+    for idx, record in enumerate(records, start=1):
+        eid = str(record.get("example_id") or f"row-{idx:04d}")
+        count = seen.get(eid, 0) + 1
+        seen[eid] = count
+        record["_agent_eyes_artifact_id"] = eid if count == 1 else f"{eid}__{count}"
 
 
 def build_audit_rows(
@@ -94,6 +121,7 @@ def summarize_record(
         if event.get("stage") == "answer" and event.get("event_type") == "answer"
     ]
     return {
+        "artifact_id": record.get("_agent_eyes_artifact_id") or record.get("example_id"),
         "example_id": record.get("example_id"),
         "domain": record.get("domain"),
         "question": (trace.get("question") if isinstance(trace, dict) else None)
@@ -142,7 +170,10 @@ def write_agent_eyes_audit(
         limit=limit,
         benchmark_lookup=benchmark_lookup,
     )
-    by_id = {str(record.get("example_id")): record for record in records}
+    by_id = {
+        str(record.get("_agent_eyes_artifact_id") or record.get("example_id")): record
+        for record in records
+    }
     output_dir.mkdir(parents=True, exist_ok=True)
 
     search_dirs = [
@@ -155,10 +186,11 @@ def write_agent_eyes_audit(
     examples_dir.mkdir(exist_ok=True)
     for row in rows:
         eid = str(row["example_id"])
-        record = by_id[eid]
+        artifact_id = str(row.get("artifact_id") or eid)
+        record = by_id[artifact_id]
         view = build_view_model(record, search_dirs=search_dirs, staging_root=staging_root)
         html_text = render_html(view, title=f"Agent eyes · {eid}")
-        (examples_dir / f"{eid}.html").write_text(html_text)
+        (examples_dir / f"{artifact_id}.html").write_text(html_text)
 
     with (output_dir / "agent_eyes_audit.jsonl").open("w") as f:
         for row in rows:
@@ -216,6 +248,7 @@ def render_index(rows: list[dict[str, Any]], output_path: Path) -> None:
 
     for row in rows:
         eid = str(row.get("example_id") or "")
+        artifact_id = str(row.get("artifact_id") or eid)
         verdict = row.get("final_verdict") or {}
         packets = row.get("packets") or []
         packet_bits = []
@@ -231,7 +264,7 @@ def render_index(rows: list[dict[str, Any]], output_path: Path) -> None:
         parts.append(
             '<td class="p-2 align-top">'
             f'<a class="font-mono text-xs underline text-blue-700" '
-            f'href="examples/{html.escape(eid)}.html">{html.escape(eid)}</a>'
+            f'href="examples/{html.escape(artifact_id)}.html">{html.escape(eid)}</a>'
             f'<div class="text-xs text-slate-500">{html.escape(str(row.get("domain") or ""))}</div>'
             "</td>"
         )

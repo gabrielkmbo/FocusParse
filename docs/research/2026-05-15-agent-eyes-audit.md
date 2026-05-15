@@ -4,7 +4,7 @@ Purpose: make accuracy failures inspectable through the same visual scope the
 agent saw. Aggregate scores tell us whether a run improved; this audit is for
 answering why a specific example failed.
 
-## Artifact
+## Artifacts
 
 Generated from the complete context-only best run:
 
@@ -31,6 +31,19 @@ Machine-readable summaries:
 Each example page renders the page overlays, candidate/selected boxes, final
 evidence packets, tight crops, context crops, linked neighbor crops, OCR/text
 snippets, answer attempts, verifier payloads, and trajectory steps.
+
+Regenerated after the 60.14% answer-shape run:
+
+`results/hf/sprint-2026-05-15/answer-shape-normalizer-oai-run2/focusparse_focus_agentic_multi_page_8c5e328d`
+
+Entry point:
+
+`results/agent_eyes/2026-05-15-answer-shape-normalizer-wrong/index.html`
+
+Important implementation detail: the audit builder now prefers
+`per_example.jsonl` over `predictions/*.json`. The latter has one filename
+collision for duplicated `example_id` values, while `per_example.jsonl`
+preserves all 148 scored rows.
 
 ## First-Pass Findings
 
@@ -97,6 +110,8 @@ Final verifier state among these 30:
 
 - The harness is no longer primarily failing by not cropping anything useful.
   Many top wrong rows have high page recall and high IoU.
+- The 60.14% run confirms that narrow answer-shape normalization can recover
+  scorer-compatible cases without forcing extra tool use.
 - We need a stronger final-answer layer for three narrow classes:
   scorer-compatible formatting, multi-field/table-row completion, and
   multi-clause answer completeness.
@@ -106,4 +121,3 @@ Final verifier state among these 30:
 - More first-pass tools are unlikely to fix these rows unless the tool output
   changes answer selection. The next repairs should be verifier-directed and
   answer-shape-aware, not broad chart/tool overuse.
-

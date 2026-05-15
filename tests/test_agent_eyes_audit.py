@@ -122,3 +122,27 @@ def test_load_prediction_records_uses_path_stem_when_missing_id(tmp_path: Path) 
     records = aea.load_prediction_records(spec)
 
     assert records[0]["example_id"] == "dat-x-0001"
+    assert records[0]["_agent_eyes_artifact_id"] == "dat-x-0001"
+
+
+def test_load_prediction_records_prefers_per_example_and_preserves_duplicates(
+    tmp_path: Path,
+) -> None:
+    spec = tmp_path / "spec"
+    spec.mkdir()
+    (spec / "per_example.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"example_id": "dat-x-0001", "answer_correct": 0.0}),
+                json.dumps({"example_id": "dat-x-0001", "answer_correct": 1.0}),
+            ]
+        )
+    )
+
+    records = aea.load_prediction_records(spec)
+
+    assert [r["example_id"] for r in records] == ["dat-x-0001", "dat-x-0001"]
+    assert [r["_agent_eyes_artifact_id"] for r in records] == [
+        "dat-x-0001",
+        "dat-x-0001__2",
+    ]

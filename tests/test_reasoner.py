@@ -737,3 +737,73 @@ def test_phase3b_pick_best_answer_single_sample_returns_zero() -> None:
 
     samples = [AnswerEvent(answer="x", citations=[], confidence=0.5)]
     assert pick_best_answer(samples, answer_type="exact_match") == 0
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-15: scorer-compatible answer-shape normalization
+# ---------------------------------------------------------------------------
+
+
+def test_answer_shape_normalizes_finance_accounting_negative() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "$(40) million",
+            answer_type="numeric",
+            domain="finance",
+        )
+        == "-40"
+    )
+
+
+def test_answer_shape_leaves_datasheet_parentheses_alone() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "(40) kΩ",
+            answer_type="numeric",
+            domain="datasheet",
+        )
+        == "(40) kΩ"
+    )
+
+
+def test_answer_shape_spaces_variable_value_units() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Vgs=2.9V",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "Vgs = 2.9 V"
+    )
+
+
+def test_answer_shape_formats_page_reference() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Cache type register and TCM type register on page B3-10",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "Cache type register and TCM type register; page B3-10"
+    )
+
+
+def test_answer_shape_does_not_parenthesize_tickers() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "GOOG",
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "GOOG"
+    )
