@@ -265,14 +265,14 @@ After inspecting failures such as "which instruction", "which mode", and
 from the full run whose initial verifier action was `escalate_reasoner`
 (29 rows, including prior-correct controls).
 
-| Metric                      | Value       |
-| --------------------------- | ----------- |
-| Prior full-run slice        | 13/29       |
-| New slice                   | 13/29       |
-| Net delta                   | **0 rows**  |
-| Prior wrong recovered       | 3 rows      |
-| Prior correct regressed     | 3 rows      |
-| Retries observed            | 0 in flips  |
+| Metric                  | Value      |
+| ----------------------- | ---------- |
+| Prior full-run slice    | 13/29      |
+| New slice               | 13/29      |
+| Net delta               | **0 rows** |
+| Prior wrong recovered   | 3 rows     |
+| Prior correct regressed | 3 rows     |
+| Retries observed        | 0 in flips |
 
 Decision: do **not** ship the broader vocabulary gate. The apparent recoveries
 are mostly initial-answer sampling variance (`retries_used=0`), and the equal
@@ -289,7 +289,7 @@ citations, shorter for exact/numeric/boolean/multiple-choice, higher
 confidence).
 
 | Metric             | K=2 run             | Δ vs current best |
-| ------------------ | ------------------ | ----------------- |
+| ------------------ | ------------------- | ----------------- |
 | Overall accuracy   | **52.70%** (78/148) | **-4.7pp**        |
 | Datasheet accuracy | 59.4% (60/101)      | -5 rows           |
 | Finance accuracy   | 38.3% (18/47)       | -2 rows           |
@@ -368,8 +368,8 @@ the reasoner both tight and context crops per evidence packet. The run was
 stable, but it did not improve the full-table result and it materially increased
 reported answer-stage cost.
 
-| Metric             | Multi-scale K=1    | Δ vs current best |
-| ------------------ | ------------------ | ----------------- |
+| Metric             | Multi-scale K=1     | Δ vs current best |
+| ------------------ | ------------------- | ----------------- |
 | Overall accuracy   | **56.08%** (83/148) | **-1.4pp**        |
 | Datasheet accuracy | 61.4% (62/101)      | -3 rows           |
 | Finance accuracy   | 44.7% (21/47)       | +1 row            |
@@ -413,7 +413,7 @@ first-pass chart-to-table run regressed overall.
 | Bbox IoU           | 0.833                | -0.018            |
 | Lazy answer rate   | 0.027                | -0.007            |
 | Reported cost      | $2.19                | +$0.09            |
-| Cost per correct   | $0.027              | +$0.003           |
+| Cost per correct   | $0.027               | +$0.003           |
 | Mean latency       | 5.30s                | +0.92s            |
 
 Flip analysis vs the 57.4% current best: 7 recovered rows, 12 regressed rows
@@ -432,6 +432,36 @@ fallback was tightened after this run so ambiguous chart-like families such as
 the planner explicitly requests `evidence_types=["chart", ...]`. The next
 chart path should be verifier-triggered repair or fallback-only extraction, not
 global chart-to-table on every explicit chart region.
+
+## OAI-cheap ceiling: 57.4% (Phase 3a v2 + 3d + 3b)
+
+After exhaustive iteration on the `cheap_oai` (gpt-4.1-nano) planner /
+router, the Phase 3a v2 + 3d + 3b stack at **57.43%** has emerged as a
+hard ceiling. Every additional lever we've stacked on top regresses:
+
+| Stack addition               | Δ vs 57.4% best         |
+| ---------------------------- | ----------------------- |
+| Phase 3e v1 (strict shape)   | −4.7pp                  |
+| Phase 3e v2 (narrowed shape) | −2.7pp                  |
+| multi_scale_packets          | −2.0pp                  |
+| chart_to_table + fallback    | −3.4pp                  |
+| chart-fallback + Phase 3b    | −3.3pp (killed mid-run) |
+
+Mechanism: gpt-4.1-nano as the planner/router makes weaker routing
+decisions than Gemini Flash. Additional context crops or stricter
+verifier rules force retries on questions whose ROI hinges on
+high-quality routing — and those retries land on worse answers. We've
+hit the model-capacity ceiling for this cheap tier.
+
+**Killed Gemini-cheap partial signal**: +12.8pp on n=39 with the same
+Phase 3a v2 + 3d stack. That projects to ~62% if it scales to n=148.
+Phase 3b added another +5pp on cheap_oai, so the projected Gemini-cheap
+full-stack result is **≥60%**.
+
+**Path to 60%**: wait for Gemini free-tier daily quota reset (midnight
+Pacific Friday, ~1 hour from this writing). Then rerun the full Phase
+3a v2 + 3d + 3b stack on Gemini cheap, without the regressing levers
+(Phase 3e, multi_scale, chart-fallback stay off).
 
 ## Phase 4 — Stopping condition
 
