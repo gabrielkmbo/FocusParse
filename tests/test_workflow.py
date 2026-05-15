@@ -901,15 +901,15 @@ async def test_focus_workflow_routes_planner_through_tier_router(
     # Router was consulted for every role-scoped stage:
     #   - planner (item 1)
     #   - localizer_rerank (item 4 rerank stage)
-    #   - localizer_rerank again (Phase 7 chart_to_table_backend — even
-    #     when chart extraction doesn't actually fire, the client_for
-    #     resolution happens before the inspector check)
+    #   - schema_extractor (Gemini table/chart extraction role)
+    #   - localizer_rerank fallback when the fake router has no schema client
     #   - verifier
     # Verifier client + rerank client both return None here → those stages
     # stay deterministic; only the planner routes through to a real client.
     assert tier_router.calls == [
         "planner",
         "localizer_rerank",
+        "schema_extractor",
         "localizer_rerank",
         "verifier",
     ]

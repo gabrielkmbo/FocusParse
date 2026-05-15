@@ -19,6 +19,11 @@ def test_compute_usd_gemini_flash_small_usage():
     assert 0.0 < usd < 0.01
 
 
+def test_compute_usd_gemini_31_pro_schema_extraction_usage():
+    usd = compute_usd("gemini", "gemini-3.1-pro-preview", tokens_in=1_136, tokens_out=252)
+    assert usd == 0.005296
+
+
 def test_compute_usd_unknown_model_returns_none():
     assert compute_usd("openai", "gpt-nonexistent-99", 100, 100) is None
 

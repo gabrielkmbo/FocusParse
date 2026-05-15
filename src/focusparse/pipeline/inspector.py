@@ -269,6 +269,44 @@ _CHART_QUESTION_FAMILIES = frozenset(
     }
 )
 _CHART_FIGURE_CLASSES = frozenset({"bar_chart", "line_chart", "candlestick"})
+_STRUCTURED_EXTRACTION_QUESTION_FAMILIES = frozenset(
+    {
+        "spec_table_cell_retrieval",
+        "min_typ_max_disambiguation",
+        "table_note_fusion",
+        "condition_footnote_fusion",
+        "cross_page_continuation",
+        "distant_evidence_fusion",
+        "near_miss_distractor",
+        "confusable_label",
+        "direct_label_reading",
+        "chart_table_cross_ref",
+    }
+)
+_STRUCTURED_EXTRACTION_REGION_TYPES = frozenset(
+    {
+        "table",
+        "table cell",
+        "table_cell",
+        "key-value region",
+        "key_value_region",
+        "form",
+        "checkbox-selected",
+        "checkbox_selected",
+        "checkbox-unselected",
+        "checkbox_unselected",
+        "text",
+    }
+)
+_STRUCTURED_EXTRACTION_CUE_RE = re.compile(
+    r"\b("
+    r"among|checkbox|check\s*mark|compare|condition|corresponding|field|"
+    r"highest|label|lowest|min(?:imum)?|max(?:imum)?|part\s*number|row|table|"
+    r"typ(?:ical)?|unit|value"
+    r")\b",
+    re.IGNORECASE,
+)
+_STRUCTURED_EXTRACTION_MAX_PACKETS = 2
 
 # Sprint 2026-05-05 (Phase B2): question families where auto-zoom (run_python
 # LANCZOS supersample) is worth firing even on regions LARGER than
@@ -321,6 +359,7 @@ async def inspect_regions(
     multi_scale: bool = False,
     chart_to_table_enabled: bool = False,
     chart_to_table_backend: Any = None,
+    schema_extractor_backend: Any = None,
 ) -> EvidenceEvent:
     """Produce real `EvidencePacket`s via the tool belt.
 
@@ -365,6 +404,11 @@ async def inspect_regions(
     )
 
     chart_extraction_active = chart_to_table_enabled and wants_chart
+    structured_extraction_active = _wants_structured_region_extraction(
+        plan.question_family,
+        evidence_keys=evidence_keys,
+        question_text=question.question,
+    )
 
     packets: list[EvidencePacket] = []
     for idx, region in enumerate(ranked):
@@ -379,6 +423,10 @@ async def inspect_regions(
             multi_scale=multi_scale,
             chart_extraction_active=chart_extraction_active,
             chart_to_table_backend=chart_to_table_backend,
+            structured_extraction_active=(
+                structured_extraction_active and idx < _STRUCTURED_EXTRACTION_MAX_PACKETS
+            ),
+            schema_extractor_backend=schema_extractor_backend,
             chart_context_active=wants_chart,
             question_family=plan.question_family,
             question_text=question.question,
@@ -406,6 +454,8 @@ async def _inspect_one_region(
     multi_scale: bool = False,
     chart_extraction_active: bool = False,
     chart_to_table_backend: Any = None,
+    structured_extraction_active: bool = False,
+    schema_extractor_backend: Any = None,
     chart_context_active: bool = False,
     question_family: str | None = None,
     question_text: str | None = None,
@@ -702,6 +752,52 @@ async def _inspect_one_region(
                 if fallback_confidence > 0 and not is_visual:
                     confidence = min(confidence, fallback_confidence)
 
+    if (
+        structured_extraction_active
+        and schema_extractor_backend is not None
+        and crop_ref
+        and crop_ref != page_thumbnail_ref
+        and _region_supports_structured_extraction(region_type)
+    ):
+        try:
+            from focusparse.tools.structured_extract import (
+                StructuredRegionInput,
+                extract_structured_region_llm,
+            )
+
+            text_context = "\n".join(
+                part
+                for part in (text_layer_snippet or "", ocr_snippet or "")
+                if str(part or "").strip()
+            )
+            structured_out = await extract_structured_region_llm(
+                StructuredRegionInput(
+                    crop_ref=crop_ref,
+                    question=question_text or "",
+                    region_type=region_type,
+                    text_context=text_context,
+                ),
+                backend_client=schema_extractor_backend,
+            )
+            if structured_out.confidence > 0 or any(
+                (
+                    structured_out.headers,
+                    structured_out.units,
+                    structured_out.candidate_rows,
+                    structured_out.key_values,
+                    structured_out.checkboxes,
+                    structured_out.notes,
+                )
+            ):
+                crop_signals.append("structured_extract:gemini")
+                ocr_snippet = _append_structured_region_note(
+                    ocr_snippet,
+                    structured_out.render_note(),
+                )
+        except Exception as exc:  # noqa: BLE001 — advisory helper, never raise
+            crop_signals.append("structured_extract:error")
+            logger.debug("structured_extract failed for %s: %s", packet_id, exc)
+
     # --- 3. (Phase 6 #7 / sprint Phase 3) chart_to_table extraction.
     # Fires only when the question is a chart-reading family AND the region
     # is a chart-class figure AND the tight crop succeeded. Best-effort:
@@ -814,6 +910,32 @@ def _prepend_chart_note(ocr_snippet: str | None, note: str) -> str:
     if ocr_snippet:
         return f"{note} OCR: {ocr_snippet}"
     return note
+
+
+def _append_structured_region_note(ocr_snippet: str | None, note: str) -> str:
+    if ocr_snippet:
+        return f"{ocr_snippet}\n{note}"
+    return note
+
+
+def _wants_structured_region_extraction(
+    question_family: str | None,
+    *,
+    evidence_keys: set[str],
+    question_text: str | None,
+) -> bool:
+    family = question_family or ""
+    if family in _STRUCTURED_EXTRACTION_QUESTION_FAMILIES:
+        return True
+    if evidence_keys & {"table", "form", "text", "checkbox"}:
+        return True
+    return bool(_STRUCTURED_EXTRACTION_CUE_RE.search(question_text or ""))
+
+
+def _region_supports_structured_extraction(region_type: str | None) -> bool:
+    if region_type is None:
+        return True
+    return region_type in _STRUCTURED_EXTRACTION_REGION_TYPES
 
 
 def _chart_scale_hint(ocr_snippet: str | None, *, question_text: str | None = None) -> str | None:

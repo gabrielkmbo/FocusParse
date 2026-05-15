@@ -29,10 +29,14 @@ class GeminiClient:
         model: str,
         max_tokens: int | None = None,
         thinking_budget: int | None = None,
+        thinking_level: str | None = None,
+        media_resolution: str | None = None,
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens or 4096
         self.thinking_budget = thinking_budget or 1024
+        self.thinking_level = thinking_level
+        self.media_resolution = media_resolution
         # Accept either env var — CLAUDE.md says GOOGLE_API_KEY, some parser-bench
         # scripts use GEMINI_API_KEY. Prefer GEMINI_API_KEY if both set.
         self.api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
@@ -43,6 +47,7 @@ class GeminiClient:
         images: list[Path] | None = None,
         system: str | None = None,
         max_tokens: int | None = None,
+        response_schema: Any | None = None,
     ) -> ModelResponse:
         if not self.api_key:
             raise RuntimeError("GEMINI_API_KEY (or GOOGLE_API_KEY) not set; cannot call Gemini.")
@@ -60,8 +65,18 @@ class GeminiClient:
 
         gen_config_kwargs: dict[str, Any] = {
             "max_output_tokens": max_tokens or self.max_tokens,
-            "thinking_config": types.ThinkingConfig(thinking_budget=self.thinking_budget),
+            "thinking_config": _thinking_config(
+                types,
+                thinking_budget=self.thinking_budget,
+                thinking_level=self.thinking_level,
+            ),
         }
+        media_resolution = _media_resolution(types, self.media_resolution)
+        if media_resolution is not None:
+            gen_config_kwargs["media_resolution"] = media_resolution
+        if response_schema is not None:
+            gen_config_kwargs["response_mime_type"] = "application/json"
+            gen_config_kwargs["response_schema"] = response_schema
         if system:
             gen_config_kwargs["system_instruction"] = system
 
@@ -96,3 +111,28 @@ class GeminiClient:
 
     def count_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
+
+
+def _thinking_config(types: Any, *, thinking_budget: int, thinking_level: str | None) -> Any:
+    if thinking_level:
+        level = _enum_value(types.ThinkingLevel, thinking_level, prefix="THINKING_LEVEL")
+        return types.ThinkingConfig(thinking_level=level)
+    return types.ThinkingConfig(thinking_budget=thinking_budget)
+
+
+def _media_resolution(types: Any, value: str | None) -> Any | None:
+    if not value:
+        return None
+    return _enum_value(types.MediaResolution, value, prefix="MEDIA_RESOLUTION")
+
+
+def _enum_value(enum_type: Any, value: str, *, prefix: str) -> Any:
+    normalized = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+    candidates = [normalized]
+    if not normalized.startswith(prefix):
+        candidates.append(f"{prefix}_{normalized}")
+    for candidate in candidates:
+        if hasattr(enum_type, candidate):
+            return getattr(enum_type, candidate)
+    valid = ", ".join(getattr(item, "name", str(item)) for item in enum_type)
+    raise ValueError(f"Unsupported Gemini enum value {value!r}; expected one of: {valid}")

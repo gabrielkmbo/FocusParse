@@ -24,6 +24,8 @@ class TierSpec(BaseModel):
     max_tokens: int | None = None
     max_completion_tokens: int | None = None
     thinking_budget: int | None = None
+    thinking_level: str | None = None
+    media_resolution: str | None = None
 
 
 class BudgetSpec(BaseModel):
@@ -47,7 +49,7 @@ class LayoutEndpointSpec(BaseModel):
 
 
 class DatasetSpec(BaseModel):
-    source: str = "hf"                         # "hf" | "local"
+    source: str = "hf"  # "hf" | "local"
     hf_repo: str = "gabrielbo/parser-bench"
     revision: str | None = None
     local_root: str | None = None
@@ -76,7 +78,7 @@ class TracesSpec(BaseModel):
 
 class FocusConfig(BaseModel):
     tiers: dict[str, TierSpec]
-    roles: dict[str, str]                      # role name -> tier name
+    roles: dict[str, str]  # role name -> tier name
     budget: BudgetSpec
     escalation: EscalationSpec
     endpoints: dict[str, LayoutEndpointSpec]

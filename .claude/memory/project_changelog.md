@@ -2,6 +2,18 @@
 
 ## 2026-05-15
 
+- Added a dedicated Gemini schema-extraction path for CV-heavy table/chart/
+  element parsing. `configs/default.yaml` now defines
+  `schema_extractor: gemini_schema_extractor` using
+  `gemini-3.1-pro-preview` with `thinking_level=high` and
+  `media_resolution=high`, plus `gemini_schema_fast` as an opt-in Flash
+  fallback. Gemini client config now supports `thinking_level`,
+  `media_resolution`, and native JSON response schemas. Chart-to-table and
+  the new gated structured-region extractor use this role while planner,
+  reasoner, and verifier tiers stay unchanged. Live smoke against a cached
+  datasheet image succeeded with structured table rows; focused tests and
+  targeted Ruff checks passed. A mixed slice is still required before any
+  headline accuracy claim.
 - Verifier-directed reasoner retries now include deterministic same-evidence
   repair context derived from the packets already available to the reasoner.
   Row/multi-field/label-value/checkbox diagnostics surface compact candidate

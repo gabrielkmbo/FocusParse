@@ -45,6 +45,8 @@ def _build_client(tier: TierSpec) -> ModelClient:
             model=tier.model,
             max_tokens=tier.max_tokens,
             thinking_budget=tier.thinking_budget,
+            thinking_level=tier.thinking_level,
+            media_resolution=tier.media_resolution,
         )
     raise ValueError(f"Unknown provider: {tier.provider!r}")
 

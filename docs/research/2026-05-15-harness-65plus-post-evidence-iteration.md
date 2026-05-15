@@ -112,6 +112,40 @@ Ruff checks and format checks passed for the changed files, and full
 checks remain blocked by pre-existing unrelated lint/format issues in files
 outside this patch, so they are not evidence against this specific change.
 
+Gemini schema-extraction checkpoint: after reviewing the current Gemini docs, I
+added a dedicated `schema_extractor` role rather than changing the global
+planner/reasoner/verifier tiers. The role uses `gemini-3.1-pro-preview` with
+`thinking_level=high` and `media_resolution=high`; `gemini_schema_fast`
+(`gemini-3-flash-preview`) is available as an opt-in lower-cost A/B tier via
+`FOCUSPARSE_TIER_SCHEMA_EXTRACTOR=gemini_schema_fast`. The research basis:
+Google now identifies Gemini 3.1 Pro as the migration target after Gemini 3 Pro
+Preview shutdown, Gemini document understanding explicitly covers charts and
+tables plus structured extraction, Gemini 3 supports structured JSON outputs,
+and high media resolution is recommended when extra visual detail is worth the
+latency/cost tradeoff.
+
+Implementation details:
+
+- `GeminiClient` now supports `thinking_level`, `media_resolution`, and native
+  JSON response schemas when the backend is Gemini.
+- `chart_to_table` now receives the `schema_extractor` client instead of the
+  reranker tier, so chart CSV extraction can use Gemini 3.1 Pro while remaining
+  gated by existing chart-family/region checks.
+- Added `tools/structured_extract.py`, a fail-closed table/form/text schema
+  extractor. It asks Gemini for compact headers, units, candidate rows,
+  key-values, checkboxes, and notes, then appends a concise
+  `Gemini structured extraction` note to the packet OCR channel. Public
+  `EvidencePacket`/event schemas are unchanged.
+- The structured extractor is gated to table/form/text/checkbox-like regions,
+  table/confusable/field-shaped question families or cues, and at most the top
+  two inspected packets per example.
+- Updated pricing for Gemini 3.1 Pro / Gemini 3 Flash list prices used by this
+  path. A live smoke against a cached datasheet page succeeded:
+  `gemini-3.1-pro-preview` produced a table schema for digital output pin rows
+  with `confidence=0.95`; a raw image smoke cost about `$0.0053` for 1,136 input
+  and 252 output tokens. This is not a benchmark result, only an integration
+  validity check.
+
 ## Slice Results
 
 | Run | Correct | Accuracy | Cost | Cost/correct | Latency mean | Page recall | Bbox IoU | Lazy rate | Recoveries | Regressions | Net | Control regressions |

@@ -461,6 +461,18 @@ class FocusWorkflow:
             return None
         return endpoints.get("layout") if isinstance(endpoints, dict) else None
 
+    def _schema_extraction_client(self) -> ModelClient | None:
+        """Resolve the gated table/chart schema-extraction model.
+
+        The default role is Gemini 3.1 Pro with high media resolution. Older
+        configs without `schema_extractor` fall back to the previous
+        localizer-rerank backend so chart extraction remains backward
+        compatible.
+        """
+        if self.tool_set != "full":
+            return None
+        return self._client_for("schema_extractor") or self._client_for("localizer_rerank")
+
     def _layout_cache_dir(self) -> Path | None:
         """Resolve the on-disk cache dir for layout responses.
 
@@ -1161,6 +1173,7 @@ class FocusWorkflow:
             from focusparse.pipeline.inspector_react import react_inspect
 
             inspector_client = self._client_for("inspector_dispatch")
+            schema_extractor_client = self._schema_extraction_client()
             result = await react_inspect(
                 question_event,
                 plan,
@@ -1173,7 +1186,8 @@ class FocusWorkflow:
                 auto_zoom=self.auto_zoom,
                 multi_scale=self.multi_scale_packets,
                 chart_to_table_enabled=self.chart_to_table_enabled,
-                chart_to_table_backend=self._client_for("localizer_rerank"),
+                chart_to_table_backend=schema_extractor_client,
+                schema_extractor_backend=schema_extractor_client,
             )
             evidence = result.evidence
             n_real_packets = sum(
@@ -1227,6 +1241,7 @@ class FocusWorkflow:
             )
             return evidence
 
+        schema_extractor_client = self._schema_extraction_client()
         evidence = await inspect_regions(
             question_event,
             plan,
@@ -1239,11 +1254,11 @@ class FocusWorkflow:
             multi_scale=self.multi_scale_packets,
             chart_to_table_enabled=self.chart_to_table_enabled,
             # Phase 7 (2026-05-11): swap the OCR-based chart extractor for
-            # a vision-LLM call. localizer_rerank tier is mid (claude-haiku),
-            # cheap enough at ~$0.005/chart and capable enough to read most
-            # finance charts where the OCR pipeline returned empty CSV on
-            # 100% of Phase 4 attempts.
-            chart_to_table_backend=self._client_for("localizer_rerank"),
+            # a vision-LLM call. Phase 8 (2026-05-15) routes this through the
+            # dedicated schema_extractor role so table/chart CV parsing can use
+            # Gemini 3.1 Pro without changing planner/reasoner/verifier tiers.
+            chart_to_table_backend=schema_extractor_client,
+            schema_extractor_backend=schema_extractor_client,
         )
         n_real_packets = sum(
             1 for p in evidence.packets if p.provenance.tool != "skeleton_inspector_fallback"
