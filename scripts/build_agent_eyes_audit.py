@@ -203,6 +203,7 @@ def render_index(rows: list[dict[str, Any]], output_path: Path) -> None:
     ]
     for header in [
         "example",
+        "question",
         "family",
         "metrics",
         "prediction",
@@ -232,6 +233,11 @@ def render_index(rows: list[dict[str, Any]], output_path: Path) -> None:
             f'<a class="font-mono text-xs underline text-blue-700" '
             f'href="examples/{html.escape(eid)}.html">{html.escape(eid)}</a>'
             f'<div class="text-xs text-slate-500">{html.escape(str(row.get("domain") or ""))}</div>'
+            "</td>"
+        )
+        parts.append(
+            '<td class="p-2 align-top max-w-sm text-xs">'
+            f"{html.escape(_shorten(str(row.get('question') or ''), 220))}"
             "</td>"
         )
         parts.append(
