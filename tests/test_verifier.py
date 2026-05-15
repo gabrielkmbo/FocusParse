@@ -58,17 +58,13 @@ class _FakeVerifierClient:
         return max(1, len(text) // 4)
 
 
-def _question(
-    domain: str | None = None,
-    answer_type: str | None = None,
-) -> QuestionEvent:
+def _question(domain: str | None = None) -> QuestionEvent:
     return QuestionEvent(
         example_id="ex-1",
         question="What is the max supply voltage on the MCU?",
         doc_id="datasheet-A",
         pages_available=10,
         domain=domain,
-        answer_type=answer_type,
     )
 
 
@@ -539,34 +535,3 @@ async def test_verify_llm_robust_to_bad_payloads(bad_payload):
     assert verdict.supported is True
     assert verdict.next_action == "accept"
     assert verdict.reason == "skeleton_always_accept"
-
-
-# ---------------------------------------------------------------------------
-# answer_type passthrough into verifier user prompt (Phase 3e v2 was
-# reverted on 2026-05-14 because both versions regressed on cheap_oai
-# n=148: v1 -4.7pp, v2 -2.7pp vs the no-3e 57.4% best. The answer_type
-# passthrough stayed in `_build_verifier_prompt` because it is harmless
-# and reusable for future verifier-side levers.)
-# ---------------------------------------------------------------------------
-
-
-def test_verifier_user_prompt_passes_answer_type_when_present() -> None:
-    """`_build_verifier_prompt` includes `Question answer_type: <type>` in
-    the user prompt when `question.answer_type` is set, and omits the line
-    when it's None (back-compat for callers / tests that don't populate
-    the field)."""
-    from focusparse.pipeline.verifier import _build_verifier_prompt
-
-    prompt_with_type = _build_verifier_prompt(
-        _question(answer_type="exact_match"),
-        _evidence(_packet()),
-        _answer(),
-    )
-    assert "Question answer_type: exact_match" in prompt_with_type
-
-    prompt_without_type = _build_verifier_prompt(
-        _question(),
-        _evidence(_packet()),
-        _answer(),
-    )
-    assert "answer_type" not in prompt_without_type

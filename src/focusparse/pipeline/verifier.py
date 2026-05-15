@@ -209,12 +209,8 @@ def _build_verifier_prompt(
 
     citations = ", ".join(answer.citations) if answer.citations else "(none)"
     domain_line = f"Document domain: {question.domain}\n" if question.domain else ""
-    answer_type_line = (
-        f"Question answer_type: {question.answer_type}\n" if question.answer_type else ""
-    )
     return (
         f"{domain_line}"
-        f"{answer_type_line}"
         f"Question: {question.question}\n\n"
         f"Evidence packets the reasoner had access to:\n{packet_block}\n\n"
         f"Reasoner's answer: {answer.answer}\n"

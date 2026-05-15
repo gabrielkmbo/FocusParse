@@ -246,11 +246,9 @@ _QUESTION_STOPWORDS = frozenset(
 # curve_axis_reading}. Expanded 2026-05-11 (harness-growth Phase 1) to cover
 # the rest of the planner's chart-bearing families because:
 #
-#   1. The gate is `chart_extraction_active AND
-#      _region_is_chart(region, question_family=...)`. Explicit chart
-#      subclasses always pass. Generic/unknown visual subclasses pass only
-#      when the planner explicitly asked for chart evidence and the reranker
-#      marked the region as primary/high-relevance.
+#   1. The gate is `chart_extraction_active AND _region_is_chart(region)`.
+#      Non-chart regions cannot trigger chart_to_table even if the family is
+#      listed, so expansion is safe for non-chart questions.
 #   2. chart_to_table failures collapse to an empty CSV with the visual crop
 #      preserved, so a low-quality chart never poisons the packet.
 #   3. Finance is the weak domain in the headline (~32-43% vs ~50% datasheets)
@@ -271,8 +269,6 @@ _CHART_QUESTION_FAMILIES = frozenset(
     }
 )
 _CHART_FIGURE_CLASSES = frozenset({"bar_chart", "line_chart", "candlestick"})
-_QUERY_CHART_FALLBACK_FIGURE_CLASSES = frozenset({"other", "screenshot"})
-_QUERY_CHART_FALLBACK_MIN_RELEVANCE = 0.70
 
 # Sprint 2026-05-05 (Phase B2): question families where auto-zoom (run_python
 # LANCZOS supersample) is worth firing even on regions LARGER than
@@ -358,17 +354,9 @@ async def inspect_regions(
     wants_chart = (
         plan.question_family or ""
     ) in _CHART_QUESTION_FAMILIES or "chart" in evidence_keys
-    allow_query_chart_fallback = "chart" in evidence_keys
     ranked_all = sorted(
         regions.candidates,
-        key=lambda r: (
-            -_rank_score(
-                r,
-                boosted_types,
-                wants_chart=wants_chart,
-                allow_query_chart_fallback=allow_query_chart_fallback,
-            )
-        ),
+        key=lambda r: -_rank_score(r, boosted_types, wants_chart=wants_chart),
     )
     ranked = _select_regions_for_inspection(
         ranked_all,
@@ -392,7 +380,6 @@ async def inspect_regions(
             chart_extraction_active=chart_extraction_active,
             chart_to_table_backend=chart_to_table_backend,
             chart_context_active=wants_chart,
-            allow_query_chart_fallback=allow_query_chart_fallback,
             question_family=plan.question_family,
             question_text=question.question,
         )
@@ -420,7 +407,6 @@ async def _inspect_one_region(
     chart_extraction_active: bool = False,
     chart_to_table_backend: Any = None,
     chart_context_active: bool = False,
-    allow_query_chart_fallback: bool = False,
     question_family: str | None = None,
     question_text: str | None = None,
 ) -> EvidencePacket:
@@ -518,11 +504,7 @@ async def _inspect_one_region(
         and is_visual
         and crop_ref
         and crop_ref != page_thumbnail_ref
-        and _region_is_chart(
-            region,
-            question_family=question_family,
-            allow_query_fallback=allow_query_chart_fallback,
-        )
+        and _region_is_chart(region)
         and _allow_proactive_context_crop(question_family, region, packet_index=idx)
     ):
         context_bbox = _expand_bbox(region.bbox_norm, pad=_CHART_CONTEXT_PAD)
@@ -732,11 +714,7 @@ async def _inspect_one_region(
         and is_visual
         and crop_ref
         and crop_ref != page_thumbnail_ref
-        and _region_is_chart(
-            region,
-            question_family=question_family,
-            allow_query_fallback=allow_query_chart_fallback,
-        )
+        and _region_is_chart(region)
     ):
         figure_class = _figure_class(region) or "chart"
         crop_signals.append("chart_to_table:attempt")
@@ -821,54 +799,15 @@ async def _inspect_one_region(
 # ---------------------------------------------------------------------------
 
 
-def _region_is_chart(
-    region: RegionCandidate,
-    *,
-    question_family: str | None = None,
-    allow_query_fallback: bool = False,
-) -> bool:
-    """True when a visual region is likely enough to justify chart tooling.
+def _region_is_chart(region: RegionCandidate) -> bool:
+    """True when the region's figure_class signals a chart we can extract.
 
     figure_class is carried as `figure_class=<name>` by the localizer and
     has historically appeared as `figure_class:<name>` in tests/older traces.
-    We accept both.
-
-    The primary path is still the layout endpoint's chart subclass. The
-    fallback path covers a common Modal-layout miss: chart-grounded questions
-    where the reranker identifies a generic `picture`/`other` region as the
-    answer carrier. This does not globally spend chart_to_table calls because
-    callers must opt into query fallback only when the planner explicitly asked
-    for chart evidence.
+    We accept both so chart_to_table gates on the layout endpoint's chart
+    classification instead of silently missing live detections.
     """
-    figure_class = _figure_class(region)
-    if (figure_class or "") in _CHART_FIGURE_CLASSES:
-        return True
-    if not allow_query_fallback:
-        return False
-    return _query_chart_fallback_allowed(region, question_family=question_family)
-
-
-def _query_chart_fallback_allowed(
-    region: RegionCandidate,
-    *,
-    question_family: str | None,
-) -> bool:
-    if (question_family or "") not in _CHART_QUESTION_FAMILIES:
-        return False
-    if (region.region_type or "").lower() not in _VISUAL_REGION_TYPES:
-        return False
-    figure_class = _figure_class(region)
-    if figure_class and figure_class not in _QUERY_CHART_FALLBACK_FIGURE_CLASSES:
-        return False
-    return _strong_query_chart_rerank_signal(region)
-
-
-def _strong_query_chart_rerank_signal(region: RegionCandidate) -> bool:
-    if region.needed_for == "primary":
-        return True
-    if region.relevance is None:
-        return False
-    return region.relevance >= _QUERY_CHART_FALLBACK_MIN_RELEVANCE
+    return (_figure_class(region) or "") in _CHART_FIGURE_CLASSES
 
 
 def _prepend_chart_note(ocr_snippet: str | None, note: str) -> str:
@@ -1228,7 +1167,6 @@ def _rank_score(
     boosted_types: frozenset[str],
     *,
     wants_chart: bool = False,
-    allow_query_chart_fallback: bool = False,
 ) -> float:
     """Score used only for top-N selection; packet.confidence still carries
     the raw detector score.
@@ -1263,13 +1201,7 @@ def _rank_score(
         elif figure_class == "logo":
             boosted *= 0.25
         elif figure_class == "other":
-            # A generic picture is usually less useful than an explicit chart,
-            # but do not bury it when the reranker already marked it as the
-            # query's primary/high-relevance chart carrier.
-            if allow_query_chart_fallback and _strong_query_chart_rerank_signal(region):
-                boosted *= 1.05
-            else:
-                boosted *= 0.45
+            boosted *= 0.45
     # Layer the reranker signals on top of the type-boosted score.
     if region.relevance is not None:
         # Reranker scored 0..1; treat 0.5 as neutral.
