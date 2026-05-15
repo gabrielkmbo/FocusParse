@@ -68,6 +68,15 @@ of counting provider throttling as benchmark failures.
 Commit `2b145a9`: added a narrow exact-match normalizer for leading code-like
 identifiers followed by explanations, e.g. `DPD MODE1. ...` -> `DPD_MODE1`.
 
+Commit `71df0b1`: added corresponding-row and checkbox-binding contract cues.
+These cues tell the reasoner/verifier to bind the source row/year/entity before
+reading a corresponding output field, and to bind checkbox marks to their
+nearest Yes/No or status labels. The verifier now propagates
+`checkbox_binding_risk` diagnostics for a same-evidence reasoner retry.
+
+Commit `16192a9`: recorded the row-binding contract checkpoint in project
+memory.
+
 ## Slice Results
 
 | Run | Correct | Accuracy | Cost | Cost/correct | Latency mean | Page recall | Bbox IoU | Lazy rate | Recoveries | Regressions | Net | Control regressions |
@@ -87,6 +96,12 @@ control failures are not only deterministic shape normalization issues.
 One earlier disk-light attempt was discarded as invalid: it hit an Anthropic
 429 rate-limit error mid-run and the harness converted affected rows to error
 records. Those rows are not counted as evidence for accuracy or flips.
+
+A row-binding slice attempt after commit `71df0b1` was stopped before result
+artifacts were written because the planner hit Gemini free-tier daily quota
+(`gemini-2.5-flash`, 20 requests/day) and began producing provider-error rows.
+It is not counted as evidence. Re-run the same 60-row slice once quota is
+available or the planner tier is moved to a non-quota-blocked provider.
 
 ## Qualitative Flips
 
