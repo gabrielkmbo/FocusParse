@@ -117,6 +117,24 @@ artifacts were written because the planner hit Gemini free-tier daily quota
 It is not counted as evidence. Re-run the same 60-row slice once quota is
 available or the planner tier is moved to a non-quota-blocked provider.
 
+After the targeted repair-hint checkpoint, I ran a diagnostic-only 3-row smoke
+with `FOCUSPARSE_TIER_PLANNER=cheap_oai` and
+`FOCUSPARSE_TIER_ROUTER=cheap_oai` to avoid the exhausted Gemini quota:
+
+`results/hf/sprint-2026-05-15/row-binding-repair-smoke-cheap-oai/`
+
+It scored 3/3 with cost/correct $0.0146, mean latency 3.40s, page recall 1.0,
+bbox IoU 1.0, and lazy-answer rate 0.0 on:
+
+- `fin-aapl-20250927-0002`: `180,683; typical`
+- `fin-aapl-20250927-0010`: `yes`
+- `dat-adrv9040-reference-manual-ug-2192-0041`: `DPD_MODE1`
+
+This is not a canonical slice or full-run claim because planner/router tiers
+changed and all three rows were already correct in the 60.14% baseline. It is
+only a sanity check that the new repair path runs cleanly on the targeted
+failure families without immediate regressions on those controls.
+
 ## Qualitative Flips
 
 Useful recoveries in the hybrid run:

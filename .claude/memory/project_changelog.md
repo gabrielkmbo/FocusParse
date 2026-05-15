@@ -9,6 +9,11 @@
   binding guidance, and chart risks get legend/series/panel/axis binding
   guidance. The retry still outputs one concise scorer-shaped answer and does
   not force broader retrieval.
+- A diagnostic-only 3-row smoke using OpenAI cheap planner/router fallbacks
+  (`FOCUSPARSE_TIER_PLANNER=cheap_oai`, `FOCUSPARSE_TIER_ROUTER=cheap_oai`)
+  scored 3/3 on the targeted row-binding/checkbox/DPD controls, but this is not
+  canonical evidence because the planner/router tiers differ from the baseline
+  and those rows were already correct at 60.14%.
 - Eval harnesses now abort on provider throttling/quota failures instead of
   converting those rows into benchmark failures. Daily quota exhaustion is no
   longer retried as a transient model error, while ordinary non-throttle local
