@@ -33,6 +33,7 @@ from focusparse.eval.scoring import (
     score_evidence_reward,
 )
 from focusparse.eval.stage_metrics import StageMetrics, aggregate_stage_metrics
+from focusparse.models._retry import is_model_throttle_error
 from focusparse.models.base import ModelClient
 from focusparse.pipeline.workflow import FocusWorkflow, SimpleBaselineAgent, WorkflowResult
 from focusparse.tools.layout_detect import LayoutEndpointUnavailable, StubResponseError
@@ -133,6 +134,8 @@ async def run_simple_eval(
                     record["agentic_meta"] = agentic_meta
                 cache_path.write_text(json.dumps(record, default=str))
             except Exception as exc:
+                if _should_abort_eval_on_error(exc):
+                    raise
                 logger.exception("Example %s failed: %s", example.id, exc)
                 record = _error_record(example, protocol=protocol, error=str(exc))
 
@@ -266,6 +269,8 @@ async def run_comparator_eval(
                     record["agentic_meta"] = agentic_meta
                 cache_path.write_text(json.dumps(record, default=str))
             except Exception as exc:
+                if _should_abort_eval_on_error(exc):
+                    raise
                 logger.exception("Example %s failed: %s", example.id, exc)
                 record = _error_record(example, protocol=protocol, error=str(exc))
 
@@ -497,8 +502,9 @@ async def run_focus_eval(
                 if cache_path is not None:
                     cache_path.write_text(json.dumps(record, default=str))
             except Exception as exc:
-                if strict_layout_detection and isinstance(
-                    exc, (LayoutEndpointUnavailable, StubResponseError)
+                if _should_abort_eval_on_error(
+                    exc,
+                    strict_layout_detection=strict_layout_detection,
                 ):
                     raise
                 logger.exception("Example %s failed: %s", example.id, exc)
@@ -1095,6 +1101,26 @@ def _error_record(example: BenchmarkExample, *, protocol: str, error: str) -> di
         "citations": [],
         "cache_hit": False,
     }
+
+
+def _should_abort_eval_on_error(
+    exc: Exception,
+    *,
+    strict_layout_detection: bool = False,
+) -> bool:
+    """Return True for infrastructure failures that invalidate the run.
+
+    Ordinary per-row model exceptions remain error rows so local development
+    can continue. Provider throttling/quota failures are different: once the
+    retry wrapper gives up, counting those rows as benchmark failures creates a
+    misleading accuracy artifact instead of a valid scientific run.
+    """
+
+    if is_model_throttle_error(exc):
+        return True
+    return strict_layout_detection and isinstance(
+        exc, (LayoutEndpointUnavailable, StubResponseError)
+    )
 
 
 def _aggregate_stages(per_example: list[dict[str, Any]]):

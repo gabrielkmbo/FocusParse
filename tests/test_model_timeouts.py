@@ -8,7 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from focusparse.models._retry import is_transient_model_error, retry_transient_model_call
+from focusparse.models._retry import (
+    is_model_throttle_error,
+    is_quota_exhausted_model_error,
+    is_transient_model_error,
+    retry_transient_model_call,
+)
 from focusparse.models._timeouts import model_retry_attempts, model_timeout_s
 from focusparse.models.openai import OpenAIClient
 
@@ -81,6 +86,34 @@ def test_transient_model_error_detects_rate_limit_marker():
     assert is_transient_model_error(
         ProviderRateLimitError("429 Too Many Requests: rate_limit_error")
     )
+    assert is_model_throttle_error(ProviderRateLimitError("429 Too Many Requests"))
+
+
+def test_quota_exhaustion_is_not_treated_as_retryable_transient():
+    class ProviderQuotaError(Exception):
+        pass
+
+    exc = ProviderQuotaError(
+        "429 RESOURCE_EXHAUSTED: You exceeded your current quota. "
+        "Quota exceeded for metric GenerateRequestsPerDayPerProjectPerModel-FreeTier."
+    )
+    assert is_model_throttle_error(exc)
+    assert is_quota_exhausted_model_error(exc)
+    assert not is_transient_model_error(exc)
+
+
+async def test_retry_transient_model_call_does_not_retry_daily_quota(monkeypatch):
+    monkeypatch.setenv("FOCUSPARSE_MODEL_RETRY_ATTEMPTS", "3")
+    calls = 0
+
+    async def _call():
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("quota exceeded for requests per day")
+
+    with pytest.raises(RuntimeError):
+        await retry_transient_model_call("test", _call)
+    assert calls == 1
 
 
 async def test_openai_client_wraps_provider_call_in_timeout(monkeypatch):

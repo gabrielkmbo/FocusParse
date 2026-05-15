@@ -304,6 +304,32 @@ async def test_run_focus_eval_handles_backend_error(tmp_path, parser_bench_submo
     assert per["error"].startswith("simulated")
 
 
+async def test_run_focus_eval_aborts_on_provider_throttle(tmp_path, parser_bench_submodule_present):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    class _RateLimitedClient:
+        async def predict(self, *a: Any, **kw: Any) -> ModelResponse:
+            raise RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded for requests per day")
+
+        def count_tokens(self, text: str) -> int:
+            return 1
+
+    with pytest.raises(RuntimeError, match="quota exceeded"):
+        await run_focus_eval(
+            [_make_example("ex-quota")],
+            backend_client=_RateLimitedClient(),
+            backend="fake",
+            model="fake-1",
+            protocol="focus_default",
+            output_dir=tmp_path / "run",
+            images_root=tmp_path,
+            limit=1,
+        )
+
+    assert not (tmp_path / "run" / "per_example.jsonl").exists()
+
+
 async def test_run_focus_eval_strict_layout_detection_raises(
     tmp_path, monkeypatch, parser_bench_submodule_present
 ):

@@ -269,6 +269,34 @@ async def test_run_simple_eval_handles_backend_error(tmp_path, parser_bench_subm
     assert per["error"].startswith("simulated")
 
 
+async def test_run_simple_eval_aborts_on_provider_throttle(
+    tmp_path, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    class _RateLimitedClient:
+        async def predict(self, *a: Any, **kw: Any) -> ModelResponse:
+            raise RuntimeError("429 Too Many Requests: rate_limit_error")
+
+        def count_tokens(self, text: str) -> int:
+            return 1
+
+    with pytest.raises(RuntimeError, match="rate_limit_error"):
+        await run_simple_eval(
+            [_make_example("ex-quota")],
+            backend_client=_RateLimitedClient(),
+            backend="fake",
+            model="fake-1",
+            protocol="full_doc",
+            output_dir=tmp_path / "run",
+            images_root=tmp_path,
+            limit=1,
+        )
+
+    assert not (tmp_path / "run" / "per_example.jsonl").exists()
+
+
 # ---------------------------------------------------------------------------
 # Phase 2: page mapping + IoU coord-space wiring for the simple agent
 # ---------------------------------------------------------------------------
