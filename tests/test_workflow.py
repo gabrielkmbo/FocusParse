@@ -29,6 +29,7 @@ from focusparse.pipeline.workflow import (
     FocusWorkflow,
     SimpleBaselineAgent,
     WorkflowResult,
+    _build_reasoner_repair_hint,
     _citations_from_packets,
     _focused_retry_evidence,
     _images_by_page,
@@ -467,6 +468,61 @@ def test_checkbox_diagnostic_allows_reasoner_shape_retry():
         question_event=question,
         max_evidence_retries=1,
     )
+
+
+def test_reasoner_repair_hint_targets_corresponding_row_adjudication():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The answer chose the output-field minimum instead of the corresponding row.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+        diagnostics={
+            "answer_shape_failure": ["wrong_row_risk"],
+            "corresponding_row_binding_cues": ["source_row", "output_field"],
+        },
+    )
+    answer = AnswerEvent(answer="169,148; minimum", citations=["pkt_003"], confidence=0.72)
+    question = QuestionEvent(
+        example_id="ex",
+        question=(
+            "For the year in which Products net sales reached their minimum among the "
+            "three years shown, what was the corresponding Gross margin value?"
+        ),
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+    )
+
+    hint = _build_reasoner_repair_hint(verdict, answer_event=answer, question_event=question)
+
+    assert "Previous answer: 169,148; minimum" in hint
+    assert "Previous cited packet_ids: pkt_003" in hint
+    assert "Targeted corresponding-row repair" in hint
+    assert "Adjudicate candidates internally" in hint
+
+
+def test_reasoner_repair_hint_targets_checkbox_binding():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The checkbox mark is bound to the wrong adjacent label.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+        diagnostics={"answer_shape_failure": ["checkbox_binding_risk"]},
+    )
+    answer = AnswerEvent(answer="no", citations=["pkt_003"], confidence=0.72)
+    question = QuestionEvent(
+        example_id="ex",
+        question="Based on the check marks, did the registrant file all required reports?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="boolean",
+    )
+
+    hint = _build_reasoner_repair_hint(verdict, answer_event=answer, question_event=question)
+
+    assert "Previous answer: no" in hint
+    assert "Targeted checkbox repair" in hint
+    assert "nearest Yes/No" in hint
 
 
 def test_concise_exact_answer_blocks_reasoner_shape_retry():
@@ -1672,6 +1728,9 @@ async def test_loop_allows_contract_guard_retry(tmp_path, parser_bench_submodule
     assert stage_counts["answer"] == 2
     assert stage_counts["verify"] == 2
     assert "Question answer contract" in reasoner.calls[1]["prompt"]
+    assert "Previous answer: 0.697" in reasoner.calls[1]["prompt"]
+    assert "Targeted multi-field repair" in reasoner.calls[1]["prompt"]
+    assert "Adjudicate candidates internally" in reasoner.calls[1]["prompt"]
 
 
 async def test_loop_allows_single_entity_shape_retry(tmp_path, parser_bench_submodule_present):

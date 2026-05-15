@@ -877,12 +877,20 @@ class FocusWorkflow:
                 # missing. When there are no cited/target packets, the explicit
                 # empty target list keeps expansion from sweeping every packet;
                 # the hint still gives the reasoner a focused repair instruction.
-                escalation_hint = verdict.reason
+                escalation_hint = _build_reasoner_repair_hint(
+                    verdict,
+                    answer_event=answer_event,
+                    question_event=question_event,
+                )
             elif action == "escalate_reasoner":
                 # No state change — just feed the verifier's reason into the
                 # next reasoner call so it knows what to address.
                 retry_answer_evidence = evidence
-                escalation_hint = verdict.reason
+                escalation_hint = _build_reasoner_repair_hint(
+                    verdict,
+                    answer_event=answer_event,
+                    question_event=question_event,
+                )
             else:
                 # Unknown action (future verifier extension) — accept the
                 # current answer rather than thrash. Trace shows the action
@@ -2067,14 +2075,84 @@ def _should_allow_reasoner_shape_retry(
     )
 
 
-def _verdict_has_answer_shape_failure(verdict: VerdictEvent) -> bool:
+def _build_reasoner_repair_hint(
+    verdict: VerdictEvent,
+    *,
+    answer_event: AnswerEvent,
+    question_event: QuestionEvent,
+) -> str:
+    """Build targeted same-evidence repair guidance from verifier diagnostics."""
+
+    parts: list[str] = []
+    reason = str(verdict.reason or "").strip()
+    if reason:
+        parts.append(reason)
+    if answer_event.answer:
+        parts.append(f"Previous answer: {answer_event.answer}")
+    if answer_event.citations:
+        parts.append("Previous cited packet_ids: " + ", ".join(answer_event.citations))
+
+    failures = set(_verdict_answer_shape_failures(verdict))
+    question = str(question_event.question or "").lower()
+
+    if "missing_field" in failures:
+        parts.append(
+            "Targeted multi-field repair: list every field requested by the question. "
+            "If the question asks for a value plus a label, condition, cue, or "
+            "min/typ/max status, include both in the concise answer."
+        )
+    if "label_value_mismatch" in failures:
+        parts.append(
+            "Targeted label-value repair: do not return only the row/header label. "
+            "Read the requested numeric/code/text value from the same cited row, "
+            "including its unit when the question asks for one."
+        )
+    if "wrong_row_risk" in failures:
+        if "corresponding" in question or "corresponding_row_binding_cues" in verdict.diagnostics:
+            parts.append(
+                "Targeted corresponding-row repair: first identify the source "
+                "row/year/entity named in the setup clause, then read the requested "
+                "output field from that same row. Do not choose the min/max of the "
+                "output field itself unless the question explicitly asks for that."
+            )
+        else:
+            parts.append(
+                "Targeted table-row repair: verify the exact row/entity against all "
+                "question cues such as among, lowest/highest, part number, condition, "
+                "and value before selecting the answer."
+            )
+        parts.append(
+            "Adjudicate candidates internally using the same evidence: current answer; "
+            "same-row completed answer; nearby confusable row answer. Output only the "
+            "candidate that satisfies the question contract and cited evidence."
+        )
+    if "checkbox_binding_risk" in failures:
+        parts.append(
+            "Targeted checkbox repair: bind each check mark to the nearest Yes/No or "
+            "status label, evaluate every required checkbox condition separately, and "
+            "return the concise boolean answer."
+        )
+    if "legend_binding_risk" in failures:
+        parts.append(
+            "Targeted chart-binding repair: bind the series style/legend, panel or "
+            "caption, axes/ticks, and any footnote before reading the value or label. "
+            "Adjudicate the current answer against the alternate nearby series using "
+            "only the same evidence."
+        )
+
+    return "\n".join(dict.fromkeys(parts))
+
+
+def _verdict_answer_shape_failures(verdict: VerdictEvent) -> tuple[str, ...]:
     raw = verdict.diagnostics.get("answer_shape_failure")
     if isinstance(raw, str):
-        values = [raw]
-    elif isinstance(raw, list):
-        values = [str(value) for value in raw if isinstance(value, str)]
-    else:
-        values = []
+        return (raw,)
+    if isinstance(raw, list):
+        return tuple(str(value) for value in raw if isinstance(value, str))
+    return ()
+
+
+def _verdict_has_answer_shape_failure(verdict: VerdictEvent) -> bool:
     return any(
         value
         in {
@@ -2084,7 +2162,7 @@ def _verdict_has_answer_shape_failure(verdict: VerdictEvent) -> bool:
             "legend_binding_risk",
             "checkbox_binding_risk",
         }
-        for value in values
+        for value in _verdict_answer_shape_failures(verdict)
     )
 
 

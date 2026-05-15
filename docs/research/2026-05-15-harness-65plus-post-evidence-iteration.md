@@ -83,6 +83,14 @@ exhaustion is no longer retried as a transient model error. This is a validity
 guard, not an accuracy mechanism: it prevents contaminated slice/full-run
 artifacts after provider quota is exhausted.
 
+This checkpoint adds targeted same-evidence repair hints for verifier-directed
+reasoner retries. The hint includes the previous answer/citations and converts
+diagnostics into concrete repair instructions: multi-field completion,
+label-vs-value extraction, corresponding-row/table-row candidate adjudication,
+checkbox nearest-label binding, and chart legend/series/panel/axis binding.
+This implements the first adjudication layer without adding broad retrieval or
+generic self-consistency.
+
 ## Slice Results
 
 | Run | Correct | Accuracy | Cost | Cost/correct | Latency mean | Page recall | Bbox IoU | Lazy rate | Recoveries | Regressions | Net | Control regressions |

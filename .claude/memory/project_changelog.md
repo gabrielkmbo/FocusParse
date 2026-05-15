@@ -2,6 +2,13 @@
 
 ## 2026-05-15
 
+- Verifier-directed reasoner retries now receive targeted same-evidence repair
+  hints derived from `answer_shape_failure` diagnostics. Wrong-row risks get
+  corresponding-row/table-row candidate adjudication guidance, missing fields
+  get multi-field completion guidance, checkbox risks get nearest-label
+  binding guidance, and chart risks get legend/series/panel/axis binding
+  guidance. The retry still outputs one concise scorer-shaped answer and does
+  not force broader retrieval.
 - Eval harnesses now abort on provider throttling/quota failures instead of
   converting those rows into benchmark failures. Daily quota exhaustion is no
   longer retried as a transient model error, while ordinary non-throttle local
