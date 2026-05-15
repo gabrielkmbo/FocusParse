@@ -317,6 +317,41 @@ counted only the chosen sample. The workflow now returns aggregated K-sample
 tokens/cost for answer telemetry, but historical run JSONs before this fix
 understate K=2 pricing.
 
+### Run: Phase 3e strict-shape verifier v2, matched K=1 (negative)
+
+`results/hf/sprint-2026-05-14/strict-shape-v2-oai-run1/focusparse_focus_agentic_multi_page_8c5e328d.json`.
+
+This run tests the current branch's narrowed exact-match strict-shape verifier
+prompt at K=1, with the same HF revision, staging dir, Modal endpoint, and
+`cheap_oai` planner/router setup as the current 57.4% best. It is therefore the
+clean matched check for whether Phase 3e helps without K=2.
+
+| Metric             | Strict-shape v2     | Δ vs current best |
+| ------------------ | ------------------- | ----------------- |
+| Overall accuracy   | **56.76%** (84/148) | **-0.7pp**        |
+| Datasheet accuracy | 62.4% (63/101)      | -2 rows           |
+| Finance accuracy   | 44.7% (21/47)       | +1 row            |
+| Page recall        | 0.903               | -0.018            |
+| Bbox IoU           | 0.848               | -0.003            |
+| Lazy answer rate   | 0.047               | +0.014            |
+| Reported cost      | $2.17               | +$0.07            |
+| Mean latency       | 3.57s               | -0.80s            |
+
+Unique-id flip analysis vs current best: 9 recovered rows and 10 regressed
+rows (net -1 unique row). Recoveries include useful exact-shape fixes:
+`dat-DS5091D-00-0011` (`Return the manufacturer ID number : 0x00h` -> `0x00h`),
+`dat-adrv9040-...-0041` (long DPD prose -> `DPD_MODE1`), and
+`fin-aapl-20250927-0034` (table-row spill -> `September 2022, $21`).
+Regressions show why the rule should not become the new default:
+`dat-adrv9040-...-0032` lost the comma in `ADRV9040_FW.bin, 641 kb`,
+`dat-adrv9040-...-0052` collapsed a tie to `LOGGING, 6`, and
+`fin-boe_fsr_2024_nov-0056` drifted from `Germany` to `UK and US`.
+
+Decision: Phase 3e strict-shape v2 remains a useful diagnostic prompt, but it
+does not improve the full-table default. The next path should target evidence
+quality for chart/visual rows or use a stronger verifier-aware answer selector,
+not prompt-only strictness.
+
 ### Candidate still open: multi-scale packets
 
 `--multi-scale-packets` remains a plausible next lever for chart-heavy failures:

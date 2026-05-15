@@ -167,6 +167,19 @@ rows from the current best run whose initial verifier action was
 had `retries_used=0`, so it was mostly initial-answer variance rather than a
 verified retry mechanism. Decision: do not ship that broader gate.
 
+Same branch also tested the current Phase 3e strict-shape verifier v2 prompt at
+K=1:
+`results/hf/sprint-2026-05-14/strict-shape-v2-oai-run1/`. Result:
+**84/148 = 56.8%**, below the current best **85/148 = 57.4%**. Domain split:
+datasheet **63/101 = 62.4%** and finance **21/47 = 44.7%**. Unique-id flips vs
+current best: **9** recovered and **10** regressed, net **-1**. Useful recoveries
+included `dat-DS5091D-00-0011` (`0x00h`), `dat-adrv9040-...-0041`
+(`DPD_MODE1`), and `fin-aapl-20250927-0034` (`September 2022, $21`), but
+regressions included losing punctuation/tie structure on
+`dat-adrv9040-...-0032` and `dat-adrv9040-...-0052`. Decision: keep Phase 3e as
+diagnostic/opt-in; do not make prompt-only strict-shape behavior the default
+claim.
+
 ### 2026-05-14 — gated reasoner-escalation slice vs broad retry negative control
 
 Branch `harness-60plus-iteration` added a narrow default reasoner retry for
