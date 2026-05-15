@@ -27,6 +27,12 @@
   keep groups as the organizing layer but restore packet-level descriptor lines
   in the reasoner prompt to reduce over-abstention and verbose control
   regressions before trying repair tools.
+- Hybrid grouped+packet slice
+  `results/hf/sprint-2026-05-15/evidence-groups-hybrid-slice-run1/` improved
+  the hard-slice accuracy to 19/60 and recovered 6 target rows, but still
+  failed the gate with 7 prior-correct control regressions (net -1). Do not run
+  full n=148 from this checkpoint; the next mechanism should be gated
+  adjudication/repair that preserves scorer-shaped concise answers.
 - Added an agent-eyes audit builder that renders wrong rows as inspectable HTML:
   page overlays, selected/candidate crops, packet text, multi-scale/context
   crop refs, answer history, verifier payloads, and trajectory steps. The
