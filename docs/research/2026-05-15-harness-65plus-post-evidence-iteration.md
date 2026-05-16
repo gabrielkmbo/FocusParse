@@ -158,6 +158,26 @@ Apple gross-margin row still failed by returning a verbose shape-wrong answer
 instead of `180,683; typical`. The next valid gate remains the 60-row mixed
 target/control slice.
 
+Follow-up commits `cf444c7` and `14075d5` tightened syntax-only normalization
+and contract severity after Gemini exposed two post-evidence shape issues.
+Finance exact-match answers now normalize verbose corresponding-value/status
+phrases and simple `value, status` outputs such as `$ 180,683, typical` to
+`180,683; typical`. Datasheet exact-match answers now normalize firmware
+file/size pairs such as `ADRV9040_FW.bin; 641 kb` to
+`ADRV9040_FW.bin, 641 kb`, and structured file/size pairs no longer trigger a
+severe visual-explanation contract failure merely because the question asks for
+supporting context. These rules are gold-free syntax rules, not example-id
+rules.
+
+Two targeted live checks validated those mechanisms:
+
+- `gemini-contract-normalizer-smoke-run2`: 3/3 = 100.0%, cost/correct
+  `$0.0171`, mean latency 4.51s, page recall 0.833, bbox IoU 0.881, lazy rate
+  0.0. It fixed the Apple gross-margin shape to `180,683; typical`.
+- `file-size-regression-smoke-run1`: 1/1 = 100.0%, cost/correct `$0.0167`,
+  mean latency 4.21s. It fixed the datasheet firmware control to
+  `ADRV9040_FW.bin, 641 kb`.
+
 ## Slice Results
 
 | Run | Correct | Accuracy | Cost | Cost/correct | Latency mean | Page recall | Bbox IoU | Lazy rate | Recoveries | Regressions | Net | Control regressions |
@@ -167,12 +187,25 @@ target/control slice.
 | hybrid groups + packets | 19/60 | 31.7% | $0.905 | $0.048 | 4.14s | 0.931 | 0.911 | 0.033 | 6 | 7 | -1 | 7 |
 | answer-shape guard minifacts run1 | 22/60 | 36.7% | $0.851 | $0.039 | 3.95s | 0.961 | 0.900 | 0.017 | 4 | 2 | +2 | 2 |
 | leading identifier minifacts run2 | 20/60 | 33.3% | $0.848 | $0.042 | 4.09s | 0.978 | 0.933 | 0.000 | 3 | 3 | 0 | 3 |
+| Gemini schema + contracts slice run1 | 22/60 | 36.7% | $0.963 | $0.044 | 3.75s | 0.967 | 0.951 | 0.017 | 4 | 2 | +2 | 2 |
+| Gemini schema + contracts slice run2 | 22/60 | 36.7% | $0.992 | $0.045 | 6.71s | 0.944 | 0.900 | 0.033 | 4 | 2 | +2 | 2 |
 
 The first disk-light answer-shape run was the best clean slice so far, but it
 still failed the mixed-slice gate because prior-correct control regressions
 were 2, above the <=1 threshold. A follow-up run after the leading identifier
 patch was worse (net 0, 3 control regressions), showing that the remaining
 control failures are not only deterministic shape normalization issues.
+
+The Gemini schema runs also failed the gate. They kept a positive net flip
+count (+2) and improved evidence metrics on the hard slice, but both runs had
+two prior-correct regressions. Run1 regressed `fin-10-K-0033` to
+`Unanswerable` and over-completed `dat-adrv9040-reference-manual-ug-2192-0032`;
+the file/size normalizer fixed the datasheet regression in a 1-row smoke.
+Run2 still had two finance regressions: `fin-aapl-20250927-0002` flipped from
+`180,683; typical` to wrong-row `169,148; minimum`, and `fin-10-K-0033`
+again abstained despite an initial correct `0.53` answer in the prior slice
+trace. This means the next bottleneck is finance row/calculation verifier
+adjudication, not raw schema extraction.
 
 One earlier disk-light attempt was discarded as invalid: it hit an Anthropic
 429 rate-limit error mid-run and the harness converted affected rows to error
@@ -253,19 +286,25 @@ Representative regressions:
 - `fin-aapl-20250927-0010`: baseline `yes` regressed to `no` in run2,
   indicating that boolean controls still need evidence-grounded adjudication,
   not just answer-shape collapse.
+- `fin-10-K-0033`: baseline `0.53` regressed to `Unanswerable` in both Gemini
+  schema slice runs. In run1, the reasoner initially answered `0.53` with
+  citations, but the verifier abstained on the multi-region calculation.
 
 ## Interpretation
 
 The core hypothesis was right in direction but incomplete in mechanism:
-post-evidence packaging and contracts do recover high-recall/high-IoU failures,
-especially label-vs-value and multi-field rows. However, prompt-only grouping
-also increases answer verbosity, over-abstention, and OCR-looking span drift on
-previously correct controls.
+post-evidence packaging, contracts, and Gemini schema extraction do recover
+some high-recall/high-IoU failures, especially label-vs-value and multi-field
+rows. However, prompt/schema augmentation alone also increases answer
+verbosity, over-abstention, wrong-row selection, and cost/latency on previously
+correct controls.
 
-The best clean slice now shows positive net flips (+2), which is encouraging,
+The best clean slices now show positive net flips (+2), which is encouraging,
 but the control-regression gate still blocks a full n=148 run. The remaining
-regressions are mostly wrong-row / wrong-series decisions, not syntax-only
-shape mistakes.
+regressions are mostly finance wrong-row / calculation-verifier decisions, not
+syntax-only shape mistakes. Gemini 3.1 Pro works technically with the new key,
+but using it as a broadly gated schema extractor is not yet a cost-effective
+accuracy mechanism.
 
 The next mechanism should not be broader retrieval or another prompt-only full
 run. The next step should be gated repair/adjudication:
@@ -284,7 +323,8 @@ questions; several regressions were semantically plausible but shape-wrong.
 ## Decision
 
 Do not claim progress toward 65% from these runs yet. The implementation
-created useful infrastructure and the best clean slice improved to 22/60 on a
+created useful infrastructure and the best clean slices improved to 22/60 on a
 hard target/control mix, but every slice still failed the regression gate. Full
-n=148 should wait until the repair/adjudication layer shows positive net flips
-with <=1 prior-correct control regression on the mixed slice.
+n=148 should wait until finance row/calculation adjudication or tighter Gemini
+schema gating shows positive net flips with <=1 prior-correct control
+regression on the mixed slice.

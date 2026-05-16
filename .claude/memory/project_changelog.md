@@ -104,6 +104,16 @@
   both regressions were prior-correct controls. Follow-up run2 after the
   leading-identifier patch fell to 20/60 with 3 recoveries and 3 control
   regressions, so no full n=148 run should be claimed from this checkpoint.
+- Added a dedicated Gemini schema-extraction tier and gated structured
+  extraction path for table/form/text/checkbox-like packets. Gemini 3.1 Pro
+  with high thinking/media resolution is now used through the `schema_extractor`
+  role, while `gemini_schema_fast` is available for cheaper A/Bs. The integrated
+  path works with the updated Gemini key, but 60-row mixed slices
+  `gemini-schema-contract-slice-run1` and `gemini-schema-contract-slice-run2`
+  both stayed at 22/60 with net +2 flips and 2 prior-correct regressions, so no
+  full n=148 claim should be made from this configuration. Follow-up syntax
+  normalizers now cover finance `value; status` answers and datasheet file/size
+  pairs such as `ADRV9040_FW.bin, 641 kb`.
 - Added an agent-eyes audit builder that renders wrong rows as inspectable HTML:
   page overlays, selected/candidate crops, packet text, multi-scale/context
   crop refs, answer history, verifier payloads, and trajectory steps. The
