@@ -167,6 +167,15 @@
   **4.26s**, page recall **0.892**, bbox IoU **0.870**, and lazy-answer rate
   **0.041**. Domain split from `per_example.jsonl`: datasheet **64/101**,
   finance **25/47**.
+- Added `gemini_schema_lite` (`gemini-3.1-flash-lite`) as a cheaper schema
+  extraction A/B tier and narrowed the Gemini schema extractor gate so plain
+  `table`/`form`/`text` evidence no longer triggers broad structured extraction.
+  The narrow-gate slice
+  `results/hf/sprint-2026-05-16/normalizer-repair-slice-run2-narrow-schema/`
+  scored 28/38 = 73.7% with 10/38 Gemini structured examples (9/10 correct),
+  but failed the baseline flip gate with 0 recoveries and 9 regressions
+  versus the 60.14% baseline. Do not full-run this checkpoint; next step is
+  answer-preserving retry/adjudication.
 
 ## 2026-05-14
 

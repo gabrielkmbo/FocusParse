@@ -271,15 +271,11 @@ _CHART_QUESTION_FAMILIES = frozenset(
 _CHART_FIGURE_CLASSES = frozenset({"bar_chart", "line_chart", "candlestick"})
 _STRUCTURED_EXTRACTION_QUESTION_FAMILIES = frozenset(
     {
-        "spec_table_cell_retrieval",
         "min_typ_max_disambiguation",
         "table_note_fusion",
         "condition_footnote_fusion",
-        "cross_page_continuation",
-        "distant_evidence_fusion",
         "near_miss_distractor",
         "confusable_label",
-        "direct_label_reading",
         "chart_table_cross_ref",
     }
 )
@@ -300,12 +296,13 @@ _STRUCTURED_EXTRACTION_REGION_TYPES = frozenset(
 )
 _STRUCTURED_EXTRACTION_CUE_RE = re.compile(
     r"\b("
-    r"among|checkbox|check\s*mark|compare|condition|corresponding|field|"
-    r"highest|label|lowest|min(?:imum)?|max(?:imum)?|part\s*number|row|table|"
-    r"typ(?:ical)?|unit|value"
+    r"among|checkbox|check\s*mark|compare|condition|corresponding|"
+    r"highest|lowest|min(?:imum)?|max(?:imum)?|part\s*number|row|"
+    r"typ(?:ical)?|visually\s+similar"
     r")\b",
     re.IGNORECASE,
 )
+_STRUCTURED_EXTRACTION_EVIDENCE_KEYS = frozenset({"checkbox"})
 _STRUCTURED_EXTRACTION_MAX_PACKETS = 2
 
 # Sprint 2026-05-05 (Phase B2): question families where auto-zoom (run_python
@@ -927,7 +924,7 @@ def _wants_structured_region_extraction(
     family = question_family or ""
     if family in _STRUCTURED_EXTRACTION_QUESTION_FAMILIES:
         return True
-    if evidence_keys & {"table", "form", "text", "checkbox"}:
+    if evidence_keys & _STRUCTURED_EXTRACTION_EVIDENCE_KEYS:
         return True
     return bool(_STRUCTURED_EXTRACTION_CUE_RE.search(question_text or ""))
 

@@ -1,8 +1,8 @@
 """Load FocusParse config from YAML + environment overrides.
 
 `configs/default.yaml` is the source of truth. Env vars named
-`FOCUSPARSE_TIER_<ROLE>` (PLANNER|ROUTER|REASONER|VERIFIER|LOCALIZER_RERANK)
-override the per-role tier assignment at runtime.
+`FOCUSPARSE_TIER_<ROLE>` override the per-role tier assignment at runtime
+(for example, `FOCUSPARSE_TIER_SCHEMA_EXTRACTOR=gemini_schema_fast`).
 """
 
 from __future__ import annotations

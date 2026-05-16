@@ -438,3 +438,54 @@ gate. The next iteration should narrow Gemini schema use further or add
 targeted adjudication that explicitly compares the original concise answer
 against the verifier-repair answer before accepting a verbose or row-shifted
 retry.
+
+## 2026-05-16 Narrow Gemini Schema Gate
+
+I narrowed the Gemini schema extractor gate so it is no longer triggered by
+plain `table`, `form`, or `text` evidence. The extractor now fires only for
+high-risk question families, checkbox evidence, or strong row/shape cues such
+as `among`, `lowest`, `highest`, `part number`, `min`, `max`, `typical`, and
+`visually similar`. This keeps the Google model in the intended role: a
+specialized post-localization table/element parser, not a broad retrieval or
+reasoning replacement.
+
+Model selection was checked against current Google AI documentation. Gemini
+3.1 Pro Preview supports image/PDF inputs, structured outputs, thinking, and a
+large context window, so it remains the default `schema_extractor` role for
+complex CV/table parsing. I also added `gemini_schema_lite` backed by
+`gemini-3.1-flash-lite` for future cheap extraction A/Bs; Google's model page
+positions it for high-volume lightweight data extraction and document
+processing.
+
+Live narrow-gate slice:
+
+`results/hf/sprint-2026-05-16/normalizer-repair-slice-run2-narrow-schema/focusparse_focus_agentic_multi_page_0b139a04.json`
+
+- Raw slice result: 28/38 = 73.7%.
+- Cost: $0.5298 total, $0.0189 per correct.
+- Mean latency: 3.44s.
+- Page recall: 0.917; bbox IoU: 0.884.
+- Lazy-answer rate: 0.053.
+- Structured Gemini extraction fired on 10/38 examples; 9/10 of those rows
+  were correct.
+- Against the 60.14% baseline on common rows: 0 recoveries, 9 regressions,
+  net -9. Regressions were 6 datasheet and 3 finance rows.
+
+Representative regressions:
+
+- `fin-aapl-20250927-0029`: answer contained the right label
+  `Large accelerated filer` but with verbose checkbox explanation, so the
+  scorer-shaped answer was lost.
+- `fin-bis_qr_2024_sep-0050`: answer kept the chart panel letter and
+  explanatory VIX text instead of the concise `FX bonds` label.
+- `dat-arm1176-vm.annot-0054`: selected `4` where the baseline and gold were
+  `5`.
+- `dat-DS5091D-00-0036`: shifted from the baseline/gold `0.56V` to `0.90 V`.
+
+Decision: do not run full n=148 from this checkpoint. The new Gemini key is
+working, and the narrow gate confirms Gemini can be used as a scoped
+schema/table parser, but the mixed control slice still fails the
+prior-correct-preservation gate. The next likely mechanism is not broader
+Gemini use; it is answer-preserving adjudication between the original concise
+answer and the verifier-repair answer, especially when the retry becomes
+verbose or row-shifted.

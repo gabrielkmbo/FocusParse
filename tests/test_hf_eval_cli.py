@@ -292,6 +292,17 @@ def test_resolve_tiers_honors_env_override(script_mod, monkeypatch):
     assert no_override_hash != override_hash
 
 
+def test_resolve_tiers_honors_schema_extractor_override(script_mod, monkeypatch):
+    from focusparse.utils.config import load_config
+
+    config = load_config()
+    monkeypatch.setenv("FOCUSPARSE_TIER_SCHEMA_EXTRACTOR", "gemini_schema_lite")
+
+    resolved = script_mod._resolve_tiers(config)
+    assert resolved["schema_extractor"]["provider"] == "gemini"
+    assert resolved["schema_extractor"]["model"] == "gemini-3.1-flash-lite"
+
+
 # ---------------------------------------------------------------------------
 # argparse smoke — verifies --tier-override ROLE=TIER parses and repeats
 # ---------------------------------------------------------------------------
