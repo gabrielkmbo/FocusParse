@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from focusparse.evidence.packet import EvidencePacket
 from focusparse.models.base import ModelClient, ModelResponse
+from focusparse.pipeline.answer_contract import answer_contract_failures, build_answer_contract
 from focusparse.pipeline.events import (
     AnswerEvent,
     EvidenceEvent,
@@ -750,6 +751,9 @@ class FocusWorkflow:
         loop_terminated = ""  # set in the loop body before break
         escalation_hint: str | None = None
         answer_evidence = evidence
+        initial_answer_event = answer_event
+        initial_answer_evidence = answer_evidence
+        accepted_retry_preserved_initial = False
         best_unsupported_answer: AnswerEvent | None = None
         best_unsupported_evidence: EvidenceEvent | None = None
         if not verdict.supported:
@@ -759,6 +763,31 @@ class FocusWorkflow:
         while True:
             action = verdict.next_action
             if action == "accept":
+                if _should_preserve_initial_answer_on_supported_retry(
+                    initial_answer_event,
+                    answer_event,
+                    question_event=question_event,
+                    retries_used=retries_used,
+                ):
+                    _add_debug_event(
+                        recorder,
+                        stage="answer",
+                        event_type="selection",
+                        retry_attempt=retries_used,
+                        payload={
+                            "selected": "initial_answer",
+                            "reason": "supported_retry_looked_like_shape_regression",
+                            "selected_answer": initial_answer_event.answer,
+                            "selected_confidence": initial_answer_event.confidence,
+                            "discarded_answer": answer_event.answer,
+                            "discarded_confidence": answer_event.confidence,
+                        },
+                    )
+                    answer_event = initial_answer_event
+                    answer_evidence = initial_answer_evidence
+                    accepted_retry_preserved_initial = True
+                    loop_terminated = "accepted_preserved_initial"
+                    break
                 loop_terminated = "accepted"
                 break
             if action == "abstain":
@@ -970,7 +999,11 @@ class FocusWorkflow:
         # treats null as "not measured", same as the StageMetrics block).
         loop_retry_helped: bool | None = None
         if retries_used > 0:
-            loop_retry_helped = (not initial_supported) and verdict.supported
+            loop_retry_helped = (
+                (not initial_supported)
+                and verdict.supported
+                and not accepted_retry_preserved_initial
+            )
 
         if (
             loop_terminated == "exhausted"
@@ -1011,6 +1044,7 @@ class FocusWorkflow:
         telemetry["evidence_retries_used"] = evidence_retries_used
         telemetry["loop_terminated"] = loop_terminated
         telemetry["loop_retry_helped"] = loop_retry_helped
+        telemetry["accepted_retry_preserved_initial"] = accepted_retry_preserved_initial
         telemetry["available_tools"] = self.available_tools()
         telemetry["answer_changed_after_tool"] = (
             tool_retry_used
@@ -1992,6 +2026,107 @@ def _is_better_unsupported_answer(
     ):
         return True
     return candidate_confidence > incumbent_confidence
+
+
+def _should_preserve_initial_answer_on_supported_retry(
+    initial: AnswerEvent,
+    candidate: AnswerEvent,
+    *,
+    question_event: QuestionEvent,
+    retries_used: int,
+) -> bool:
+    """Keep a concise initial answer when a supported retry looks regressive.
+
+    The verifier can be right that the evidence supports a retry while the
+    retry is still worse for parser-bench scoring: extra rationale, adjacent
+    row labels, formulas, or a row-shifted list-like answer can overwrite the
+    original concise span. This guard is intentionally conservative. It only
+    fires after a retry, only when the original cited answer satisfies the
+    gold-free answer contract at least as well as the retry, and only when the
+    retry has clear shape-regression signals.
+    """
+
+    if retries_used <= 0:
+        return False
+    if initial is candidate:
+        return False
+    if not initial.citations or _answer_looks_unanswerable(initial.answer):
+        return False
+    if _normalize_answer_for_telemetry(initial.answer) == _normalize_answer_for_telemetry(
+        candidate.answer
+    ):
+        return False
+    if candidate.citations and not (set(initial.citations) & set(candidate.citations)):
+        return False
+
+    contract = build_answer_contract(
+        question_event.question,
+        answer_type=question_event.answer_type,
+        domain=question_event.domain,
+    )
+    initial_failures = answer_contract_failures(initial.answer, contract)
+    candidate_failures = answer_contract_failures(candidate.answer, contract)
+    if initial_failures and len(candidate_failures) < len(initial_failures):
+        return False
+
+    initial_confidence = float(initial.confidence or 0.0)
+    candidate_confidence = float(candidate.confidence or 0.0)
+    if candidate_confidence > initial_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN:
+        return False
+
+    initial_text = str(initial.answer or "").strip()
+    candidate_text = str(candidate.answer or "").strip()
+    if not _answer_is_concise_shape(initial_text):
+        return False
+
+    if _answer_looks_unanswerable(candidate_text):
+        return True
+    if _answer_looks_formula_like(candidate_text) and not _answer_looks_formula_like(initial_text):
+        return True
+
+    initial_norm = _normalize_answer_for_telemetry(initial_text)
+    candidate_norm = _normalize_answer_for_telemetry(candidate_text)
+    candidate_is_much_longer = (
+        len(candidate_text) >= len(initial_text) + 35
+        or len(_answer_selection_tokens(candidate_text))
+        >= len(_answer_selection_tokens(initial_text)) + 4
+    )
+
+    if initial_norm in candidate_norm and (
+        candidate_is_much_longer or _answer_has_trailing_explanation(candidate_text, initial_text)
+    ):
+        return True
+    return bool(
+        candidate_is_much_longer
+        and (
+            _answer_looks_list_like(candidate_text)
+            or _answer_looks_verbose_retry_context(candidate_text)
+        )
+    )
+
+
+def _answer_has_trailing_explanation(candidate: str, initial: str) -> bool:
+    if not candidate or not initial:
+        return False
+    return bool(
+        re.match(
+            rf"^{re.escape(initial.strip())}\s*(?:[,;:]|[-\u2013\u2014])\s+\S+",
+            candidate.strip(),
+        )
+    )
+
+
+def _answer_looks_verbose_retry_context(answer: str | None) -> bool:
+    if not answer:
+        return False
+    return bool(
+        re.search(
+            r"\b(?:figure|table|row|caption|legend|axis|compared|because|using|shows|"
+            r"indicates|verified|confirm)\b",
+            str(answer),
+            re.I,
+        )
+    )
 
 
 def _maybe_accept_deterministic_finance_answer(

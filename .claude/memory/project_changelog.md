@@ -2,6 +2,19 @@
 
 ## 2026-05-16
 
+- Added a conservative accepted-retry selection guard: when a verifier-supported
+  retry looks like answer-shape regression, the workflow can preserve the
+  initial concise cited answer instead of overwriting it with verbose rationale,
+  adjacent-row context, formulas, or list-like repair text. The guard is
+  gold-free, only runs after a retry, requires citation overlap, checks the
+  inferred answer contract, and records `accepted_retry_preserved_initial` in
+  telemetry. Focused workflow tests passed; a fresh mixed slice is still needed
+  before any full n=148 claim.
+- Re-smoked the higher-quota Gemini key on `gemini-3.1-pro-preview` for both
+  text-only structured output and a cached table-crop multimodal structured
+  extraction. The Pro path returned schema-valid JSON, including table headers,
+  row content, units, note, and confidence when run with the production-style
+  schema extractor budget.
 - Added narrow deterministic finance adjudication for two same-evidence finance
   verifier false-reject families: corresponding row/value/status answers and
   repurchase-dividend ratio calculations. The adjudicator only accepts when the

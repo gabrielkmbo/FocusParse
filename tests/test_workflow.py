@@ -38,6 +38,7 @@ from focusparse.pipeline.workflow import (
     _maybe_accept_deterministic_finance_answer,
     _page_number_from_filename,
     _should_allow_reasoner_shape_retry,
+    _should_preserve_initial_answer_on_supported_retry,
     _should_use_react_inspector,
     _verifier_requests_visual_readability_retry,
     _verifier_target_packet_ids,
@@ -382,6 +383,70 @@ def test_retry_answer_selector_prefers_same_shape_retry_within_tiny_margin():
         candidate,
         incumbent,
         question_text="What voltage is calculated from the resistor divider equation?",
+    )
+
+
+def test_supported_retry_preserves_concise_answer_over_verbose_rationale():
+    initial = AnswerEvent(answer="[31:16]", citations=["pkt_000"], confidence=0.98)
+    candidate = AnswerEvent(
+        answer="[31:16] - Reserved. RAZ.",
+        citations=["pkt_000"],
+        confidence=0.98,
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="Which bit fields are guaranteed to always read as zero?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+        domain="datasheet",
+    )
+
+    assert _should_preserve_initial_answer_on_supported_retry(
+        initial,
+        candidate,
+        question_event=question,
+        retries_used=1,
+    )
+
+
+def test_supported_retry_does_not_preserve_scalar_when_retry_is_same_shape():
+    initial = AnswerEvent(answer="0.90 V", citations=["pkt_003"], confidence=0.95)
+    candidate = AnswerEvent(answer="0.56 V", citations=["pkt_003"], confidence=0.91)
+    question = QuestionEvent(
+        example_id="ex",
+        question="What voltage is calculated from the resistor divider equation?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="numeric",
+        domain="datasheet",
+    )
+
+    assert not _should_preserve_initial_answer_on_supported_retry(
+        initial,
+        candidate,
+        question_event=question,
+        retries_used=1,
+    )
+
+
+def test_supported_retry_does_not_preserve_when_retry_fixes_contract_failure():
+    initial = AnswerEvent(answer="0.697", citations=["pkt_000"], confidence=0.90)
+    candidate = AnswerEvent(answer="min: 0.697 V", citations=["pkt_000"], confidence=0.88)
+    question = QuestionEvent(
+        example_id="ex",
+        question="Which value (min, typ, or max) should be used, and what voltage?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+        domain="datasheet",
+    )
+
+    assert not _should_preserve_initial_answer_on_supported_retry(
+        initial,
+        candidate,
+        question_event=question,
+        retries_used=1,
     )
 
 
@@ -1711,6 +1776,61 @@ async def test_loop_exhausted_keeps_best_unsupported_answer(
     ]
     assert selection_events
     assert selection_events[-1].payload["selected"] == "best_unsupported"
+
+
+async def test_supported_retry_can_preserve_initial_concise_answer(
+    tmp_path, parser_bench_submodule_present
+):
+    """A verifier-accepted retry should not overwrite a concise answer with
+    row-shifted rationale when the initial answer already satisfies contract.
+    """
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            (
+                '{"answer": "Non-Shared Normal, Write-Through Cacheable", '
+                '"citations": ["pkt_000"], "confidence": 0.95}'
+            ),
+            (
+                '{"answer": "Outer Write-Through; Non-Shared Normal, Write-Back Cacheable", '
+                '"citations": ["pkt_000"], "confidence": 0.84}'
+            ),
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(supported=False, next_action="escalate_reasoner"),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        max_retries=1,
+    )
+    example = _make_example()
+    example.question = (
+        "If a memory system based on these tables does NOT support the "
+        "'Outer Write-Back' cache policy, how would the ARMv6 attribute change?"
+    )
+    example.answer_type = "exact_match"
+    example.answer = "Non-Shared Normal, Write-Through Cacheable"
+    example.question_family = "table_note_fusion"
+
+    result = await workflow.run(
+        example, [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "Non-Shared Normal, Write-Through Cacheable"
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["loop_terminated"] == "accepted_preserved_initial"
+    assert result.telemetry["loop_retry_helped"] is False
+    assert result.telemetry["accepted_retry_preserved_initial"] is True
+    selection_events = [
+        e for e in result.trace.debug_events if e.stage == "answer" and e.event_type == "selection"
+    ]
+    assert selection_events[-1].payload["selected"] == "initial_answer"
 
 
 async def test_retry_abstain_keeps_cited_unsupported_answer(

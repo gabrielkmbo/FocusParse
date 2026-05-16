@@ -562,3 +562,67 @@ baseline flip gate is still negative. Do not claim 65% or run/claim another
 full n=148 from this checkpoint. The next highest-leverage step is a true
 answer-preserving adjudicator that compares the original concise answer against
 retry/repair candidates before allowing a supported retry to overwrite it.
+
+## 2026-05-16 Accepted Retry Preservation Guard
+
+I implemented the next narrow controller change from the previous decision:
+when a retry is verifier-supported but appears to regress the answer shape, the
+workflow can preserve the initial concise cited answer instead of letting the
+retry overwrite it.
+
+The guard is intentionally conservative and gold-free:
+
+- It only runs after at least one retry.
+- The initial answer must cite evidence and must not be an abstention.
+- If the retry cites packets, it must overlap at least one initial citation.
+- The initial answer must satisfy the inferred answer contract at least as well
+  as the retry.
+- The retry cannot have a materially higher confidence than the initial answer.
+- The retry must show a clear shape-regression signal: unanswerable fallback,
+  formula-like output replacing a non-formula concise answer, trailing rationale
+  after the original span, or much longer list/context text.
+
+Telemetry now records `accepted_retry_preserved_initial`, and the loop
+termination string is `accepted_preserved_initial` when this path fires. This
+keeps the public event schema stable while making the selection visible in
+trace/debug analysis.
+
+Tests added:
+
+- A pure helper test preserving `[31:16]` over `[31:16] - Reserved. RAZ.`.
+- A negative control where two scalar numeric answers have the same shape, so
+  the guard does not guess which value is right.
+- A negative control where the retry fixes a min/typ/max contract failure.
+- A workflow test where a supported retry would otherwise replace
+  `Non-Shared Normal, Write-Through Cacheable` with a row-shifted cache-policy
+  rationale.
+
+Verification:
+
+- `uv run pytest tests/test_workflow.py::test_supported_retry_preserves_concise_answer_over_verbose_rationale tests/test_workflow.py::test_supported_retry_does_not_preserve_scalar_when_retry_is_same_shape tests/test_workflow.py::test_supported_retry_does_not_preserve_when_retry_fixes_contract_failure tests/test_workflow.py::test_supported_retry_can_preserve_initial_concise_answer`
+  passed with 3 passed / 1 skipped.
+- `uv run pytest tests/test_workflow.py tests/test_reasoner.py tests/test_answer_contract.py tests/test_verifier.py tests/test_pricing.py tests/test_hf_eval_cli.py::test_resolve_tiers_honors_schema_extractor_override`
+  passed with 186 passed / 57 skipped.
+- Targeted Ruff checks passed for the touched workflow, reasoner, verifier,
+  answer-contract, pricing, and test files.
+
+I also re-smoked the current Gemini integration after the higher-quota key was
+added. The official Google AI docs checked on May 16, 2026 list
+`gemini-3.1-pro-preview` as the current Pro model, confirm structured outputs
+for Gemini 3.1/3/2.5 models, and document high media resolution for multimodal
+requests. Live smoke results:
+
+- Text-only structured output on `gemini-3.1-pro-preview`: returned
+  schema-valid JSON for a miniature table extraction; 32 input tokens, 46
+  output tokens, $0.000616, 4.124s.
+- Multimodal table-crop structured extraction on `gemini-3.1-pro-preview` with
+  `media_resolution=high`: returned headers (`Bits`, `Bit Name`, `Description`,
+  `Reset`, `Access`), the visible `FS_EOF1` row, units (`ns`, `us`), a table
+  note, and confidence 0.98. A deliberately tiny 512-token smoke budget
+  fail-closed, while a production-style 2048-token budget worked; the default
+  schema extractor tier uses 8192 output tokens.
+
+Decision: this checkpoint is a safer controller primitive, not an accuracy
+claim. It should be committed, then run on a fresh target/control slice before
+any new full n=148 attempt. The current full accuracy claim remains 89/148 =
+60.14%.
