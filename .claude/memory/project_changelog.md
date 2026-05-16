@@ -209,6 +209,17 @@
   variable-option formulas, and Outer Write-Back cache-policy row shifts.
   Corrected the Gemini lite schema tier/pricing to
   `gemini-3.1-flash-lite-preview`.
+- Full n=148 from the slice-passing accepted-retry checkpoint
+  `accepted-retry-preserve-full-run1` was negative: 88/148 = 59.5% versus the
+  merged 89/148 = 60.14% baseline. Datasheet improved to 65/101, finance fell
+  to 23/47, cost/correct was $0.0247, mean latency 3.58s, page recall 0.937,
+  bbox IoU 0.896, lazy rate 0.027. Flip profile was 11 recoveries and 12
+  regressions (net -1), so no new benchmark claim should be made. Generated a
+  fresh wrong-row agent-eyes audit at
+  `results/agent_eyes/2026-05-16-accepted-retry-preserve-full-run1-wrong/`;
+  47/60 wrong rows had both page recall and bbox IoU >= 0.9, confirming the next
+  iteration should focus on same-evidence answer adjudication rather than
+  broader retrieval.
 
 ## 2026-05-14
 

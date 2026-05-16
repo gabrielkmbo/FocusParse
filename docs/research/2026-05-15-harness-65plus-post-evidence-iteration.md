@@ -709,3 +709,96 @@ passes the mixed target/control slice gate. It justifies a live full n=148 run,
 but it is not itself a 65% claim. The full run must still report accuracy,
 domain split, cost/correct, latency, page recall, bbox IoU, lazy rate, and
 flip analysis versus the 60.14% baseline.
+
+## 2026-05-16 Full n=148 Run: Negative Result
+
+The full validation run from the slice-passing checkpoint was:
+
+`results/hf/sprint-2026-05-16/accepted-retry-preserve-full-run1/focusparse_focus_agentic_multi_page_0b139a04.json`
+
+It used the same pinned HF revision and full-tool dynamic protocol as the
+60.14% baseline, from commit `7504d5e`, with the dedicated Gemini
+`schema_extractor` role enabled.
+
+| Metric | Baseline | Full run | Delta |
+| --- | ---: | ---: | ---: |
+| Accuracy | 89/148 = 60.1% | 88/148 = 59.5% | -0.7 pp |
+| Datasheet accuracy | 64/101 = 63.4% | 65/101 = 64.4% | +1.0 pp |
+| Finance accuracy | 25/47 = 53.2% | 23/47 = 48.9% | -4.3 pp |
+| Cost/correct | $0.0243 | $0.0247 | +$0.0004 |
+| Mean latency | 4.26s | 3.58s | -0.68s |
+| Page recall | 0.892 | 0.937 | +0.045 |
+| Bbox IoU | 0.870 | 0.896 | +0.026 |
+| Lazy-answer rate | 0.041 | 0.027 | -0.014 |
+
+The full-run flip profile failed the experiment gate:
+
+- Baseline wrong -> new correct: 11.
+- Baseline correct -> new wrong: 12.
+- Net: -1 example.
+- Datasheet: +9 / -8.
+- Finance: +2 / -4.
+
+The result is useful despite being negative. Retrieval/grounding metrics moved
+in the right direction, but accuracy did not. This confirms the original
+hypothesis more sharply: the next gain will not come from broader retrieval or
+more perception by itself. The harness still needs safer post-evidence answer
+selection, especially before a retry can replace a concise previously-correct
+answer.
+
+Representative recoveries:
+
+- `dat-infineon-power-mosfet-avalanche-design-guidelines-applicationnotes-en-0047`
+  recovered `315 mJ`.
+- `dat-adrv9040-reference-manual-ug-2192-0052` recovered
+  `LOGGING and MULTI-THREADING are tied at 7 functions each`.
+- `dat-armv6.b3-coprocessor.annot-0011` recovered the correct abstention.
+- `dat-infineon-applicationnote-linear-mode-operation-safe-operation-diagram-mosfets-applicationnotes-en-0006`
+  recovered `500 A` for an approximate-current row.
+- `fin-aapl-20250927-0034` recovered `September 2022, $21`.
+
+Representative regressions:
+
+- `dat-Arm_EE382N_4-0001`: shifted from baseline/scorer-accepted `60%` to
+  `40%`.
+- `dat-DS5091D-00-0036`: shifted from `0.56V` to `0.7 V`.
+- `dat-adrv9040-reference-manual-ug-2192-0041`: produced a verbose
+  `DPD MODE1, NO M-TABLE UPDATE...` answer instead of concise `DPD_MODE1`.
+- `fin-goog-20251231-0041`: expanded the correct concise `Government bonds`
+  answer into a long calculation/rationale, which regressed scorer shape.
+- `fin-vis-jpm_gtm_us_daily-0114`: shifted from `Feb 2020` to `Jan 2000`,
+  still missing the requested period shape `Feb 2020 to Apr 2020`.
+
+Run telemetry:
+
+- Structured Gemini extraction fired on 47/148 rows; 34 of those rows were
+  correct and 13 were wrong.
+- Contract diagnostics appeared in 69/148 rows.
+- The workflow spent one evidence/reasoner retry on 102/148 rows.
+- `loop_retry_helped` was true for 7 rows.
+- `accepted_retry_preserved_initial` did not fire in this full run, which means
+  the current preservation guard is too narrow for the observed regressions.
+
+Fresh agent-eyes audit:
+
+`results/agent_eyes/2026-05-16-accepted-retry-preserve-full-run1-wrong/index.html`
+
+This audit contains all 60 wrong rows from the full run. It reinforces the
+post-evidence diagnosis: 47/60 wrong rows have both page recall and bbox IoU at
+least 0.9. The largest wrong-row families are `distant_evidence_fusion` (17),
+`spec_table_cell_retrieval` (5), `timing_diagram_reading` (5),
+`confusable_label` (4), and `chart_caption_fusion` (4).
+
+Decision: do not claim a new benchmark improvement from this checkpoint. The
+current canonical full-run accuracy remains the merged 60.14% result. The next
+iteration should keep Gemini as a gated schema/element parser but add stronger
+answer adjudication:
+
+- Compare initial concise answer, retry answer, and structured-extraction
+  candidate before overwriting a previously supported answer.
+- Add a scorer-shape risk check for verbose rationale appended to exact labels,
+  chart labels, and code identifiers.
+- Make the preservation guard fire on concise exact-label answers even when the
+  retry is verifier-supported but becomes much more verbose.
+- Treat finance chart-period questions as requiring a range contract, not a
+  single turning-point tick.
