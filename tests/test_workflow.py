@@ -35,6 +35,7 @@ from focusparse.pipeline.workflow import (
     _images_by_page,
     _infer_doc_id,
     _is_better_unsupported_answer,
+    _maybe_accept_deterministic_finance_answer,
     _page_number_from_filename,
     _should_allow_reasoner_shape_retry,
     _should_use_react_inspector,
@@ -630,6 +631,105 @@ def test_boolean_answer_blocks_verbose_reasoner_shape_retry():
         verdict=verdict,
         question_event=question,
         max_evidence_retries=1,
+    )
+
+
+def test_deterministic_finance_adjudication_accepts_false_rejected_answer():
+    question = QuestionEvent(
+        example_id="fin-aapl-20250927-0002",
+        question=(
+            "For the year in which 'Products' net sales reached their minimum among "
+            "the three years shown, what was the corresponding 'Gross margin' value, "
+            "and is this value also the minimum, typical, or maximum among the three "
+            "years' gross margins?"
+        ),
+        doc_id="aapl-20250927",
+        pages_available=1,
+        domain="finance",
+        answer_type="exact_match",
+    )
+    evidence = EvidenceEvent(
+        packets=[
+            _make_packet(packet_id="pkt_000", page=40, bbox=(0.0, 0.0, 1.0, 1.0)).model_copy(
+                update={
+                    "ocr_snippet": (
+                        "Gemini structured extraction: kind=table\n"
+                        "headers: Years ended | September 27, 2025 | September 28, 2024 | "
+                        "September 30, 2023\n"
+                        "candidate_rows: Products | $ 307,003 | $ 294,866 | $ 298,085 | "
+                        "Gross margin | 195,201 | 180,683 | 169,148\n"
+                        "confidence=0.95"
+                    )
+                }
+            )
+        ]
+    )
+    answer = AnswerEvent(answer="180,683; typical", citations=["pkt_000"], confidence=0.96)
+    verdict = VerdictEvent(
+        supported=False,
+        reason="Verifier selected the wrong year.",
+        next_action="escalate_reasoner",
+        confidence=0.7,
+    )
+
+    adjudicated = _maybe_accept_deterministic_finance_answer(
+        question_event=question,
+        evidence=evidence,
+        answer=answer,
+        verdict=verdict,
+    )
+
+    assert adjudicated.supported
+    assert adjudicated.next_action == "accept"
+    assert adjudicated.diagnostics["finance_adjudication"]["mechanism"] == (
+        "corresponding_value_status"
+    )
+
+
+def test_deterministic_finance_adjudication_does_not_accept_mismatch():
+    question = QuestionEvent(
+        example_id="fin-aapl-20250927-0002",
+        question=(
+            "For the year in which 'Products' net sales reached their minimum among "
+            "the three years shown, what was the corresponding 'Gross margin' value, "
+            "and is this value also the minimum, typical, or maximum among the three "
+            "years' gross margins?"
+        ),
+        doc_id="aapl-20250927",
+        pages_available=1,
+        domain="finance",
+        answer_type="exact_match",
+    )
+    evidence = EvidenceEvent(
+        packets=[
+            _make_packet(packet_id="pkt_000", page=40, bbox=(0.0, 0.0, 1.0, 1.0)).model_copy(
+                update={
+                    "ocr_snippet": (
+                        "headers: Years ended | September 27, 2025 | September 28, 2024 | "
+                        "September 30, 2023\n"
+                        "candidate_rows: Products | $ 307,003 | $ 294,866 | $ 298,085 | "
+                        "Gross margin | 195,201 | 180,683 | 169,148"
+                    )
+                }
+            )
+        ]
+    )
+    answer = AnswerEvent(answer="169,148; minimum", citations=["pkt_000"], confidence=0.99)
+    verdict = VerdictEvent(
+        supported=False,
+        reason="Still unsupported.",
+        next_action="escalate_reasoner",
+        confidence=0.7,
+    )
+
+    assert (
+        _maybe_accept_deterministic_finance_answer(
+            question_event=question,
+            evidence=evidence,
+            answer=answer,
+            verdict=verdict,
+        )
+        is verdict
     )
 
 

@@ -29,6 +29,10 @@ from focusparse.pipeline.events import (
 )
 from focusparse.pipeline.evidence_repair import build_same_evidence_repair_context
 from focusparse.pipeline.expander import expand_context
+from focusparse.pipeline.finance_adjudication import (
+    finance_answers_match,
+    infer_finance_answer_from_evidence,
+)
 from focusparse.pipeline.inspector import _FINE_DETAIL_QUESTION_FAMILIES, inspect_regions
 from focusparse.pipeline.localizer import propose_regions
 from focusparse.pipeline.planner import plan_question
@@ -720,6 +724,14 @@ class FocusWorkflow:
             step_counter=step_counter,
             question_family=plan.question_family,
         )
+        verdict = _maybe_accept_deterministic_finance_answer(
+            question_event=question_event,
+            evidence=evidence,
+            answer=answer_event,
+            verdict=verdict,
+            recorder=recorder,
+            retry_attempt=0,
+        )
 
         # --- RETRY LOOP ----------------------------------------------------
         # The verifier acts as a controller, not just a judge. The initial
@@ -935,6 +947,14 @@ class FocusWorkflow:
                 step_counter=step_counter,
                 retry_attempt=retries_used,
                 question_family=plan.question_family,
+            )
+            verdict = _maybe_accept_deterministic_finance_answer(
+                question_event=question_event,
+                evidence=answer_evidence,
+                answer=answer_event,
+                verdict=verdict,
+                recorder=recorder,
+                retry_attempt=retries_used,
             )
             if not verdict.supported and _is_better_unsupported_answer(
                 answer_event,
@@ -1950,6 +1970,69 @@ def _is_better_unsupported_answer(
     ):
         return False
     return candidate_confidence > incumbent_confidence
+
+
+def _maybe_accept_deterministic_finance_answer(
+    *,
+    question_event: QuestionEvent,
+    evidence: EvidenceEvent,
+    answer: AnswerEvent,
+    verdict: VerdictEvent,
+    recorder: TrajectoryRecorder | None = None,
+    retry_attempt: int = 0,
+) -> VerdictEvent:
+    """Override verifier false-rejects only when evidence independently agrees.
+
+    This is intentionally conservative: it never invents a new answer. It only
+    accepts the current cited answer when a deterministic, gold-free finance
+    table reconstruction from the same packets produces the same value.
+    """
+
+    if verdict.supported:
+        return verdict
+    if str(question_event.domain or "").lower() != "finance":
+        return verdict
+    if not answer.citations or _answer_looks_unanswerable(answer.answer):
+        return verdict
+
+    adjudication = infer_finance_answer_from_evidence(
+        question_event.question,
+        evidence.packets,
+        answer_type=question_event.answer_type,
+    )
+    if not adjudication or not finance_answers_match(answer.answer, adjudication):
+        return verdict
+
+    diagnostics = dict(verdict.diagnostics or {})
+    diagnostics["finance_adjudication"] = {
+        "mechanism": adjudication.mechanism,
+        "candidate_answer": adjudication.answer,
+        "packet_ids": list(adjudication.packet_ids),
+    }
+    if recorder is not None:
+        _add_debug_event(
+            recorder,
+            stage="verify",
+            event_type="selection",
+            retry_attempt=retry_attempt,
+            payload={
+                "selected": "deterministic_finance_adjudication",
+                "mechanism": adjudication.mechanism,
+                "candidate_answer": adjudication.answer,
+                "prior_next_action": verdict.next_action,
+                "prior_reason": verdict.reason,
+            },
+        )
+    return VerdictEvent(
+        supported=True,
+        reason=(
+            "Deterministic finance evidence adjudication confirmed the cited "
+            f"answer from the same evidence packets: {adjudication.rationale}"
+        ),
+        next_action="accept",
+        confidence=max(float(verdict.confidence or 0.0), float(answer.confidence or 0.0)),
+        diagnostics=diagnostics,
+    )
 
 
 def _question_requests_single_entity(question_text: str | None) -> bool:
