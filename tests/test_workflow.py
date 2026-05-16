@@ -408,6 +408,53 @@ def test_retry_answer_selector_rejects_unanswerable_over_cited_answer():
     )
 
 
+def test_retry_answer_selector_rejects_verbose_extension_of_concise_answer():
+    incumbent = AnswerEvent(answer="FX bonds", citations=["pkt_000", "pkt_003"], confidence=0.84)
+    candidate = AnswerEvent(
+        answer="C. FX bonds, about 0.0 percentage points",
+        citations=["pkt_000"],
+        confidence=0.91,
+    )
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Which asset class among those shown would exhibit the smallest estimated "
+            "change in response to a one standard deviation decrease in the VIX?"
+        ),
+    )
+
+
+def test_retry_answer_selector_rejects_numeric_rationale_extension():
+    incumbent = AnswerEvent(answer="12", citations=["pkt_003"], confidence=0.97)
+    candidate = AnswerEvent(answer="12 instead of 14", citations=["pkt_003"], confidence=0.95)
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="What actual prescaler value applies when LENPRE=14?",
+    )
+
+
+def test_retry_answer_selector_prefers_entity_over_numeric_surrogate():
+    incumbent = AnswerEvent(
+        answer="0.000; minimum",
+        citations=["pkt_000", "pkt_002"],
+        confidence=0.91,
+    )
+    candidate = AnswerEvent(answer="FX bonds", citations=["pkt_000", "pkt_002"], confidence=0.66)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Which asset class among those shown would exhibit the smallest estimated "
+            "change in response to a one standard deviation decrease in the VIX?"
+        ),
+    )
+
+
 def test_supported_retry_preserves_concise_answer_over_verbose_rationale():
     initial = AnswerEvent(answer="[31:16]", citations=["pkt_000"], confidence=0.98)
     candidate = AnswerEvent(
@@ -418,6 +465,30 @@ def test_supported_retry_preserves_concise_answer_over_verbose_rationale():
     question = QuestionEvent(
         example_id="ex",
         question="Which bit fields are guaranteed to always read as zero?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+        domain="datasheet",
+    )
+
+    assert _should_preserve_initial_answer_on_supported_retry(
+        initial,
+        candidate,
+        question_event=question,
+        retries_used=1,
+    )
+
+
+def test_supported_retry_preserves_code_identifier_with_spacing_variant():
+    initial = AnswerEvent(answer="DPD_MODE1", citations=["pkt_004", "pkt_006"], confidence=0.94)
+    candidate = AnswerEvent(
+        answer="DPD MODE1, NO M-TABLE UPDATE SINCE Tx RMS POWER < MAX POWER",
+        citations=["pkt_006"],
+        confidence=0.95,
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="Which DPD mode results in fewer M-table updates?",
         doc_id="doc",
         pages_available=1,
         answer_type="exact_match",

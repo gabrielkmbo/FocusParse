@@ -220,6 +220,19 @@
   47/60 wrong rows had both page recall and bbox IoU >= 0.9, confirming the next
   iteration should focus on same-evidence answer adjudication rather than
   broader retrieval.
+- Added a same-evidence adjudication guard for unsupported retries that only
+  become longer versions of a concise cited answer, plus named-entity preference
+  when a question asks for an asset class/entity but one candidate is only a
+  numeric surrogate. Also extended syntax-only answer normalization for
+  option-rationale collapse, finance panel/value bloat, and page-reference
+  punctuation. Focused smoke
+  `same-evidence-adjudication-smoke-run2` scored 7/8 with +5 net flips versus
+  the failed full-run checkpoint. The 38-row regression-heavy slice
+  `same-evidence-adjudication-38slice-run1` scored 34/38, cost/correct $0.0156,
+  page recall 0.943, bbox IoU 0.910, lazy rate 0.026, but still failed the
+  canonical 60.14% baseline flip gate (1 recovery, 4 regressions, net -3).
+  Do not full-run this checkpoint yet; next step is evidence-grounded
+  same-shape scalar/chart adjudication and chart-period range extraction.
 
 ## 2026-05-14
 

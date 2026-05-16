@@ -86,6 +86,7 @@ _EXPAND_RETRY_FACTOR = 1.5  # multiplied each retry → wider neighbor net
 _MAX_ADJACENCY_PAD = 0.30  # cap so the pad stays meaningful
 _RETRY_SELECTION_CONFIDENCE_MARGIN = 0.15
 _RETRY_SELECTION_TIE_RETRY_MARGIN = 0.05
+_NAMED_ENTITY_RETRY_SELECTION_MARGIN = 0.35
 _ABSTAIN_OVERRIDE_MIN_CONFIDENCE = 0.45
 _VERBOSE_SHAPE_RETRY_MAX_CHARS = 90
 _VERBOSE_SHAPE_RETRY_MAX_WORDS = 12
@@ -1994,6 +1995,21 @@ def _is_better_unsupported_answer(
     incumbent_confidence = float(incumbent.confidence or 0.0)
     candidate_overlap = _answer_question_overlap(candidate.answer, question_text)
     incumbent_overlap = _answer_question_overlap(incumbent.answer, question_text)
+    if (
+        _answer_is_concise_shape(incumbent.answer)
+        and _retry_answer_looks_like_verbose_extension(candidate.answer, incumbent.answer)
+        and not _retry_extension_adds_required_fields(candidate.answer, question_text)
+        and candidate_confidence <= incumbent_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN
+    ):
+        return False
+    if (
+        _question_requests_named_entity_answer(question_text)
+        and _answer_is_concise_shape(candidate.answer)
+        and not _answer_looks_numeric_status_surrogate(candidate.answer)
+        and _answer_looks_numeric_status_surrogate(incumbent.answer)
+        and candidate_confidence + _NAMED_ENTITY_RETRY_SELECTION_MARGIN >= incumbent_confidence
+    ):
+        return True
     if _question_requests_variable(question_text):
         if _answer_looks_formula_like(candidate.answer) and not _answer_looks_formula_like(
             incumbent.answer
@@ -2117,7 +2133,10 @@ def _should_preserve_initial_answer_on_supported_retry(
         >= len(_answer_selection_tokens(initial_text)) + 4
     )
 
-    if initial_norm in candidate_norm and (
+    if (
+        _answer_contains_initial_span(candidate_text, initial_text)
+        or initial_norm in candidate_norm
+    ) and (
         candidate_is_much_longer or _answer_has_trailing_explanation(candidate_text, initial_text)
     ):
         return True
@@ -2128,6 +2147,64 @@ def _should_preserve_initial_answer_on_supported_retry(
             or _answer_looks_verbose_retry_context(candidate_text)
         )
     )
+
+
+def _retry_answer_looks_like_verbose_extension(
+    candidate: str | None,
+    incumbent: str | None,
+) -> bool:
+    if not candidate or not incumbent:
+        return False
+    if not _answer_contains_initial_span(candidate, incumbent):
+        return False
+    candidate_text = str(candidate).strip()
+    incumbent_text = str(incumbent).strip()
+    if _normalize_answer_for_telemetry(candidate_text) == _normalize_answer_for_telemetry(
+        incumbent_text
+    ):
+        return False
+    return bool(
+        len(candidate_text) >= len(incumbent_text) + 12
+        or len(_answer_selection_tokens(candidate_text))
+        >= len(_answer_selection_tokens(incumbent_text)) + 2
+        or _answer_has_trailing_explanation(candidate_text, incumbent_text)
+    )
+
+
+def _retry_extension_adds_required_fields(candidate: str | None, question_text: str | None) -> bool:
+    """Avoid blocking a retry that clearly completes a multi-field contract."""
+
+    if not candidate or not question_text:
+        return False
+    question = str(question_text).lower()
+    candidate_text = str(candidate)
+    if re.search(r"\bmin(?:imum)?\s*/?\s*typ(?:ical)?\s*/?\s*max(?:imum)?\b", question, re.I):
+        return bool(
+            re.search(r"\bmin(?:imum)?\b", candidate_text, re.I)
+            and re.search(r"\btyp(?:ical)?\b", candidate_text, re.I)
+            and re.search(r"\bmax(?:imum)?\b", candidate_text, re.I)
+        )
+    if re.search(r"\b(?:both|two|three|all)\b", question, re.I):
+        return bool(re.search(r"\s+(?:and|;)\s+", candidate_text, re.I))
+    return False
+
+
+def _answer_contains_initial_span(candidate: str | None, initial: str | None) -> bool:
+    candidate_norm = _canonical_answer_span_for_selection(candidate)
+    initial_norm = _canonical_answer_span_for_selection(initial)
+    if not candidate_norm or not initial_norm:
+        return False
+    return initial_norm in candidate_norm
+
+
+def _canonical_answer_span_for_selection(answer: str | None) -> str:
+    text = str(answer or "").strip().lower()
+    text = re.sub(r"^[a-e]\.\s+", "", text)
+    text = text.replace("_", " ")
+    text = text.replace("µ", "u")
+    text = re.sub(r"[\"'“”‘’]", "", text)
+    text = re.sub(r"[^a-z0-9.%+-]+", " ", text)
+    return " ".join(text.split())
 
 
 def _answer_has_trailing_explanation(candidate: str, initial: str) -> bool:
@@ -2235,6 +2312,20 @@ def _question_requests_single_entity(question_text: str | None) -> bool:
     )
 
 
+def _question_requests_named_entity_answer(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    normalized = str(question_text).lower()
+    return bool(
+        re.search(
+            r"\bwhich\s+(?:[\w-]+\s+){0,4}"
+            r"(?:asset\s+class|class\s+of\s+securities|security\s+class|country|"
+            r"company|entity|region|line|series|label|row|variable|parameter)\b",
+            normalized,
+        )
+    )
+
+
 def _question_requests_variable(question_text: str | None) -> bool:
     if not question_text:
         return False
@@ -2262,6 +2353,25 @@ def _answer_looks_formula_like(answer: str | None) -> bool:
         return False
     text = str(answer)
     return bool("=" in text and re.search(r"[+*/()]|\b(?:eff|loss|offset)\b", text, re.I))
+
+
+def _answer_looks_numeric_status_surrogate(answer: str | None) -> bool:
+    if not answer:
+        return False
+    text = str(answer).strip()
+    if _answer_looks_unanswerable(text):
+        return False
+    numeric = bool(re.search(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?\s*%?", text))
+    status = bool(
+        re.search(
+            r"\b(?:min(?:imum)?|max(?:imum)?|typ(?:ical)?|score|percentage|points?)\b",
+            text,
+            re.I,
+        )
+    )
+    if numeric and status:
+        return True
+    return bool(re.fullmatch(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?\s*%?", text))
 
 
 def _answers_are_same_shape_scalars(left: str | None, right: str | None) -> bool:

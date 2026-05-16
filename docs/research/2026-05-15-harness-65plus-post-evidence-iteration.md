@@ -802,3 +802,93 @@ answer adjudication:
   retry is verifier-supported but becomes much more verbose.
 - Treat finance chart-period questions as requiring a range contract, not a
   single turning-point tick.
+
+## 2026-05-16 Same-Evidence Adjudication Guard
+
+I implemented a narrow same-evidence answer-selection guard aimed at the
+regressions from `accepted-retry-preserve-full-run1`. It does not add retrieval
+or extra model samples. It only changes how the workflow chooses among answers
+already produced from the same evidence:
+
+- If an unsupported retry is just a longer version of a concise cited answer
+  (`FX bonds` -> `C. FX bonds, about ...`; `12` -> `12 instead of 14`;
+  `DPD_MODE1` -> `DPD MODE1, NO M-TABLE UPDATE ...`), keep the concise answer
+  unless the retry clearly completes a required multi-field contract.
+- If the question asks for a named entity/class/series and one answer is a
+  numeric surrogate (`0.000; minimum`) while another answer is a concise entity
+  label (`FX bonds`), prefer the entity label within a wider confidence margin.
+- Extend syntax-only reasoner normalization for exact-match answers:
+  named-option rationale collapse (`Government bonds ... experienced the
+  largest ...` -> `Government bonds`), panel/value bloat
+  (`C. FX bonds, about 0.0 percentage points` -> `FX bonds`), and page-reference
+  punctuation (`..., page B3-10` -> `...; page B3-10`).
+
+Verification:
+
+- Focused tests for the new guard/normalizers passed.
+- Broader targeted suite passed:
+  `uv run pytest tests/test_workflow.py tests/test_reasoner.py tests/test_scoring.py tests/test_answer_contract.py tests/test_verifier.py tests/test_pricing.py tests/test_hf_eval_cli.py::test_resolve_tiers_honors_schema_extractor_override`
+  = 203 passed / 72 skipped.
+- Targeted Ruff checks and format checks passed for touched files.
+
+Live smoke:
+
+`results/hf/sprint-2026-05-16/same-evidence-adjudication-smoke-run2/focusparse_focus_agentic_multi_page_0b139a04.json`
+
+| Metric | Value |
+| --- | ---: |
+| Accuracy | 7/8 = 87.5% |
+| Datasheet accuracy | 4/5 = 80.0% |
+| Finance accuracy | 3/3 = 100.0% |
+| Cost | $0.151 |
+| Cost/correct | $0.0216 |
+| Mean latency | 4.14s |
+| Page recall | 0.938 |
+| Bbox IoU | 0.750 |
+| Lazy-answer rate | 0.000 |
+
+Against the failed full-run checkpoint on these same 8 rows, the smoke flipped
+6 wrong -> correct and 1 correct -> wrong, net +5. It fixed the intended
+mechanism examples: `DPD_MODE1`, `12`, the B3-10 semicolon page reference,
+`Government bonds`, and `FX bonds`. The one regression was a chart estimate
+variance row: `315 mJ` -> `316 mJ`.
+
+Regression-heavy 38-row gate:
+
+`results/hf/sprint-2026-05-16/same-evidence-adjudication-38slice-run1/focusparse_focus_agentic_multi_page_0b139a04.json`
+
+| Metric | Value |
+| --- | ---: |
+| Accuracy | 34/38 = 89.5% |
+| Datasheet accuracy | 23/25 = 92.0% |
+| Finance accuracy | 11/13 = 84.6% |
+| Cost | $0.531 |
+| Cost/correct | $0.0156 |
+| Mean latency | 3.00s |
+| Page recall | 0.943 |
+| Bbox IoU | 0.910 |
+| Lazy-answer rate | 0.026 |
+| Structured Gemini extraction rows | 12/38 |
+
+Versus `accepted-retry-preserve-full-run1` on the same 38 rows, this was
+positive: 4 recoveries, 2 regressions, net +2. Recoveries included
+`fin-goog-20251231-0041` (`Government bonds`), `dat-DS5091D-00-0036`
+(`0.56 V`), `dat-Arm_EE382N_4-0001` (`60%`), and
+`fin-boe_fsr_2024_nov-0056` (`Germany`).
+
+However, against the canonical 60.14% baseline on the same 38 rows, the gate
+still failed: 1 recovery, 4 regressions, net -3. The regressions were:
+
+- `dat-Arm_EE382N_4-0006`: verifier abstained despite a concise `1.0`
+  answer.
+- `dat-DS5091D-00-0043`: supported retry shifted `0.9 W` to `1.5 W`.
+- `fin-vis-jpm_gtm_us_daily-0114`: still selected `Jan 2000` instead of the
+  required period range.
+- `fin-bis_qr_2024_sep-0050`: model variance produced
+  `FX bonds and FX loans; ...` instead of the concise `FX bonds`.
+
+Decision: commit this as a useful controller/normalizer checkpoint, but do not
+run or claim another full n=148 result from it. The next mechanism should be
+more evidence-grounded adjudication for same-shape scalar/chart readings and
+chart-period range extraction; simply preserving every concise scalar would be
+too blunt and risks hiding real verifier corrections.

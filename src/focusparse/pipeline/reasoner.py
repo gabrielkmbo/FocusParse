@@ -599,6 +599,10 @@ def _normalize_answer_shape(
             return min_typ_max
 
         if stem == "exact_match" and "finance" in domain_l:
+            leading_entity = _normalize_leading_named_entity_value_answer(text, question_text)
+            if leading_entity:
+                return leading_entity
+
             value_status = _normalize_finance_value_status_shape(text)
             if value_status:
                 return value_status
@@ -889,6 +893,13 @@ def _normalize_page_number_answer(text: str, question_text: str) -> str | None:
     match = re.match(r"^(?P<page>\d{2,5})\s+and\s+\d+(?:\.\d+){1,4}\s+\S", text)
     if match:
         return match.group("page")
+    match = re.match(
+        r"^(?P<head>.+?),\s*page\s+(?P<page>[A-Za-z0-9][A-Za-z0-9.\-]*)$",
+        text,
+        re.I,
+    )
+    if match and re.search(r"\b(?:same\s+page|page\s+reference|refer\s+to)\b", question_text, re.I):
+        return f"{match.group('head').strip()}; page {match.group('page')}"
     return None
 
 
@@ -1073,6 +1084,47 @@ def _normalize_finance_entity_value_pair(text: str, *, domain: str) -> str | Non
     return None
 
 
+def _normalize_leading_named_entity_value_answer(
+    text: str,
+    question_text: str | None,
+) -> str | None:
+    if not _question_requests_named_entity_answer(question_text):
+        return None
+    match = re.match(
+        r"^(?:[A-Z]\.\s+)?(?P<label>[A-Za-z][A-Za-z0-9&/ .'-]{1,80}?)"
+        r"\s*,\s*(?:about|approximately|around|roughly|[-+$]?\d)",
+        text,
+        re.I,
+    )
+    if not match:
+        return None
+    label = match.group("label").strip()
+    if not _looks_concise_answer_prefix(label):
+        return None
+    if re.search(
+        r"\b(?:january|february|march|april|may|june|july|august|september|"
+        r"october|november|december)\b",
+        label,
+        re.I,
+    ):
+        return None
+    return re.sub(r"^[A-Z]\.\s+", "", label).strip()
+
+
+def _question_requests_named_entity_answer(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    return bool(
+        re.search(
+            r"\bwhich\s+(?:[\w-]+\s+){0,4}"
+            r"(?:asset\s+class|class\s+of\s+securities|security\s+class|country|"
+            r"company|entity|region|line|series|label|row|variable|parameter)\b",
+            str(question_text),
+            re.I,
+        )
+    )
+
+
 def _normalize_variable_option_answer(text: str, question_text: str) -> str | None:
     if not re.search(r"\bwhich\b.{0,80}\b(?:variable|axis)\b", question_text, re.I):
         return None
@@ -1164,6 +1216,13 @@ def _normalize_option_answer_from_question(text: str, question_text: str) -> str
             tail,
         ):
             return _match_original_case(text, option) or option
+        if re.search(
+            rf"\b{re.escape(option_l)}\b[^.?!]{{0,120}}\b"
+            r"(?:experienced|had|has|shows?|exhibits?|represents?)\b[^.?!]{0,120}\b"
+            r"(?:largest|highest|smallest|lowest|most|least)\b",
+            tail,
+        ):
+            return _match_original_case(text, option) or option
     return None
 
 
@@ -1188,6 +1247,15 @@ def _match_original_case(text: str, phrase: str) -> str | None:
 
 
 def _normalize_explanatory_semicolon_answer(text: str) -> str | None:
+    panel_comma = re.match(
+        r"^[A-Z]\.\s+(?P<label>[^,.;\u2013\u2014-]{2,80}),\s+"
+        r"(?:about|approximately|around|roughly|-?\d|\$)",
+        text,
+        re.I,
+    )
+    if panel_comma and _looks_concise_answer_prefix(panel_comma.group("label")):
+        return panel_comma.group("label").strip()
+
     panel_sentence = re.match(
         r"^[A-Z]\.\s+(?P<label>[^.;\u2013\u2014-]{2,80})"
         r"(?:[.;]\s+|\s+[-\u2013\u2014]\s+).+$",

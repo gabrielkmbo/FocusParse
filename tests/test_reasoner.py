@@ -1492,6 +1492,25 @@ def test_answer_shape_collapses_option_and_entity_value_answers() -> None:
     )
     assert (
         _normalize_answer_shape(
+            "Using the fair value totals in the tables of Total investments, "
+            "Government bonds increased from $27,420 to $49,504, an increase "
+            "of about 80.5%; Corporate debt securities increased about 2.2%; "
+            "and Mortgage-backed and asset-backed securities increased about "
+            "1.9%. Therefore, Government bonds experienced the largest "
+            "percentage increase in fair value.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text=(
+                "Between December 31, 2024 and December 31, 2025, which class "
+                "of securities (government bonds, corporate debt securities, "
+                "or mortgage-backed and asset-backed securities) experienced "
+                "the largest percentage increase in fair value?"
+            ),
+        )
+        == "Government bonds"
+    )
+    assert (
+        _normalize_answer_shape(
             "France and 49.9",
             answer_type="exact_match",
             domain="finance",
@@ -1561,6 +1580,40 @@ def test_answer_shape_collapses_live_verbose_chart_variants() -> None:
             question_text="Which panel has the smallest VIX coefficient?",
         )
         == "FX bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "C. FX bonds, about 0.0 percentage points",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which asset class has the smallest estimated VIX response?",
+        )
+        == "FX bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "FX bonds, 0.000; minimum",
+            answer_type="exact_match",
+            domain="finance",
+            question_text=(
+                "Which asset class among those shown would exhibit the smallest "
+                "estimated change in response to a one standard deviation decrease "
+                "in the VIX?"
+            ),
+        )
+        == "FX bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "Cache type register and Tightly Coupled Memory (TCM) type register, page B3-10",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text=(
+                "Which two register types share the same page reference for their "
+                "detailed descriptions, and what is the page number they refer to?"
+            ),
+        )
+        == "Cache type register and Tightly Coupled Memory (TCM) type register; page B3-10"
     )
     assert (
         _normalize_answer_shape(
