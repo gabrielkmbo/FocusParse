@@ -271,6 +271,8 @@ def _looks_too_short_for_multi_field(text: str) -> bool:
 
 
 def _looks_too_short_for_visual_explanation(text: str) -> bool:
+    if ("," in text or ";" in text) and _has_structured_file_size_pair(text):
+        return False
     words = [
         word
         for word in _WORD_RE.findall(text)
@@ -307,6 +309,17 @@ def _looks_too_short_for_visual_explanation(text: str) -> bool:
     }
     return not has_visible_chart_label and not any(
         word.lower() in explanatory_terms for word in words
+    )
+
+
+def _has_structured_file_size_pair(text: str) -> bool:
+    return bool(
+        re.search(r"\b[\w.-]+\.(?:bin|elf|fw|hex|img)\b", text, re.IGNORECASE)
+        and re.search(
+            r"\b\d+(?:\.\d+)?\s*(?:b|bytes?|kb|kib|mb|mib|gb|gib)\b",
+            text,
+            re.IGNORECASE,
+        )
     )
 
 

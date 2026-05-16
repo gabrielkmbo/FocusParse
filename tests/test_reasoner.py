@@ -1099,6 +1099,27 @@ def test_answer_shape_formats_finance_value_status_pair() -> None:
     )
 
 
+def test_answer_shape_formats_datasheet_file_size_pair() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "ADRV9040_FW.bin; 641 kb",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "ADRV9040_FW.bin, 641 kb"
+    )
+    assert (
+        _normalize_answer_shape(
+            "ADRV9040_FW.bin; 641 kb; STATE 0: POWERUP/RESET -> STATE 1: READY/IDLE",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "ADRV9040_FW.bin, 641 kb"
+    )
+
+
 def test_answer_shape_corresponding_finance_requires_status() -> None:
     from focusparse.pipeline.reasoner import _normalize_answer_shape
 

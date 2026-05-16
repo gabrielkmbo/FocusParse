@@ -590,6 +590,11 @@ def _normalize_answer_shape(
             if corresponding_value:
                 return corresponding_value
 
+        if stem == "exact_match" and "datasheet" in domain_l:
+            file_size = _normalize_datasheet_file_size_shape(text)
+            if file_size:
+                return file_size
+
         variable_value = re.fullmatch(
             r"([A-Za-z][A-Za-z0-9_]{0,12})\s*=\s*"
             r"(-?\d+(?:\.\d+)?)\s*([A-Za-zµμ%]{1,6})",
@@ -762,6 +767,24 @@ def _normalize_finance_exact_value(text: str) -> str:
     if accounting:
         return f"-{accounting.group(1)}"
     return value
+
+
+def _normalize_datasheet_file_size_shape(text: str) -> str | None:
+    file_name = r"[A-Za-z0-9_.-]+\.(?:bin|elf|fw|hex|img)"
+    size = r"\d+(?:\.\d+)?\s*(?:b|bytes?|kb|kib|mb|mib|gb|gib)"
+    match = re.match(
+        rf"^(?P<file>{file_name})\s*[,;]\s*(?P<size>{size})(?P<tail>.*)$",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    tail = match.group("tail").strip()
+    if tail and not re.match(r"^[,;]\s*state\b", tail, re.IGNORECASE):
+        return None
+    size_text = re.sub(r"\s+", " ", match.group("size").strip())
+    return f"{match.group('file')}, {size_text}"
 
 
 def _normalize_min_typ_max_shape(text: str) -> str | None:

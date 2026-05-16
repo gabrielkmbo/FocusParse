@@ -86,6 +86,18 @@ def test_visual_cue_question_rejects_prose_without_visible_cue() -> None:
     )
 
 
+def test_visual_cue_question_allows_structured_file_size_answer() -> None:
+    contract = build_answer_contract(
+        "Which firmware file must be loaded first, and what is the listed size "
+        "of this firmware file? Explain how the chart and table support it.",
+        answer_type="exact_match",
+        domain="datasheet",
+        question_family="chart_table_cross_ref",
+    )
+
+    assert answer_contract_failures("ADRV9040_FW.bin, 641 kb", contract) == []
+
+
 def test_wrong_row_cues_are_detected_without_forcing_failure() -> None:
     contract = build_answer_contract(
         "Among the visually similar part number rows, which package has the lowest value?",
