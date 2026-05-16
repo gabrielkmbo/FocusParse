@@ -1605,6 +1605,20 @@ def test_answer_shape_collapses_live_verbose_chart_variants() -> None:
     )
     assert (
         _normalize_answer_shape(
+            "FX bonds and FX loans; A one standard deviation fall in the VIX "
+            "has no significant effect on any other flow types.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text=(
+                "Which asset class among those shown would exhibit the smallest "
+                "estimated change in response to a one standard deviation decrease "
+                "in the VIX?"
+            ),
+        )
+        == "FX bonds"
+    )
+    assert (
+        _normalize_answer_shape(
             "Cache type register and Tightly Coupled Memory (TCM) type register, page B3-10",
             answer_type="exact_match",
             domain="datasheet",

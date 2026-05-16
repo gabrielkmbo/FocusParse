@@ -792,6 +792,28 @@ class FocusWorkflow:
                 loop_terminated = "accepted"
                 break
             if action == "abstain":
+                if _should_keep_cited_answer_on_initial_visual_estimate_abstain(
+                    answer_event,
+                    question_event=question_event,
+                    verdict=verdict,
+                    retries_used=retries_used,
+                ):
+                    _add_debug_event(
+                        recorder,
+                        stage="answer",
+                        event_type="selection",
+                        retry_attempt=retries_used,
+                        payload={
+                            "selected": "current_answer",
+                            "reason": "initial_visual_estimate_abstain_guard",
+                            "selected_answer": answer_event.answer,
+                            "selected_confidence": answer_event.confidence,
+                            "discarded_next_action": verdict.next_action,
+                            "discarded_verifier_confidence": verdict.confidence,
+                        },
+                    )
+                    loop_terminated = "exhausted"
+                    break
                 if _should_keep_best_unsupported_on_retry_abstain(
                     best_unsupported_answer,
                     question_event=question_event,
@@ -2119,6 +2141,14 @@ def _should_preserve_initial_answer_on_supported_retry(
     candidate_text = str(candidate.answer or "").strip()
     if not _answer_is_concise_shape(initial_text):
         return False
+    if (
+        _answers_are_same_shape_scalars(initial_text, candidate_text)
+        and initial_confidence >= 0.85
+        and candidate_confidence <= initial_confidence + _RETRY_SELECTION_TIE_RETRY_MARGIN
+        and _question_requests_chart_scalar_reading(question_event.question)
+        and not _question_requests_calculation(question_event.question)
+    ):
+        return True
 
     if _answer_looks_unanswerable(candidate_text):
         return True
@@ -2332,6 +2362,63 @@ def _question_requests_variable(question_text: str | None) -> bool:
     return bool(re.search(r"\b(?:variable|y[- ]axis|x[- ]axis)\b", str(question_text), re.I))
 
 
+def _question_requests_visual_numeric_estimate(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    question = str(question_text)
+    return bool(
+        re.search(r"\b(?:estimate|approximately|approximate|rounded|nearest)\b", question, re.I)
+        and re.search(
+            r"\b(?:aspect\s+ratio|ratio|width|height|visible|borders?|curve|axis|chart|figure)\b",
+            question,
+            re.I,
+        )
+    )
+
+
+def _question_requests_chart_scalar_reading(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    question = str(question_text)
+    return bool(
+        re.search(r"\b(?:chart|figure|curve|axis|caption|plot|graph)\b", question, re.I)
+        and re.search(
+            r"\b(?:what|which|read|allowed|at|ambient|temperature|dissipation|voltage|current)\b",
+            question,
+            re.I,
+        )
+    )
+
+
+def _question_requests_calculation(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    return bool(
+        re.search(
+            r"\b(?:calculate|calculation|computed?|formula|equation|divider|show your)\b",
+            str(question_text),
+            re.I,
+        )
+    )
+
+
+def _question_requests_period_range(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    question = str(question_text)
+    return bool(
+        re.search(
+            r"\b(?:during which period|which period|date range|time period)\b", question, re.I
+        )
+        or (
+            re.search(
+                r"\b(?:decline|increase|fall|rise|dropped|fastest|steepest)\b", question, re.I
+            )
+            and re.search(r"\b(?:period|from|to|between)\b", question, re.I)
+        )
+    )
+
+
 def _entity_retry_selection_margin(question_text: str | None) -> float:
     normalized = (question_text or "").lower()
     if re.search(r"\b(?:variable|parameter|y[- ]axis|x[- ]axis)\b", normalized):
@@ -2353,6 +2440,24 @@ def _answer_looks_formula_like(answer: str | None) -> bool:
         return False
     text = str(answer)
     return bool("=" in text and re.search(r"[+*/()]|\b(?:eff|loss|offset)\b", text, re.I))
+
+
+def _answer_looks_numeric_scalar(answer: str | None) -> bool:
+    if not answer:
+        return False
+    text = str(answer).strip()
+    return bool(re.fullmatch(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?\s*[A-Za-zµμ%]{0,8}", text))
+
+
+def _answer_looks_single_date(answer: str | None) -> bool:
+    if not answer:
+        return False
+    text = str(answer).strip()
+    month = (
+        r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
+        r"Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    )
+    return bool(re.fullmatch(rf"{month}\s+\d{{4}}", text, re.I))
 
 
 def _answer_looks_numeric_status_surrogate(answer: str | None) -> bool:
@@ -2457,6 +2562,35 @@ def _should_keep_best_unsupported_on_retry_abstain(
     return float(answer.confidence or 0.0) >= _ABSTAIN_OVERRIDE_MIN_CONFIDENCE
 
 
+def _should_keep_cited_answer_on_initial_visual_estimate_abstain(
+    answer: AnswerEvent,
+    *,
+    question_event: QuestionEvent,
+    verdict: VerdictEvent,
+    retries_used: int,
+) -> bool:
+    """Keep a cited visual estimate when the first verifier abstains.
+
+    This is narrower than the retry-abstain guard. It only applies before any
+    retry, only for non-unanswerable numeric visual-estimate questions, and
+    only when the reasoner produced a concise cited scalar. The goal is to
+    avoid erasing approximate measurements when the verifier cannot read the
+    visual crop with enough certainty.
+    """
+
+    if retries_used != 0 or verdict.supported or verdict.next_action != "abstain":
+        return False
+    if _answer_type_is_unanswerable(question_event.answer_type):
+        return False
+    if not answer.citations or _answer_looks_unanswerable(answer.answer):
+        return False
+    if float(answer.confidence or 0.0) < 0.70:
+        return False
+    if not _question_requests_visual_numeric_estimate(question_event.question):
+        return False
+    return _answer_looks_numeric_scalar(answer.answer)
+
+
 def _should_allow_reasoner_shape_retry(
     *,
     action: str,
@@ -2482,6 +2616,10 @@ def _should_allow_reasoner_shape_retry(
         return False
     if _verdict_has_answer_shape_failure(verdict):
         failures = set(_verdict_answer_shape_failures(verdict))
+        if _question_requests_period_range(question_event.question) and _answer_looks_single_date(
+            answer.answer
+        ):
+            return True
         return not (
             failures <= {"wrong_row_risk", "legend_binding_risk"}
             and _answer_is_concise_shape(answer.answer)
@@ -2530,6 +2668,13 @@ def _build_reasoner_repair_hint(
     failures = set(_verdict_answer_shape_failures(verdict))
     question = str(question_event.question or "").lower()
 
+    if _question_requests_period_range(question_event.question):
+        parts.append(
+            "Targeted chart-period repair: the question asks for a period/range, "
+            "so do not answer with a single date or turning point. Bind the start "
+            "and end labels of the steepest visual interval from the same chart "
+            "and answer as '<start> to <end>'."
+        )
     if "missing_field" in failures:
         parts.append(
             "Targeted multi-field repair: list every field requested by the question. "

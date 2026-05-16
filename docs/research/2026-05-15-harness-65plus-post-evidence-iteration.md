@@ -453,9 +453,10 @@ Model selection was checked against current Google AI documentation. Gemini
 3.1 Pro Preview supports image/PDF inputs, structured outputs, thinking, and a
 large context window, so it remains the default `schema_extractor` role for
 complex CV/table parsing. I also added `gemini_schema_lite` backed by
-`gemini-3.1-flash-lite-preview` for future cheap extraction A/Bs; Google's model page
-positions it for high-volume lightweight data extraction and document
-processing.
+the stable `gemini-3.1-flash-lite` endpoint for future cheap extraction A/Bs,
+while keeping `gemini_schema_lite_preview` explicit for preview-only tests;
+Google's model page positions the Flash-Lite family for high-volume
+lightweight data extraction and document processing.
 
 Live narrow-gate slice:
 
@@ -621,6 +622,16 @@ requests. Live smoke results:
   note, and confidence 0.98. A deliberately tiny 512-token smoke budget
   fail-closed, while a production-style 2048-token budget worked; the default
   schema extractor tier uses 8192 output tokens.
+- After the higher-quota key refresh, the production code path was re-smoked on
+  a synthetic table crop through `StructuredRegionInput -> GeminiClient ->
+  parse_structured_region_response`. `gemini-3.1-pro-preview` returned
+  `kind=table`, `confidence=1.00`, headers `Parameter|Min|Typ|Max|Unit`, rows
+  for `VCC supply voltage` and `IDD active current`, and units `V|mA`.
+  Endpoint checks for `gemini-3-flash-preview` and the stable
+  `gemini-3.1-flash-lite` tier both returned visible JSON with a
+  production-shaped 1024-token budget. A 64-token budget was too small for the
+  lite endpoint and returned no visible text, consistent with the repo's
+  Gemini thinking-budget warning.
 
 Decision: this checkpoint is a safer controller primitive, not an accuracy
 claim. It should be committed, then run on a fresh target/control slice before
@@ -892,3 +903,67 @@ run or claim another full n=148 result from it. The next mechanism should be
 more evidence-grounded adjudication for same-shape scalar/chart readings and
 chart-period range extraction; simply preserving every concise scalar would be
 too blunt and risks hiding real verifier corrections.
+
+## 2026-05-16 Gemini Key Refresh And Guard Smoke
+
+After the user refreshed `GEMINI_API_KEY`, I checked the current Google AI
+model docs and kept the schema extractor scoped to post-localization CV/table
+parsing:
+
+- Default: `gemini_schema_extractor` -> `gemini-3.1-pro-preview`, high
+  thinking, high media resolution.
+- Fast A/B: `gemini_schema_fast` -> `gemini-3-flash-preview`.
+- Stable cheap A/B: `gemini_schema_lite` -> `gemini-3.1-flash-lite`.
+- Preview cheap A/B: `gemini_schema_lite_preview` ->
+  `gemini-3.1-flash-lite-preview`.
+
+Live Gemini checks passed:
+
+- `gemini-3.1-pro-preview` through the real structured-region extraction path
+  returned `kind=table`, confidence 1.00, headers `Parameter|Min|Typ|Max|Unit`,
+  VCC/IDD candidate rows, and units `V|mA`.
+- `gemini-3-flash-preview` and stable `gemini-3.1-flash-lite` both returned
+  visible JSON with a 1024-token budget. A 64-token lite check returned no
+  visible text, so schema extraction should keep production-shaped output
+  budgets instead of tiny smokes.
+
+Local verification after the config refresh:
+
+- `uv run pytest tests/test_workflow.py tests/test_reasoner.py tests/test_scoring.py tests/test_answer_contract.py tests/test_verifier.py tests/test_pricing.py tests/test_structured_extract.py tests/test_hf_eval_cli.py::test_resolve_tiers_honors_schema_extractor_override`
+  = 211 passed / 73 skipped.
+- Targeted Ruff checks passed for touched Python files.
+- Targeted Ruff format checks passed for touched Python files.
+- `configs/default.yaml` loaded successfully with
+  `schema_extractor=gemini-3.1-pro-preview`, `gemini_schema_lite=gemini-3.1-flash-lite`,
+  and `gemini_schema_lite_preview=gemini-3.1-flash-lite-preview`.
+
+Queued 4-row harness smoke:
+
+`results/hf/sprint-2026-05-16/chart-abstain-regression-smoke-run2/focusparse_focus_agentic_multi_page_0b139a04.json`
+
+| Metric | Value |
+| --- | ---: |
+| Accuracy | 2/4 = 50.0% |
+| Datasheet accuracy | 1/2 = 50.0% |
+| Finance accuracy | 1/2 = 50.0% |
+| Cost | $0.0549 |
+| Cost/correct | $0.0275 |
+| Mean latency | 2.87s |
+| Page recall | 1.000 |
+| Bbox IoU | 1.000 |
+| Lazy-answer rate | 0.000 |
+
+Per-row outcome:
+
+- `dat-Arm_EE382N_4-0006`: correct `1.0`.
+- `dat-DS5091D-00-0043`: wrong, selected
+  `1.8 W; Figure 11 caption confirms the Four-Layer PCB curve` where the
+  canonical baseline had scorer-correct `0.9 W`.
+- `fin-vis-jpm_gtm_us_daily-0114`: wrong, selected `Jun, 2022` where the
+  canonical baseline had scorer-correct `Feb 2020`.
+- `fin-bis_qr_2024_sep-0050`: correct `C. FX bonds`.
+
+Flip gate vs the canonical 60.14% baseline on these 4 rows is 0 recoveries and
+2 regressions, net -2. Decision: do not escalate this branch state to the
+38-row gate or full n=148 until same-shape scalar/chart-period adjudication is
+made more evidence-grounded.

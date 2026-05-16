@@ -455,6 +455,30 @@ def test_retry_answer_selector_prefers_entity_over_numeric_surrogate():
     )
 
 
+def test_reasoner_repair_hint_requires_period_range_for_chart_period_question():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="Single-date answer does not identify the full decline period.",
+        next_action="expand_context",
+        confidence=0.7,
+        diagnostics={"target_packet_ids": ["pkt_000"]},
+    )
+    answer = AnswerEvent(answer="Jan 2000", citations=["pkt_000"], confidence=0.8)
+    question = QuestionEvent(
+        example_id="ex",
+        question="During which period did the Consumer Sentiment Index decline the fastest?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+        domain="finance",
+    )
+
+    hint = _build_reasoner_repair_hint(verdict, answer_event=answer, question_event=question)
+
+    assert "period/range" in hint
+    assert "<start> to <end>" in hint
+
+
 def test_supported_retry_preserves_concise_answer_over_verbose_rationale():
     initial = AnswerEvent(answer="[31:16]", citations=["pkt_000"], confidence=0.98)
     candidate = AnswerEvent(
@@ -503,6 +527,29 @@ def test_supported_retry_preserves_code_identifier_with_spacing_variant():
     )
 
 
+def test_supported_retry_preserves_high_confidence_chart_scalar_estimate():
+    initial = AnswerEvent(answer="0.9 W", citations=["pkt_000"], confidence=0.93)
+    candidate = AnswerEvent(answer="1.5 W", citations=["pkt_000"], confidence=0.95)
+    question = QuestionEvent(
+        example_id="ex",
+        question=(
+            "According to Figure 11 and its caption, what is the maximum power "
+            "dissipation allowed at an ambient temperature of 100C for a four-layer PCB?"
+        ),
+        doc_id="doc",
+        pages_available=1,
+        answer_type="numeric",
+        domain="datasheet",
+    )
+
+    assert _should_preserve_initial_answer_on_supported_retry(
+        initial,
+        candidate,
+        question_event=question,
+        retries_used=1,
+    )
+
+
 def test_supported_retry_does_not_preserve_scalar_when_retry_is_same_shape():
     initial = AnswerEvent(answer="0.90 V", citations=["pkt_003"], confidence=0.95)
     candidate = AnswerEvent(answer="0.56 V", citations=["pkt_003"], confidence=0.91)
@@ -520,6 +567,33 @@ def test_supported_retry_does_not_preserve_scalar_when_retry_is_same_shape():
         candidate,
         question_event=question,
         retries_used=1,
+    )
+
+
+def test_chart_period_single_date_allows_reasoner_retry():
+    answer = AnswerEvent(answer="Jan 2000", citations=["pkt_000"], confidence=0.58)
+    verdict = VerdictEvent(
+        supported=False,
+        reason="Single date does not answer the period question.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+        diagnostics={"answer_shape_failure": ["wrong_row_risk", "legend_binding_risk"]},
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="During which period did the Consumer Sentiment Index decline the fastest?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+        domain="finance",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
     )
 
 
@@ -2547,6 +2621,45 @@ async def test_loop_abstain_terminates_with_unanswerable(tmp_path, parser_bench_
     # Abstention was decided on the first verdict — no retries fired.
     assert result.telemetry["retries_used"] == 0
     assert result.citations == []  # abstention drops citations
+
+
+async def test_initial_visual_estimate_abstain_keeps_cited_scalar(
+    tmp_path, parser_bench_submodule_present
+):
+    """A first-pass abstain should not erase a cited approximate visual estimate."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "1.0", "citations": ["pkt_000"], "confidence": 0.76}')
+    verifier = _FakeClient(
+        _verdict_json(
+            supported=False,
+            next_action="abstain",
+            reason="visual crop is hard to read",
+        )
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        max_retries=2,
+    )
+    example = _make_example()
+    example.question = (
+        "Estimate the aspect ratio (width to height) of the visible square, "
+        "rounded to the nearest 0.1."
+    )
+    example.answer_type = "numeric"
+
+    result = await workflow.run(
+        example, [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "1.0"
+    assert result.telemetry["loop_terminated"] == "exhausted"
+    assert result.telemetry["retries_used"] == 0
+    selection_events = [
+        e for e in result.trace.debug_events if e.stage == "answer" and e.event_type == "selection"
+    ]
+    assert selection_events[-1].payload["reason"] == "initial_visual_estimate_abstain_guard"
 
 
 async def test_loop_exhausted_when_max_retries_hit(tmp_path, parser_bench_submodule_present):

@@ -603,6 +603,12 @@ def _normalize_answer_shape(
             if leading_entity:
                 return leading_entity
 
+            singular_entity = _normalize_singular_named_entity_conjunction_answer(
+                text, question_text
+            )
+            if singular_entity:
+                return singular_entity
+
             value_status = _normalize_finance_value_status_shape(text)
             if value_status:
                 return value_status
@@ -1109,6 +1115,29 @@ def _normalize_leading_named_entity_value_answer(
     ):
         return None
     return re.sub(r"^[A-Z]\.\s+", "", label).strip()
+
+
+def _normalize_singular_named_entity_conjunction_answer(
+    text: str,
+    question_text: str | None,
+) -> str | None:
+    if not _question_requests_named_entity_answer(question_text):
+        return None
+    if re.search(r"\b(?:both|two|three|all|tie|tied)\b", str(question_text or ""), re.I):
+        return None
+    match = re.match(
+        r"^(?:[A-Z]\.\s+)?(?P<first>[A-Za-z][A-Za-z0-9&/ .'-]{1,60}?)\s+and\s+"
+        r"(?P<second>[A-Za-z][A-Za-z0-9&/ .'-]{1,60}?)(?:\s*[;:,]\s+|$)",
+        text,
+        re.I,
+    )
+    if not match:
+        return None
+    first = match.group("first").strip()
+    second = match.group("second").strip()
+    if not (_looks_concise_answer_prefix(first) and _looks_concise_answer_prefix(second)):
+        return None
+    return re.sub(r"^[A-Z]\.\s+", "", first).strip()
 
 
 def _question_requests_named_entity_answer(question_text: str | None) -> bool:

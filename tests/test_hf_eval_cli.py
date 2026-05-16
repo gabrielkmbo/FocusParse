@@ -300,7 +300,7 @@ def test_resolve_tiers_honors_schema_extractor_override(script_mod, monkeypatch)
 
     resolved = script_mod._resolve_tiers(config)
     assert resolved["schema_extractor"]["provider"] == "gemini"
-    assert resolved["schema_extractor"]["model"] == "gemini-3.1-flash-lite-preview"
+    assert resolved["schema_extractor"]["model"] == "gemini-3.1-flash-lite"
 
 
 # ---------------------------------------------------------------------------

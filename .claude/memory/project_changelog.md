@@ -2,6 +2,24 @@
 
 ## 2026-05-16
 
+- Refreshed the Gemini schema-extractor model ladder after checking the current
+  Google AI docs. The default remains `gemini-3.1-pro-preview` with high
+  thinking/media resolution, `gemini_schema_fast` remains
+  `gemini-3-flash-preview`, and `gemini_schema_lite` now uses the stable
+  `gemini-3.1-flash-lite` endpoint while `gemini_schema_lite_preview` is kept
+  explicit for preview-only A/Bs. Re-smoked the new `GEMINI_API_KEY` through the
+  actual structured-region extraction path: Pro returned schema-valid table
+  headers/rows/units at confidence 1.00, and both fast/lite endpoints returned
+  visible JSON with a production-shaped 1024-token budget. A 64-token lite smoke
+  returned no visible text, reinforcing the existing Gemini thinking-budget
+  warning.
+- Ran the queued 4-row chart/abstain regression smoke after the latest guard
+  edits. It scored 2/4 = 50.0% with cost/correct $0.0275, page recall 1.0,
+  bbox IoU 1.0, and lazy rate 0.0. It remained negative vs the canonical
+  60.14% baseline on the same rows: 0 recoveries and 2 regressions
+  (`dat-DS5091D-00-0043`, `fin-vis-jpm_gtm_us_daily-0114`). Do not escalate
+  this branch state to a larger slice/full run until same-shape scalar and
+  chart-period adjudication are more evidence-grounded.
 - Added a control-regression guard after the accepted-retry mixed slice exposed
   three prior-correct losses. Standalone table-code answers such as `DPD MODE1`
   now normalize/score as `DPD_MODE1`, and unsupported retries no longer let an
