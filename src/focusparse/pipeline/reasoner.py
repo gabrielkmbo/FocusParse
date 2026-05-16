@@ -581,6 +581,15 @@ def _normalize_answer_shape(
         if min_typ_max:
             return min_typ_max
 
+        if stem == "exact_match" and "finance" in domain_l:
+            value_status = _normalize_finance_value_status_shape(text)
+            if value_status:
+                return value_status
+
+            corresponding_value = _normalize_corresponding_value_status_shape(text)
+            if corresponding_value:
+                return corresponding_value
+
         variable_value = re.fullmatch(
             r"([A-Za-z][A-Za-z0-9_]{0,12})\s*=\s*"
             r"(-?\d+(?:\.\d+)?)\s*([A-Za-zµμ%]{1,6})",
@@ -683,6 +692,76 @@ def _normalize_leading_code_identifier_shape(text: str) -> str | None:
     if not any(ch.isdigit() for ch in identifier):
         return None
     return re.sub(r"[ -]+", "_", identifier)
+
+
+def _normalize_corresponding_value_status_shape(text: str) -> str | None:
+    """Collapse verbose finance table prose into ``value; status``.
+
+    This targets answers where the model names the setup row, then says the
+    corresponding measure was a value and also states whether that value is
+    typical/min/max. The regex anchors on the corresponding-value clause so
+    earlier distractor numbers in the explanation are ignored.
+    """
+
+    value = r"\$?\(?[-+]?\d+(?:,\d{3})*(?:\.\d+)?\)?%?"
+    match = re.search(
+        rf"\bcorresponding\b.{{0,160}}?\b(?:was|is|equals?|=)\s*(?P<value>{value})"
+        r"(?P<tail>[^.?!]{0,220})",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    status_match = re.search(
+        r"\b(?P<status>typical|middle|minimum|maximum|lowest|highest|smallest|largest|min|max)\b",
+        match.group("tail"),
+        re.IGNORECASE,
+    )
+    if not status_match:
+        return None
+
+    status = _canonical_finance_status(status_match.group("status"))
+
+    return f"{_normalize_finance_exact_value(match.group('value'))}; {status}"
+
+
+def _normalize_finance_value_status_shape(text: str) -> str | None:
+    value = r"\$?\s*\(?[-+]?\d+(?:,\d{3})*(?:\.\d+)?\)?%?"
+    status = r"typical|middle|minimum|maximum|lowest|highest|smallest|largest|min|max"
+    match = re.fullmatch(
+        rf"(?P<value>{value})\s*(?:[,;/]|\band\b)\s*(?:the\s+)?(?P<status>{status})",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return (
+        f"{_normalize_finance_exact_value(match.group('value'))}; "
+        f"{_canonical_finance_status(match.group('status'))}"
+    )
+
+
+def _canonical_finance_status(text: str) -> str:
+    status = str(text or "").strip().lower()
+    return {
+        "middle": "typical",
+        "lowest": "minimum",
+        "smallest": "minimum",
+        "min": "minimum",
+        "highest": "maximum",
+        "largest": "maximum",
+        "max": "maximum",
+    }.get(status, status)
+
+
+def _normalize_finance_exact_value(text: str) -> str:
+    value = str(text or "").strip().rstrip(",;.")
+    value = re.sub(r"^\$\s*", "", value)
+    accounting = re.fullmatch(r"\(\s*([-+]?\d+(?:,\d{3})*(?:\.\d+)?)\s*\)", value)
+    if accounting:
+        return f"-{accounting.group(1)}"
+    return value
 
 
 def _normalize_min_typ_max_shape(text: str) -> str | None:

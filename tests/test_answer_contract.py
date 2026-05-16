@@ -62,6 +62,30 @@ def test_visual_cue_question_rejects_label_only_answer() -> None:
     )
 
 
+def test_visual_cue_question_rejects_prose_without_visible_cue() -> None:
+    contract = build_answer_contract(
+        "Which DPD mode results in fewer coefficient updates, and how is this "
+        "visually indicated in the chart?",
+        answer_type="exact_match",
+        domain="datasheet",
+        question_family="chart_caption_binding",
+    )
+
+    assert "missing_field" in answer_contract_failures(
+        "DPD_MODE1, there is no update between Update 1 and Update 2 because "
+        "the RMS power is below the max power recorded.",
+        contract,
+    )
+    assert (
+        answer_contract_failures(
+            "DPD_MODE1; the chart shows NO M-TABLE UPDATE regions when RMS "
+            "power is less than the max power.",
+            contract,
+        )
+        == []
+    )
+
+
 def test_wrong_row_cues_are_detected_without_forcing_failure() -> None:
     contract = build_answer_contract(
         "Among the visually similar part number rows, which package has the lowest value?",

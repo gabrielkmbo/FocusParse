@@ -1048,6 +1048,71 @@ def test_answer_shape_collapses_leading_code_identifier_semicolon_explanation() 
     )
 
 
+def test_answer_shape_collapses_verbose_corresponding_finance_value_status() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "For the year ended September 28, 2024, when 'Products' net sales were "
+            "at their minimum ($294,866), the corresponding 'Gross margin' was "
+            "180,683, and this was the typical (middle) gross margin among the "
+            "three years.",
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "180,683; typical"
+    )
+
+
+def test_answer_shape_corresponding_finance_status_ignores_setup_number() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "When product revenue was $12, the corresponding expense was $3, "
+            "and this was the lowest value in the table.",
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "3; minimum"
+    )
+
+
+def test_answer_shape_formats_finance_value_status_pair() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "$ 180,683, typical",
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "180,683; typical"
+    )
+    assert (
+        _normalize_answer_shape(
+            "180,683 / middle",
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "180,683; typical"
+    )
+
+
+def test_answer_shape_corresponding_finance_requires_status() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    answer = "The corresponding gross margin was 180,683 in the table."
+    assert (
+        _normalize_answer_shape(
+            answer,
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == answer
+    )
+
+
 def test_answer_shape_does_not_collapse_plain_sentence_explanation() -> None:
     from focusparse.pipeline.reasoner import _normalize_answer_shape
 

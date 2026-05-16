@@ -61,7 +61,8 @@ _MULTI_FIELD_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 _VISUAL_EXPLANATION_RE = re.compile(
-    r"\b(?:explain|how does|visual(?:ly)?|cue|cues|indicate|confirm|diagram)\b",
+    r"\b(?:explain|how\s+(?:does|is|was|do|did)|visual(?:ly)?|cue|cues|"
+    r"indicat(?:e|ed|es|ing)|confirm(?:ed|s|ing)?|diagram)\b",
     re.IGNORECASE,
 )
 _ROW_CUE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -116,7 +117,8 @@ def build_answer_contract(
         requires_multi_field = False
     requires_visual_explanation = bool(_VISUAL_EXPLANATION_RE.search(question)) and bool(
         re.search(
-            r"\b(?:cue|cues|diagram|explain|how does|indicate|confirm|using both)\b",
+            r"\b(?:cue|cues|diagram|explain|how\s+(?:does|is|was|do|did)|"
+            r"indicat(?:e|ed|es|ing)|confirm(?:ed|s|ing)?|using both)\b",
             question,
             re.I,
         )
@@ -269,11 +271,15 @@ def _looks_too_short_for_multi_field(text: str) -> bool:
 
 
 def _looks_too_short_for_visual_explanation(text: str) -> bool:
-    if ";" in text or "," in text:
-        return False
-    words = _semantic_words(text)
+    words = [
+        word
+        for word in _WORD_RE.findall(text)
+        if not _VALUE_TOKEN_RE.fullmatch(word)
+        and word.lower() not in {"the", "a", "an", "of", "to"}
+    ]
     if len(words) < 5:
         return True
+    has_visible_chart_label = bool(re.search(r"\b[A-Z][A-Z0-9]+(?:[ -][A-Z0-9]+)+\b", text))
     explanatory_terms = {
         "off",
         "on",
@@ -284,11 +290,24 @@ def _looks_too_short_for_visual_explanation(text: str) -> bool:
         "shows",
         "indicates",
         "arrow",
+        "arrows",
+        "caption",
+        "chart",
+        "figure",
+        "label",
+        "legend",
         "line",
+        "region",
+        "regions",
+        "shown",
+        "visual",
+        "visually",
         "connected",
         "through",
     }
-    return not any(word.lower() in explanatory_terms for word in words)
+    return not has_visible_chart_label and not any(
+        word.lower() in explanatory_terms for word in words
+    )
 
 
 def _semantic_words(text: str) -> list[str]:
