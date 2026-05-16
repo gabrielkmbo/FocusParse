@@ -2,6 +2,15 @@
 
 ## 2026-05-16
 
+- Added a control-regression guard after the accepted-retry mixed slice exposed
+  three prior-correct losses. Standalone table-code answers such as `DPD MODE1`
+  now normalize/score as `DPD_MODE1`, and unsupported retries no longer let an
+  opposite boolean or `Unanswerable` overwrite a cited non-abstain answer. The
+  3-row control-regression smoke improved from 1/3 to 2/3. The fresh mixed gate
+  `accepted-retry-preserve-mixed-slice-run2` passed with 26/60 = 43.3%, 6
+  target recoveries, 0 control regressions, cost/correct $0.0356, mean latency
+  4.24s, page recall 0.944, bbox IoU 0.920, and lazy rate 0.033. This justifies
+  a full n=148 run but is not itself a 65% claim.
 - Added a conservative accepted-retry selection guard: when a verifier-supported
   retry looks like answer-shape regression, the workflow can preserve the
   initial concise cited answer instead of overwriting it with verbose rationale,

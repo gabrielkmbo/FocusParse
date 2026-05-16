@@ -739,7 +739,12 @@ def _normalize_leading_code_identifier_shape(text: str) -> str | None:
         text,
     )
     if not leading:
-        return None
+        leading = re.match(
+            r"^(?P<identifier>[A-Z][A-Z0-9]*(?:[ _-]+[A-Z]+[0-9][A-Z0-9]*)+)$",
+            text,
+        )
+        if not leading:
+            return None
 
     identifier = leading.group("identifier").strip(" _-")
     if not any(ch.isdigit() for ch in identifier):

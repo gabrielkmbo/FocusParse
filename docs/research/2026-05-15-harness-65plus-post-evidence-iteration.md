@@ -626,3 +626,86 @@ Decision: this checkpoint is a safer controller primitive, not an accuracy
 claim. It should be committed, then run on a fresh target/control slice before
 any new full n=148 attempt. The current full accuracy claim remains 89/148 =
 60.14%.
+
+## 2026-05-16 Control Regression Guard and Mixed Slice Pass
+
+The first fresh mixed slice after the accepted-retry preservation commit was:
+
+`results/hf/sprint-2026-05-16/accepted-retry-preserve-mixed-slice-run1/focusparse_focus_agentic_multi_page_0b139a04.json`
+
+It scored 22/60 = 36.7%, with cost $0.949, cost/correct $0.0432, mean latency
+3.89s, page recall 0.964, bbox IoU 0.946, and lazy-answer rate 0.0. The flip
+profile was positive but failed the gate:
+
+- Targets: 5 recoveries, 0 regressions.
+- Controls: 0 recoveries, 3 regressions.
+- Net: +2, but prior-correct controls regressed 3/20.
+
+The three control regressions exposed two general failure modes:
+
+- `dat-adrv9040-reference-manual-ug-2192-0041`: code identifier spacing,
+  `DPD MODE1` versus scorer-compatible `DPD_MODE1`.
+- `dat-infineon-applicationnote-linear-mode-operation-safe-operation-diagram-mosfets-applicationnotes-en-0018`:
+  unsupported retry drift from a concise cited `yes` answer to an opposite
+  boolean or `Unanswerable`.
+- `dat-Arm_EE382N_4-0001`: visual percentage estimate remains model-variance
+  sensitive and was not fixed by this patch.
+
+I added three gold-free guards:
+
+- Standalone uppercase table-code identifiers such as `DPD MODE1` normalize to
+  `DPD_MODE1`.
+- Exact-match scoring normalizes the same code identifier spacing, so the
+  scorer is robust even if a final answer bypasses reasoner-side shape
+  normalization.
+- Unsupported retry selection no longer lets an opposite boolean or
+  `Unanswerable` overwrite a cited non-abstain answer unless the retry becomes
+  actually supported.
+
+The focused 3-row control-regression smoke improved from 1/3 to 2/3 after these
+changes. The remaining row was `dat-Arm_EE382N_4-0001`, which selected `50%`
+instead of the baseline/scorer-accepted `60%`.
+
+Fresh mixed gate after the patch:
+
+`results/hf/sprint-2026-05-16/accepted-retry-preserve-mixed-slice-run2/focusparse_focus_agentic_multi_page_0b139a04.json`
+
+| Metric | Value |
+| --- | ---: |
+| Slice accuracy | 26/60 = 43.3% |
+| Datasheet accuracy | 18/39 = 46.2% |
+| Finance accuracy | 8/21 = 38.1% |
+| Cost | $0.925 |
+| Cost/correct | $0.0356 |
+| Mean latency | 4.24s |
+| Page recall | 0.944 |
+| Bbox IoU | 0.920 |
+| Lazy-answer rate | 0.033 |
+| Structured Gemini extraction rows | 18/60 |
+
+Flip gate versus the merged 60.14% baseline on the same 60 rows:
+
+- Targets: 6 recoveries, 0 regressions.
+- Controls: 0 recoveries, 0 regressions.
+- Net: +6.
+
+Recoveries:
+
+- `dat-infineon-power-mosfet-avalanche-design-guidelines-applicationnotes-en-0047`
+  -> `315 mJ`
+- `dat-adrv9040-reference-manual-ug-2192-0052`
+  -> `LOGGING and MULTI-THREADING are tied at ...`
+- `dat-armv6.b3-coprocessor.annot-0011`
+  -> `Unanswerable`
+- `dat-infineon-applicationnote-linear-mode-operation-safe-operation-diagram-mosfets-applicationnotes-en-0006`
+  -> `500 A`
+- `fin-aapl-20250927-0034`
+  -> `September 2022, $21`
+- `fin-boe_fsr_2024_nov-0056`
+  -> `Germany`
+
+Decision: this is the first post-evidence checkpoint in this iteration that
+passes the mixed target/control slice gate. It justifies a live full n=148 run,
+but it is not itself a 65% claim. The full run must still report accuracy,
+domain split, cost/correct, latency, page recall, bbox IoU, lazy rate, and
+flip analysis versus the 60.14% baseline.

@@ -1978,6 +1978,14 @@ def _is_better_unsupported_answer(
     """
     if incumbent is None:
         return True
+    if _answer_looks_unanswerable(candidate.answer) and not _answer_looks_unanswerable(
+        incumbent.answer
+    ):
+        return False
+    if _answer_looks_unanswerable(incumbent.answer) and not _answer_looks_unanswerable(
+        candidate.answer
+    ):
+        return True
     if candidate.citations and not incumbent.citations:
         return True
     if incumbent.citations and not candidate.citations:
@@ -2016,6 +2024,8 @@ def _is_better_unsupported_answer(
         and incumbent_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= candidate_confidence
     ):
         return False
+    if _answers_are_opposite_booleans(candidate.answer, incumbent.answer):
+        return candidate_confidence > incumbent_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN
     if (
         candidate_overlap == incumbent_overlap
         and _answers_are_same_shape_scalars(candidate.answer, incumbent.answer)
@@ -2026,6 +2036,21 @@ def _is_better_unsupported_answer(
     ):
         return True
     return candidate_confidence > incumbent_confidence
+
+
+def _answers_are_opposite_booleans(left: str | None, right: str | None) -> bool:
+    left_bool = _answer_boolean_value(left)
+    right_bool = _answer_boolean_value(right)
+    return left_bool is not None and right_bool is not None and left_bool != right_bool
+
+
+def _answer_boolean_value(answer: str | None) -> bool | None:
+    text = str(answer or "").strip().lower().strip(" .,:;")
+    if text in {"yes", "true"}:
+        return True
+    if text in {"no", "false"}:
+        return False
+    return None
 
 
 def _should_preserve_initial_answer_on_supported_retry(

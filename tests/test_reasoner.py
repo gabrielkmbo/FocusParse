@@ -1462,6 +1462,15 @@ def test_answer_shape_collapses_common_table_code_shapes() -> None:
         )
         == "CRn"
     )
+    assert (
+        _normalize_answer_shape(
+            "DPD MODE1",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which DPD mode has fewer M-table updates?",
+        )
+        == "DPD_MODE1"
+    )
 
 
 def test_answer_shape_collapses_option_and_entity_value_answers() -> None:

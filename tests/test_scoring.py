@@ -349,6 +349,29 @@ def test_score_answer_routes_numeric_via_enum(parser_bench_submodule_present):
     assert score_answer("55", ex) == 0.0
 
 
+def test_score_answer_normalizes_code_identifier_spacing(parser_bench_submodule_present):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    from focusparse._parser_bench import AnswerType
+    from focusparse.eval.scoring import score_answer
+
+    ex = _example_with_type(
+        AnswerType.EXACT_MATCH,
+        answer="DPD_MODE1; visually indicated by NO M-TABLE UPDATE gaps",
+    )
+
+    assert score_answer("DPD MODE1", ex) == 1.0
+
+
+def test_exact_match_normalizes_code_identifier_spacing_without_schema():
+    from focusparse.eval.scoring import _score_exact_match
+
+    assert _score_exact_match(
+        "DPD MODE1",
+        "DPD_MODE1; visually indicated by NO M-TABLE UPDATE gaps",
+    )
+
+
 def test_score_answer_routes_unanswerable_via_enum(parser_bench_submodule_present):
     if not parser_bench_submodule_present:
         pytest.skip("parser-bench submodule required")

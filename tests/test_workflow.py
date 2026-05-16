@@ -386,6 +386,28 @@ def test_retry_answer_selector_prefers_same_shape_retry_within_tiny_margin():
     )
 
 
+def test_retry_answer_selector_rejects_opposite_boolean_drift_within_margin():
+    incumbent = AnswerEvent(answer="yes", citations=["pkt_000", "pkt_002"], confidence=0.92)
+    candidate = AnswerEvent(answer="no", citations=["pkt_000", "pkt_002"], confidence=0.90)
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="Does the operation point fall within the de-rated SOA?",
+    )
+
+
+def test_retry_answer_selector_rejects_unanswerable_over_cited_answer():
+    incumbent = AnswerEvent(answer="yes", citations=["pkt_000", "pkt_005"], confidence=0.79)
+    candidate = AnswerEvent(answer="Unanswerable", citations=["pkt_000"], confidence=0.97)
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="Does the operation point fall within the de-rated SOA?",
+    )
+
+
 def test_supported_retry_preserves_concise_answer_over_verbose_rationale():
     initial = AnswerEvent(answer="[31:16]", citations=["pkt_000"], confidence=0.98)
     candidate = AnswerEvent(
