@@ -84,6 +84,7 @@ _DEFAULT_ADJACENCY_PAD = 0.08
 _EXPAND_RETRY_FACTOR = 1.5  # multiplied each retry → wider neighbor net
 _MAX_ADJACENCY_PAD = 0.30  # cap so the pad stays meaningful
 _RETRY_SELECTION_CONFIDENCE_MARGIN = 0.15
+_RETRY_SELECTION_TIE_RETRY_MARGIN = 0.05
 _ABSTAIN_OVERRIDE_MIN_CONFIDENCE = 0.45
 _VERBOSE_SHAPE_RETRY_MAX_CHARS = 90
 _VERBOSE_SHAPE_RETRY_MAX_WORDS = 12
@@ -1951,6 +1952,18 @@ def _is_better_unsupported_answer(
     incumbent_confidence = float(incumbent.confidence or 0.0)
     candidate_overlap = _answer_question_overlap(candidate.answer, question_text)
     incumbent_overlap = _answer_question_overlap(incumbent.answer, question_text)
+    if _question_requests_variable(question_text):
+        if _answer_looks_formula_like(candidate.answer) and not _answer_looks_formula_like(
+            incumbent.answer
+        ):
+            return False
+        if _answer_looks_formula_like(incumbent.answer) and not _answer_looks_formula_like(
+            candidate.answer
+        ):
+            return (
+                candidate_confidence + _entity_retry_selection_margin(question_text)
+                >= incumbent_confidence
+            )
     if (
         _question_requests_single_entity(question_text)
         and _answer_looks_list_like(incumbent.answer)
@@ -1969,6 +1982,15 @@ def _is_better_unsupported_answer(
         and incumbent_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= candidate_confidence
     ):
         return False
+    if (
+        candidate_overlap == incumbent_overlap
+        and _answers_are_same_shape_scalars(candidate.answer, incumbent.answer)
+        and set(candidate.citations) == set(incumbent.citations)
+        and candidate_confidence + _RETRY_SELECTION_TIE_RETRY_MARGIN >= incumbent_confidence
+        and _normalize_answer_for_telemetry(candidate.answer)
+        != _normalize_answer_for_telemetry(incumbent.answer)
+    ):
+        return True
     return candidate_confidence > incumbent_confidence
 
 
@@ -2053,11 +2075,48 @@ def _question_requests_single_entity(question_text: str | None) -> bool:
     )
 
 
+def _question_requests_variable(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    return bool(re.search(r"\b(?:variable|y[- ]axis|x[- ]axis)\b", str(question_text), re.I))
+
+
 def _entity_retry_selection_margin(question_text: str | None) -> float:
     normalized = (question_text or "").lower()
     if re.search(r"\b(?:variable|parameter|y[- ]axis|x[- ]axis)\b", normalized):
         return 0.25
     return _RETRY_SELECTION_CONFIDENCE_MARGIN
+
+
+def _answer_is_concise_shape(answer: str | None) -> bool:
+    if not answer or _answer_looks_unanswerable(answer):
+        return False
+    text = str(answer).strip()
+    if len(text) > 80:
+        return False
+    return len(_answer_selection_tokens(text)) <= 5
+
+
+def _answer_looks_formula_like(answer: str | None) -> bool:
+    if not answer:
+        return False
+    text = str(answer)
+    return bool("=" in text and re.search(r"[+*/()]|\b(?:eff|loss|offset)\b", text, re.I))
+
+
+def _answers_are_same_shape_scalars(left: str | None, right: str | None) -> bool:
+    if not _answer_is_concise_shape(left) or not _answer_is_concise_shape(right):
+        return False
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    scalar_pattern = r"[-+]?\d+(?:\.\d+)?\s*[A-Za-zµμ%]{0,8}"
+    left_numeric = bool(re.fullmatch(scalar_pattern, left_text))
+    right_numeric = bool(re.fullmatch(scalar_pattern, right_text))
+    if left_numeric or right_numeric:
+        return left_numeric and right_numeric
+    return (
+        len(_answer_selection_tokens(left_text)) == len(_answer_selection_tokens(right_text)) == 1
+    )
 
 
 def _answer_looks_list_like(answer: str | None) -> bool:
@@ -2152,7 +2211,11 @@ def _should_allow_reasoner_shape_retry(
     if not answer.citations:
         return False
     if _verdict_has_answer_shape_failure(verdict):
-        return True
+        failures = set(_verdict_answer_shape_failures(verdict))
+        return not (
+            failures <= {"wrong_row_risk", "legend_binding_risk"}
+            and _answer_is_concise_shape(answer.answer)
+        )
     reason = verdict.reason.lower()
     if _question_requests_single_entity(question_event.question) and _answer_looks_list_like(
         answer.answer

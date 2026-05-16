@@ -25,8 +25,13 @@ def test_compute_usd_gemini_31_pro_schema_extraction_usage():
 
 
 def test_compute_usd_gemini_31_flash_lite_schema_extraction_usage():
-    usd = compute_usd("gemini", "gemini-3.1-flash-lite", tokens_in=1_136, tokens_out=252)
-    assert usd == 0.000662
+    usd = compute_usd(
+        "gemini",
+        "gemini-3.1-flash-lite-preview",
+        tokens_in=1_136,
+        tokens_out=252,
+    )
+    assert usd == 0.000331
 
 
 def test_compute_usd_unknown_model_returns_none():

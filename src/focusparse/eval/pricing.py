@@ -35,7 +35,7 @@ _PRICING: dict[tuple[str, str], tuple[float, float]] = {
     # Gemini — 2026-05 API list prices
     ("gemini", "gemini-3.1-pro-preview"): (2.00, 12.00),
     ("gemini", "gemini-3-flash-preview"): (0.50, 3.00),
-    ("gemini", "gemini-3.1-flash-lite"): (0.25, 1.50),
+    ("gemini", "gemini-3.1-flash-lite-preview"): (0.125, 0.75),
     ("gemini", "gemini-2.5-flash"): (0.30, 2.50),
 }
 

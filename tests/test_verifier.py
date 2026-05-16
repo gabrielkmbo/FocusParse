@@ -233,6 +233,7 @@ async def test_verify_prompt_includes_question_answer_contract():
     )
 
     prompt = client.calls[0]["prompt"]
+    assert "Expected answer type:" in prompt
     assert "Question answer contract" in prompt
     assert "include every field requested" in prompt
     assert "min/typ/max" in prompt

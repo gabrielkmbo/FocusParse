@@ -82,6 +82,10 @@ _SYSTEM_PROMPT = (
     "AEC-Q100), and superlatives such as lowest/highest/min/max. Reject "
     "answers that satisfy only a subset of the constraints or use a nearby "
     "but different row/entity.\n"
+    "- For `exact_match` and `numeric` answer types, judge whether the final "
+    "answer span/value is supported. Do not reject a concise answer solely "
+    "because it omits explanatory rationale, unless the question answer "
+    "contract explicitly requires multiple output fields or a visual cue.\n"
     "- For corresponding-row questions, first identify the source row/year/entity "
     "from the metric named in the setup clause, then verify the requested output "
     "field from that same row. Reject answers that instead choose the minimum or "
@@ -263,6 +267,7 @@ def _build_verifier_prompt(
     contract_block = render_answer_contract(contract)
     return (
         f"{domain_line}"
+        f"Expected answer type: {question.answer_type or 'unknown'}\n"
         f"Question: {question.question}\n\n"
         f"Question answer contract:\n{contract_block}\n\n"
         "Grouped evidence objects the reasoner had access to:\n"

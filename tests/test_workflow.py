@@ -353,6 +353,38 @@ def test_retry_answer_selector_prefers_variable_over_descriptive_fragment():
     )
 
 
+def test_retry_answer_selector_rejects_formula_over_variable_answer():
+    incumbent = AnswerEvent(
+        answer="I_OUT is the output current from ADC",
+        citations=["pkt_000", "pkt_005"],
+        confidence=0.65,
+    )
+    candidate = AnswerEvent(
+        answer="Prx,ac = (VRECT x IOUT) / EffRECT + Pres_loss + Poffset",
+        citations=["pkt_005", "pkt_000"],
+        confidence=0.72,
+    )
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Which Y-axis variable, VRECT or IOUT, should be used to calculate output power at OUT?"
+        ),
+    )
+
+
+def test_retry_answer_selector_prefers_same_shape_retry_within_tiny_margin():
+    incumbent = AnswerEvent(answer="0.90 V", citations=["pkt_003", "pkt_007"], confidence=0.95)
+    candidate = AnswerEvent(answer="0.56 V", citations=["pkt_007", "pkt_003"], confidence=0.91)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="What voltage is calculated from the resistor divider equation?",
+    )
+
+
 def test_variable_question_allows_reasoner_shape_retry():
     verdict = VerdictEvent(
         supported=False,
@@ -437,6 +469,32 @@ def test_contract_diagnostic_allows_reasoner_shape_retry():
     )
 
     assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
+def test_wrong_row_only_diagnostic_blocks_concise_scalar_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The cited table row may be a nearby confusable row.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+        diagnostics={"answer_shape_failure": ["wrong_row_risk"]},
+    )
+    answer = AnswerEvent(answer="5", citations=["pkt_003"], confidence=0.98)
+    question = QuestionEvent(
+        example_id="ex",
+        question="How many entries in the table are page shareable?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="numeric",
+    )
+
+    assert not _should_allow_reasoner_shape_retry(
         action="escalate_reasoner",
         answer=answer,
         verdict=verdict,

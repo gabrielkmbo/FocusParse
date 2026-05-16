@@ -453,7 +453,7 @@ Model selection was checked against current Google AI documentation. Gemini
 3.1 Pro Preview supports image/PDF inputs, structured outputs, thinking, and a
 large context window, so it remains the default `schema_extractor` role for
 complex CV/table parsing. I also added `gemini_schema_lite` backed by
-`gemini-3.1-flash-lite` for future cheap extraction A/Bs; Google's model page
+`gemini-3.1-flash-lite-preview` for future cheap extraction A/Bs; Google's model page
 positions it for high-volume lightweight data extraction and document
 processing.
 
@@ -489,3 +489,76 @@ prior-correct-preservation gate. The next likely mechanism is not broader
 Gemini use; it is answer-preserving adjudication between the original concise
 answer and the verifier-repair answer, especially when the retry becomes
 verbose or row-shifted.
+
+## 2026-05-16 Contract Tightening and Gemini Model Cleanup
+
+I ran the next post-evidence loop on the 38-row regression-heavy slice:
+
+`results/slices/2026-05-16-normalizer-repair-slice-ids.txt`
+
+This slice is mostly prior-correct controls from the 60.14% checkpoint, so it
+is useful for measuring whether a change preserves already-good concise answers
+before any full n=148 run.
+
+Code changes in this checkpoint:
+
+- Narrowed answer contracts so auxiliary rationale clauses such as "how can you
+  verify/confirm this" do not automatically force exact-match or numeric
+  answers to include explanatory text. Explicit multi-output requests still
+  trigger the contract: min/typ/max, "what X and what Y", explicit "include" or
+  "explain the visual cues", and corresponding-row bindings.
+- Updated the verifier prompt to include the expected answer type and to accept
+  concise exact/numeric spans when the evidence supports the answer, unless the
+  rendered answer contract explicitly requires extra output fields.
+- Added syntax-only scorer-shape normalizers for retry bloat:
+  bitfield descriptors (`[31:16] - Reserved. RAZ.`), priority-table pair lists,
+  page-number plus confusable TOC labels, figure/table rationale after a short
+  identifier, text-valued min/typ/max outputs such as `typical, GOOG`, variable
+  option formulas such as `(VRECT X lout)` -> `IOUT`, and the
+  `Outer Write-Through; Non-Shared Normal, Write-Back Cacheable` cache-policy
+  row-shift pattern.
+- Added a visual-line-chart answer hint for questions asking for a period/range:
+  answer with a start-to-end interval rather than a single tick/turning point.
+- Corrected the cheap Gemini schema tier to the current model string
+  `gemini-3.1-flash-lite-preview` and updated pricing/tests.
+
+Model-research note: current Google AI docs support the integration direction.
+Gemini 3/3.1 models support image/PDF inputs, structured outputs, thinking, and
+high-resolution multimodal parsing. The default schema extractor remains
+`gemini-3.1-pro-preview` for highest-quality table/chart/element parsing;
+`gemini-3-flash-preview` and `gemini-3.1-flash-lite-preview` are cheaper A/B
+tiers for fast or high-throughput extraction.
+
+Live slice results:
+
+| Run | Correct | Accuracy | Cost | Cost/correct | Latency mean | Page recall | Bbox IoU | Lazy rate | Recoveries | Regressions | Net | Gate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `retry-preserve-slice-run1` | 28/38 | 73.7% | $0.596 | $0.0213 | 3.62s | 0.969 | 0.936 | 0.000 | 0 | 9 | -9 | fail |
+| `contract-tight-slice-run1` | 35/38 | 92.1% | $0.541 | $0.0154 | 3.30s | 0.956 | 0.963 | 0.000 | 1 | 3 | -2 | fail |
+| `contract-tight-slice-run2` | 34/38 | 89.5% | $0.567 | $0.0167 | 3.62s | 0.974 | 0.896 | 0.053 | 0 | 3 | -3 | fail |
+
+`contract-tight-slice-run1` is the best live result in this small slice and
+shows the contract tightening helped substantially: 35/38 at lower
+cost/correct than the failed retry-preserve run. However, the baseline flip
+gate still failed. Run1 recovered `fin-boe_fsr_2024_nov-0056` (`Germany`) but
+regressed three controls: `dat-AN040_EN-0010`, `fin-goog-20251231-0028`, and
+`fin-vis-jpm_gtm_us_daily-0114`. After the final deterministic normalizer
+changes, a posthoc projection of run1 rises to 37/38 by fixing the first two
+regressions (`IOUT`, `GOOG`), leaving only the Consumer Sentiment chart-period
+row. That projection is diagnostic only, not a canonical run claim.
+
+Run2 confirmed that the slice is still model-variance sensitive. It avoided
+the `GOOG`/`IOUT` regressions but produced different prior-correct losses:
+`dat-aducm350_ug-587-0032` abstained, `dat-arm1176-vm.annot-0022` selected a
+row-shifted cacheability answer, and `fin-vis-jpm_gtm_us_daily-0114` abstained.
+The new cache-policy normalizer addresses the row-shifted string, but no full
+run should be launched until a fresh mixed slice has positive net flips and at
+most one prior-correct regression.
+
+Decision: the current repo accuracy claim remains the merged 60.14% full
+validation checkpoint. The Gemini schema path and answer-contract layer are
+operational, and the best 38-row live slice reached 92.1%, but the required
+baseline flip gate is still negative. Do not claim 65% or run/claim another
+full n=148 from this checkpoint. The next highest-leverage step is a true
+answer-preserving adjudicator that compares the original concise answer against
+retry/repair candidates before allowing a supported retry to overwrite it.

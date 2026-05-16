@@ -30,6 +30,17 @@ def test_min_typ_max_label_and_value_passes_contract() -> None:
     assert answer_contract_failures("min: 0.697 V", contract) == []
 
 
+def test_min_typ_max_text_value_passes_contract() -> None:
+    contract = build_answer_contract(
+        "Which value from the table (min/typical/max) should be used for "
+        "the Class C trading symbol?",
+        answer_type="exact_match",
+        domain="finance",
+    )
+
+    assert answer_contract_failures("typical, GOOG", contract) == []
+
+
 def test_numeric_scalar_contract_does_not_force_secondary_yes_no_field() -> None:
     contract = build_answer_contract(
         "If +600 V exceeds the CDM rating, what maximum input current must be "
@@ -96,6 +107,33 @@ def test_visual_cue_question_rejects_prose_without_visible_cue() -> None:
         )
         == []
     )
+
+
+def test_auxiliary_verification_clause_does_not_force_explanation_output() -> None:
+    contract = build_answer_contract(
+        "Which bit fields in the register are guaranteed to always read as zero, "
+        "and how can you verify this based on the table's function column?",
+        answer_type="exact_match",
+        domain="datasheet",
+    )
+
+    assert not contract.requires_multi_field
+    assert not contract.requires_visual_explanation
+    assert answer_contract_failures("[31:16]", contract) == []
+
+
+def test_caption_confirmation_clause_does_not_force_numeric_explanation() -> None:
+    contract = build_answer_contract(
+        "According to Figure 11 and its caption, what is the maximum power "
+        "dissipation at 100 C, and how does the caption help you confirm the curve?",
+        answer_type="numeric",
+        domain="datasheet",
+        question_family="figure_caption_cross_ref",
+    )
+
+    assert not contract.requires_multi_field
+    assert not contract.requires_visual_explanation
+    assert answer_contract_failures("1.0 W", contract) == []
 
 
 def test_visual_cue_question_allows_structured_file_size_answer() -> None:

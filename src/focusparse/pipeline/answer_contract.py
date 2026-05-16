@@ -34,6 +34,7 @@ _VALUE_TOKEN_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+_IDENTIFIER_VALUE_RE = re.compile(r"\b[A-Z][A-Z0-9_]{1,15}\b")
 _WORD_RE = re.compile(r"[a-z0-9_]+", re.IGNORECASE)
 _UNIT_ONLY_RE = re.compile(r"^[a-zµμ%/]+$", re.IGNORECASE)
 _MIN_TYP_MAX_RE = re.compile(
@@ -50,7 +51,9 @@ _QUANTITATIVE_QUESTION_RE = re.compile(
 )
 _MULTI_FIELD_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:both|two|three|all)\b", re.IGNORECASE),
-    re.compile(r"\band\s+(?:what|which|how|why|the corresponding|corresponding)\b", re.IGNORECASE),
+    re.compile(r"\b(?:what|which)\b.{0,180}\band\s+(?:what|which)\b", re.IGNORECASE),
+    re.compile(r"\band\s+is\s+this\s+value\s+also\b", re.IGNORECASE),
+    re.compile(r"\band\s+(?:the\s+)?corresponding\b", re.IGNORECASE),
     re.compile(
         r"\b(?:label|function|parameter|part number|row|value)\b.{0,80}"
         r"\band\s+(?:unit|value|package|voltage|current|condition|reason|cue|context)\b",
@@ -60,9 +63,11 @@ _MULTI_FIELD_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"\b(?:explain|include)\b.{0,80}\b(?:cue|cues|reason|context|condition)\b", re.IGNORECASE
     ),
 )
-_VISUAL_EXPLANATION_RE = re.compile(
-    r"\b(?:explain|how\s+(?:does|is|was|do|did)|visual(?:ly)?|cue|cues|"
-    r"indicat(?:e|ed|es|ing)|confirm(?:ed|s|ing)?|diagram)\b",
+_OUTPUT_VISUAL_EXPLANATION_RE = re.compile(
+    r"\b(?:explain\s+the\s+visual\s+cues?|include\s+the\s+visual\s+cues?|"
+    r"what\s+visual\s+cues?|which\s+visual\s+cues?|"
+    r"how\s+(?:is|was)\s+this\s+visually\s+indicat(?:ed|ed\s+in)|"
+    r"how\s+does\s+the\s+(?:diagram|chart|figure)\s+visually\s+indicat(?:e|ed))\b",
     re.IGNORECASE,
 )
 _ROW_CUE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -117,14 +122,7 @@ def build_answer_contract(
         requires_multi_field = False
     if answer_stem == "numeric" and not requires_min_typ_max:
         requires_multi_field = False
-    requires_visual_explanation = bool(_VISUAL_EXPLANATION_RE.search(question)) and bool(
-        re.search(
-            r"\b(?:cue|cues|diagram|explain|how\s+(?:does|is|was|do|did)|"
-            r"indicat(?:e|ed|es|ing)|confirm(?:ed|s|ing)?|using both)\b",
-            question,
-            re.I,
-        )
-    )
+    requires_visual_explanation = bool(_OUTPUT_VISUAL_EXPLANATION_RE.search(question))
     requires_quantitative_value = _requires_quantitative_value(question, answer_type)
     row_cues = tuple(name for name, pattern in _ROW_CUE_PATTERNS if pattern.search(question))
     requires_corresponding_row_binding = bool(_CORRESPONDING_OUTPUT_RE.search(question)) and (
@@ -253,7 +251,7 @@ def _requires_quantitative_value(question: str, answer_type: str | None) -> bool
 
 
 def _has_value_token(text: str) -> bool:
-    return bool(_VALUE_TOKEN_RE.search(text))
+    return bool(_VALUE_TOKEN_RE.search(text) or _IDENTIFIER_VALUE_RE.search(text))
 
 
 def _has_min_typ_max_label_and_value(text: str) -> bool:

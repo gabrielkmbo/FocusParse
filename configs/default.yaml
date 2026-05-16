@@ -61,7 +61,7 @@ tiers:
     # Low-cost schema/table extraction tier for high-throughput simple data
     # processing A/Bs. Use via FOCUSPARSE_TIER_SCHEMA_EXTRACTOR=gemini_schema_lite.
     provider: gemini
-    model: gemini-3.1-flash-lite
+    model: gemini-3.1-flash-lite-preview
     max_tokens: 8192
     thinking_level: low
     media_resolution: high

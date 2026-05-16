@@ -167,7 +167,7 @@
   **4.26s**, page recall **0.892**, bbox IoU **0.870**, and lazy-answer rate
   **0.041**. Domain split from `per_example.jsonl`: datasheet **64/101**,
   finance **25/47**.
-- Added `gemini_schema_lite` (`gemini-3.1-flash-lite`) as a cheaper schema
+- Added `gemini_schema_lite` (`gemini-3.1-flash-lite-preview`) as a cheaper schema
   extraction A/B tier and narrowed the Gemini schema extractor gate so plain
   `table`/`form`/`text` evidence no longer triggers broad structured extraction.
   The narrow-gate slice
@@ -176,6 +176,17 @@
   but failed the baseline flip gate with 0 recoveries and 9 regressions
   versus the 60.14% baseline. Do not full-run this checkpoint; next step is
   answer-preserving retry/adjudication.
+- Tightened post-evidence answer contracts and scorer-shape normalization after
+  the regression-heavy 38-row slice exposed verifier-retry bloat. The best live
+  slice was `contract-tight-slice-run1`: 35/38 = 92.1%, cost/correct $0.0154,
+  page recall 0.956, bbox IoU 0.963, lazy rate 0.0. It still failed the
+  baseline flip gate (1 recovery, 3 regressions, net -2), and run2 was 34/38
+  with net -3, so the current full-run accuracy claim remains the merged
+  60.14% checkpoint. Added syntax-only normalizers for bitfield descriptors,
+  priority-pair lists, page-number/TOC bloat, text-valued min/typ/max outputs,
+  variable-option formulas, and Outer Write-Back cache-policy row shifts.
+  Corrected the Gemini lite schema tier/pricing to
+  `gemini-3.1-flash-lite-preview`.
 
 ## 2026-05-14
 

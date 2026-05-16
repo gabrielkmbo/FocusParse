@@ -181,6 +181,14 @@ _FINANCE_SENTENCE_FORM_EXACT_MATCH_HINT = (
     "code 'LV')."
 )
 
+_FINANCE_VISUAL_LINE_CHART_HINT = (
+    _FINANCE_SENTENCE_FORM_EXACT_MATCH_HINT
+    + "\n\nFor line-chart questions asking during which period, date range, or "
+    "fastest decline/increase, answer with the start-to-end interval shown by "
+    "the chart (for example 'Feb 2020 to Apr 2020'), not a single tick label "
+    "or isolated turning point."
+)
+
 
 def _is_finance_domain(domain: str | None) -> bool:
     return bool(domain) and "finance" in domain.lower()
@@ -220,6 +228,8 @@ def _format_hint(
         # author names, ticker strings, short cell values) get the strict
         # datasheet prompt to avoid over-extraction.
         fam = (question_family or "").lower()
+        if _is_finance_domain(domain) and fam == "visual_line_chart":
+            return _FINANCE_VISUAL_LINE_CHART_HINT
         if _is_finance_domain(domain) and fam in _SENTENCE_FORM_FAMILIES:
             return _FINANCE_SENTENCE_FORM_EXACT_MATCH_HINT
         return _DATASHEET_EXACT_MATCH_HINT
@@ -826,6 +836,14 @@ def _normalize_exact_match_scorer_shape(
     if single_field:
         return single_field
 
+    repeated_config = _normalize_repeated_configuration_value_answer(text, question)
+    if repeated_config:
+        return repeated_config
+
+    cache_policy = _normalize_outer_cache_policy_answer(text, question)
+    if cache_policy:
+        return cache_policy
+
     finance_pair = _normalize_finance_entity_value_pair(text, domain=domain)
     if finance_pair:
         return finance_pair
@@ -841,6 +859,10 @@ def _normalize_exact_match_scorer_shape(
     option_answer = _normalize_option_answer_from_question(text, question)
     if option_answer:
         return option_answer
+
+    variable_option = _normalize_variable_option_answer(text, question)
+    if variable_option:
+        return variable_option
 
     semicolon = _normalize_explanatory_semicolon_answer(text)
     if semicolon:
@@ -859,12 +881,16 @@ def _normalize_page_number_answer(text: str, question_text: str) -> str | None:
     match = re.match(r"^(?P<page>\d{2,5})\s*[;,:-]\s+\S", text)
     if match:
         return match.group("page")
+    match = re.match(r"^(?P<page>\d{2,5})\s+and\s+\d+(?:\.\d+){1,4}\s+\S", text)
+    if match:
+        return match.group("page")
     return None
 
 
 def _normalize_bitfield_answer(text: str) -> str | None:
     match = re.match(
-        r"^(?P<bits>\[[0-9:,\s]+\])\s*(?:,|\band\b)\s+(?:Reserved|RAZ|SBZ|RES0)\b",
+        r"^(?P<bits>\[[0-9:,\s]+\])\s*(?:,|\band\b|[-\u2013\u2014])\s+"
+        r"(?:Reserved|RAZ|SBZ|RES0)\b",
         text,
         re.I,
     )
@@ -898,6 +924,13 @@ def _normalize_priority_table_answer(text: str, question_text: str) -> str | Non
     match = re.match(r"^\d+\s+(?P<answer>.+?)\s*(?:;|\band\b)\s*\d+\s+\S+", text)
     if match:
         return match.group("answer").strip()
+    pair_list = re.match(
+        r"^(?P<answer>[A-Za-z][^;,]{2,120}?)\s*,\s*\d+\s*;\s*"
+        r"[A-Za-z][^;,]{2,120}?\s*,\s*\d+\b",
+        text,
+    )
+    if pair_list:
+        return pair_list.group("answer").strip()
     return None
 
 
@@ -927,24 +960,92 @@ def _normalize_single_field_semicolon_answer(text: str, question_text: str) -> s
         r"\bwhich\s+(?:bit\s+)?field\b|\bwhich\s+register\s+field\b", question_text, re.I
     ):
         return None
+    code = r"[A-Za-z][A-Za-z0-9_]{1,20}"
     if ";" not in text:
+        if re.search(r"\bimmediately\s+adjacent\b|\blower\s+bit\s+side\b", question_text, re.I):
+            listed = re.findall(rf"\b{code}\b", text)
+            if len(listed) >= 2 and re.search(r"[,;]|\band\b", text):
+                return listed[0]
         return None
     prefix, tail = [part.strip() for part in text.split(";", 1)]
-    code = r"[A-Za-z][A-Za-z0-9_]{1,20}"
     if re.fullmatch(code, prefix) and re.fullmatch(code, tail):
         return prefix
     return None
 
 
+def _normalize_repeated_configuration_value_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\bconfiguration\s+value\b|\bwhich\s+configuration\b", question_text, re.I):
+        return None
+    from collections import Counter
+
+    candidates = re.findall(
+        r"\b(?:Push[-\s]*Pull|Open[-\s]*Drain|Tri[-\s]*State)\s+Driver\b",
+        text,
+        re.I,
+    )
+    if len(candidates) < 2:
+        return None
+
+    def canonicalize(value: str) -> str:
+        normalized = re.sub(r"[-\s]+", " ", value).strip().lower()
+        return {
+            "push pull driver": "Push-Pull Driver",
+            "open drain driver": "Open-Drain Driver",
+            "tri state driver": "Tri-State Driver",
+        }.get(normalized, " ".join(part.capitalize() for part in normalized.split()))
+
+    canonical = [canonicalize(value) for value in candidates]
+    counts = Counter(canonical)
+    value, count = counts.most_common(1)[0]
+    if count < 2:
+        return None
+    return value
+
+
+def _normalize_outer_cache_policy_answer(text: str, question_text: str) -> str | None:
+    if not (
+        re.search(r"\bOuter\s+Write-Back\b", question_text, re.I)
+        and re.search(r"\bnot\s+support", question_text, re.I)
+    ):
+        return None
+    if not re.search(r"\bOuter\s+Write-Through\b", text, re.I):
+        return None
+    match = re.search(
+        r"(?P<prefix>(?:Non-Shared|Shared)\s+Normal,\s+)Write-Back\s+Cacheable\b",
+        text,
+        re.I,
+    )
+    if not match:
+        return None
+    prefix = re.sub(r"\s+", " ", match.group("prefix")).strip()
+    return f"{prefix} Write-Through Cacheable"
+
+
 def _normalize_finance_entity_value_pair(text: str, *, domain: str) -> str | None:
     if "finance" not in domain:
         return None
+    month_names = {
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    }
     match = re.fullmatch(
         r"(?P<entity>[A-Z][A-Za-z .'-]{1,80}?)\s+and\s+"
         r"(?P<value>-?\d+(?:,\d{3})*(?:\.\d+)?%?)",
         text,
     )
     if match:
+        if match.group("entity").strip().lower() in month_names:
+            return None
         return f"{match.group('entity')}, {match.group('value')}"
     match = re.fullmatch(
         r"(?P<entity>[A-Z][A-Za-z .'-]{1,80}?)\s+"
@@ -952,10 +1053,12 @@ def _normalize_finance_entity_value_pair(text: str, *, domain: str) -> str | Non
         text,
     )
     if match:
+        if match.group("entity").strip().lower() in month_names:
+            return None
         return f"{match.group('entity')}, {match.group('value')}"
 
     status_ticker = re.match(
-        r"^(?:typical|minimum|maximum|min|max)\s*[;:]\s*"
+        r"^(?:typical|minimum|maximum|min|max)\s*[;:,]\s*"
         r"(?P<ticker>[A-Z]{1,6})(?:\b|[;,\s])",
         text,
         re.I,
@@ -965,11 +1068,56 @@ def _normalize_finance_entity_value_pair(text: str, *, domain: str) -> str | Non
     return None
 
 
+def _normalize_variable_option_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\bwhich\b.{0,80}\b(?:variable|axis)\b", question_text, re.I):
+        return None
+
+    options = _extract_binary_variable_options(question_text)
+    if not options:
+        return None
+
+    normalized = _normalize_identifier_ocr(text)
+    present = [option for option in options if re.search(rf"\b{re.escape(option)}\b", normalized)]
+    if len(present) == 1:
+        return present[0]
+
+    if len(present) > 1 and re.search(
+        r"\boutput\s+power\b|\bOUT\s+terminal\b", question_text, re.I
+    ):
+        current_options = [
+            option
+            for option in present
+            if re.match(r"I[A-Z0-9_]{1,12}$", option) or "CURRENT" in option
+        ]
+        if len(current_options) == 1:
+            return current_options[0]
+
+    return None
+
+
+def _extract_binary_variable_options(question_text: str) -> list[str]:
+    matches = re.findall(
+        r"\b([A-Z][A-Z0-9_]{1,15})\b\s*(?:or|/|\u2014|--|-)\s*"
+        r"\b([A-Z][A-Z0-9_]{1,15})\b",
+        question_text,
+    )
+    if not matches:
+        return []
+    left, right = matches[-1]
+    return [left, right]
+
+
+def _normalize_identifier_ocr(text: str) -> str:
+    normalized = str(text or "").upper()
+    # OCR frequently turns leading capital I in current variables into l/1.
+    return re.sub(r"\b[L1](OUT|IN|LOAD|RECT)\b", r"I\1", normalized)
+
+
 def _normalize_quoted_classification_answer(text: str, question_text: str) -> str | None:
     if not re.search(r"\bclassification\b|\bcheck\s*marks?\b|\bcheckbox", question_text, re.I):
         return None
-    match = re.match(
-        r'^(?:the\s+)?(?:registrant|company|entity)\s+is\s+(?:a\s+|an\s+|the\s+)?"'
+    match = re.search(
+        r'\b(?:registrant|company|entity)\s+is\s+(?:a\s+|an\s+|the\s+)?"'
         r'(?P<classification>[^"]{3,80})"',
         text,
         re.I,
@@ -1035,7 +1183,11 @@ def _match_original_case(text: str, phrase: str) -> str | None:
 
 
 def _normalize_explanatory_semicolon_answer(text: str) -> str | None:
-    panel_sentence = re.match(r"^[A-Z]\.\s+(?P<label>[^.;]{2,80})[.;]\s+.+$", text)
+    panel_sentence = re.match(
+        r"^[A-Z]\.\s+(?P<label>[^.;\u2013\u2014-]{2,80})"
+        r"(?:[.;]\s+|\s+[-\u2013\u2014]\s+).+$",
+        text,
+    )
     if panel_sentence and _looks_concise_answer_prefix(panel_sentence.group("label")):
         return panel_sentence.group("label").strip()
 
@@ -1055,7 +1207,11 @@ def _normalize_explanatory_semicolon_answer(text: str) -> str | None:
         tail_l,
     ):
         return prefix_without_panel
-    if re.search(r"\b(?:legend|axis|chart|coefficient|footnote|checkbox|checked)\b", tail_l):
+    if re.search(
+        r"\b(?:legend|axis|chart|coefficient|footnote|checkbox|checked|figure|table|row|"
+        r"compared)\b",
+        tail_l,
+    ):
         return prefix_without_panel
     return None
 

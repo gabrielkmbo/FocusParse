@@ -1282,6 +1282,136 @@ def test_answer_shape_collapses_exact_match_explanatory_suffixes() -> None:
         )
         == "FX bonds"
     )
+    assert (
+        _normalize_answer_shape(
+            'As of the date identifier "aapl-20250927", the registrant is a '
+            '"Large accelerated filer" because the checkbox next to it is marked.',
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Based on the check mark selections, what is the correct classification?",
+        )
+        == "Large accelerated filer"
+    )
+    assert (
+        _normalize_answer_shape(
+            "C. FX bonds — the VIX coefficient is the smallest, essentially at the 0.000 line.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which panel has the smallest VIX coefficient?",
+        )
+        == "FX bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "[31:16] - Reserved. RAZ.",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which bit fields are guaranteed to always read as zero?",
+        )
+        == "[31:16]"
+    )
+    assert (
+        _normalize_answer_shape(
+            'adcOvldGainStepAttack; Figure 129/130 compared with Table 68 row "Yes Yes"',
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which gain step parameter is used for the gain decrement?",
+        )
+        == "adcOvldGainStepAttack"
+    )
+    assert (
+        _normalize_answer_shape(
+            "CRn, CRm and opcode2",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text=(
+                "In the instruction encoding table, which field is immediately adjacent "
+                "to the L field on its lower bit side?"
+            ),
+        )
+        == "CRn"
+    )
+    assert (
+        _normalize_answer_shape(
+            "2806 and 26.3.2 CLB Input Selection",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which page number should you refer to for EMIF Clock Control?",
+        )
+        == "2806"
+    )
+    assert (
+        _normalize_answer_shape(
+            "Data Abort (including data TLB miss), 2; IRQ, 4",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which exception will be handled first according to the priority table?",
+        )
+        == "Data Abort (including data TLB miss)"
+    )
+    assert (
+        _normalize_answer_shape(
+            "typical, GOOG",
+            answer_type="exact_match",
+            domain="finance",
+            question_text=(
+                "Which value from the table (min/typical/max) should be used "
+                "for Alphabet's Class C Capital Stock?"
+            ),
+        )
+        == "GOOG"
+    )
+    assert (
+        _normalize_answer_shape(
+            "(VRECT X lout)",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text=(
+                "Which Y-axis variable should you use--VRECT or IOUT--to determine "
+                "output power at the OUT terminal?"
+            ),
+        )
+        == "IOUT"
+    )
+    assert (
+        _normalize_answer_shape(
+            "Outer Write-Through; Non-Shared Normal, Write-Back Cacheable",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text=(
+                "If a memory system does NOT support the Outer Write-Back cache policy, "
+                "how would the ARMv6 attribute change?"
+            ),
+        )
+        == "Non-Shared Normal, Write-Through Cacheable"
+    )
+
+
+def test_answer_shape_collapses_repeated_configuration_answer() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Push-Pull Driver; SCKOR Output Push-Pull Driver WSOR Output Push-Pull Driver",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="What driver type is used for the listed output pins?",
+        )
+        == "Push-Pull Driver"
+    )
+    assert (
+        _normalize_answer_shape(
+            "SCKOR Outp ut Push-Pull Driver WSOR Output Push-Pull Driver "
+            "SDOR Outp ut Push-Pull Driver",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text=(
+                "Which configuration value from the table should you use, and how can "
+                "you verify that this configuration is consistent?"
+            ),
+        )
+        == "Push-Pull Driver"
+    )
 
 
 def test_answer_shape_collapses_common_table_code_shapes() -> None:
@@ -1377,6 +1507,20 @@ def test_answer_shape_collapses_option_and_entity_value_answers() -> None:
             question_text="Based on the check mark selections, what is the correct classification?",
         )
         == "Large accelerated filer"
+    )
+
+
+def test_answer_shape_does_not_comma_separate_month_day_answer() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "November 1",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="What date range begins this period?",
+        )
+        == "November 1"
     )
 
 
