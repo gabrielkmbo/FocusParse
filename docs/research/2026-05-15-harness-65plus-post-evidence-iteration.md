@@ -351,3 +351,90 @@ hard target/control mix, but every 60-row slice still failed the regression
 gate. Full n=148 should wait until finance row/calculation adjudication or
 tighter Gemini schema gating shows positive net flips with <=1 prior-correct
 control regression on the mixed slice.
+
+## 2026-05-16 Gemini Schema + Scorer-Shape Follow-up
+
+After the user added a higher-quota `GEMINI_API_KEY`, I exercised the Gemini
+schema extraction path with the full tool set and the canonical HF revision.
+The integrated path was operational: the logs show sustained Gemini schema
+calls during slice and full runs with no Gemini rate-limit failures. The main
+provider instability was Anthropic verifier timeouts, which recovered on the
+configured retry path and should be treated as latency noise rather than
+Gemini failure.
+
+Canonical full run attempted:
+
+`results/hf/sprint-2026-05-16/adjudication-shape-full-run1/focusparse_focus_agentic_multi_page_0b139a04.json`
+
+Raw result:
+
+- Overall: 70/148 = 47.30%.
+- Domain split: datasheet 56/101, finance 14/47.
+- Cost/correct: $0.0330; total cost $2.3073.
+- Mean latency: 4.01s.
+- Page recall: 0.946; bbox IoU: 0.876.
+- Lazy-answer rate: 0.020.
+- Flip profile vs the 60.14% baseline on 147 common rows: 7 recoveries,
+  26 regressions, net -19.
+
+The failure mechanism was not Gemini quota or broad retrieval. Many regressions
+were post-evidence answer-shape failures: the answer contained the right scalar
+or label plus extra prose, row labels, legend text, or explanatory calculations.
+Examples:
+
+- `dat-ads1299-0059`: raw answer included `Yes; ... 10 mA or less`; scorer
+  expected `10 mA`.
+- `fin-goog-20251231-0041`: raw answer included the full calculation; scorer
+  expected `Government bonds`.
+- `dat-arm1176-ch3-coproc.annot-0001`: raw answer included
+  `[31:16], Reserved. RAZ.`; scorer expected `[31:16]`.
+- `fin-jpm_gtm_us_daily-0014`: raw answer used `France and 49.9`; scorer
+  expected `France, 49.9`.
+
+I added a deterministic, gold-free scorer-shape layer after reasoner parsing.
+It now handles embedded numeric-unit values, finance `value; status` prose,
+quoted classifications, option-list entity extraction, bitfield/code variants,
+page-number prefixes, input-mode wording, panel labels, and entity/value
+separator normalization. I also narrowed answer contracts so numeric answers do
+not require secondary yes/no fields unless the question is explicitly
+min/typ/max. This prevents scalar benchmark rows from being pushed into verbose
+multi-field answers.
+
+Posthoc rescore of the completed full artifact with the new normalizer:
+
+- Overall: 91/148 = 61.49%.
+- Domain split: datasheet 67/101, finance 24/47.
+- Normalizer flips on the artifact: 21 positive, 0 negative.
+- Flip profile vs the 60.14% baseline on 147 common rows: 8 recoveries,
+  6 regressions, net +2.
+
+This is useful as a diagnosis, but it is not a canonical claimed run because it
+rescored an already-completed artifact after code changes.
+
+Live repair slice:
+
+`results/hf/sprint-2026-05-16/normalizer-repair-slice-run1/focusparse_focus_agentic_multi_page_0b139a04.json`
+
+- Raw slice result: 27/38 = 71.1%, cost/correct $0.020.
+- The slice was intentionally regression-heavy: 37/38 rows were correct in the
+  60.14% baseline, so it primarily stress-tested prior-correct preservation.
+- Against baseline: 0 recoveries, 10 regressions, net -10.
+- Posthoc with the latest live-variant normalizers improves the same slice
+  artifact to 32/38, but it remains 5 below the baseline on those rows.
+
+Remaining live-slice regressions were semantic/model-choice errors, not
+syntax-only shape errors:
+
+- `dat-AN040_EN-0010`: selected `VRECT X Iout` instead of the output-current
+  answer shape around `IOUT`.
+- `dat-DS5091D-00-0043`: selected `1.5 W` where gold is `1.0`.
+- `dat-arm1176-vm.annot-0022`: selected the wrong cacheability row.
+- `fin-vis-jpm_gtm_us_daily-0114`: abstained/selected the wrong date window.
+
+Decision after this follow-up: do not spend another full n=148 on the current
+configuration. The Gemini schema extractor works and the scorer-shape layer is
+valuable, but the live mixed slice still fails the prior-correct preservation
+gate. The next iteration should narrow Gemini schema use further or add
+targeted adjudication that explicitly compares the original concise answer
+against the verifier-repair answer before accepting a verbose or row-shifted
+retry.

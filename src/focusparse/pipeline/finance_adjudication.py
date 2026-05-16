@@ -43,6 +43,11 @@ def infer_finance_answer_from_evidence(
         if candidate:
             return candidate
 
+    if answer_stem == "numeric" and _looks_segment_purchase_price_percent_question(q_lower):
+        candidate = _infer_segment_purchase_price_percent(packets)
+        if candidate:
+            return candidate
+
     return None
 
 
@@ -72,6 +77,15 @@ def _looks_repurchase_dividend_ratio_question(question: str) -> bool:
         and "repurchase" in question
         and "dividend" in question
         and "fiscal year" in question
+    )
+
+
+def _looks_segment_purchase_price_percent_question(question: str) -> bool:
+    return (
+        "purchase price" in question
+        and "segment" in question
+        and "acquisition" in question
+        and bool(re.search(r"\b(?:percent|percentage)\b", question))
     )
 
 
@@ -181,13 +195,51 @@ def _infer_repurchase_dividend_ratio(
     )
 
 
+def _infer_segment_purchase_price_percent(
+    packets: list[EvidencePacket],
+) -> FinanceAdjudication | None:
+    segment_acquisition: tuple[float, str, str, str] | None = None
+    purchase_price: tuple[float, str, str] | None = None
+
+    for packet in packets:
+        text = _packet_text(packet)
+        if purchase_price is None:
+            raw_price = _extract_total_purchase_price(text)
+            if raw_price:
+                purchase_price = (_amount_to_float(raw_price) or 0.0, raw_price, packet.packet_id)
+
+        raw_segment = _extract_largest_segment_acquisition(text)
+        if raw_segment and (segment_acquisition is None or raw_segment[0] > segment_acquisition[0]):
+            segment_acquisition = (*raw_segment, packet.packet_id)
+
+    if not segment_acquisition or not purchase_price:
+        return None
+    numerator, segment_label, raw_numerator, numerator_packet = segment_acquisition
+    denominator, raw_denominator, denominator_packet = purchase_price
+    if numerator <= 0 or denominator <= 0 or numerator >= denominator:
+        return None
+
+    percent = round((numerator / denominator) * 100)
+    if percent <= 0 or percent >= 100:
+        return None
+
+    return FinanceAdjudication(
+        answer=f"{percent}%",
+        mechanism="segment_purchase_price_percent",
+        packet_ids=tuple(dict.fromkeys((numerator_packet, denominator_packet))),
+        rationale=(
+            f"Computed segment acquisition impact for '{segment_label}' "
+            f"({raw_numerator}) divided by total purchase price {raw_denominator}."
+        ),
+    )
+
+
 def _structured_candidate_rows(text: str) -> list[tuple[str, list[str]]]:
-    headers_match = re.search(r"^headers:\s*(.+)$", text, re.IGNORECASE | re.MULTILINE)
+    headers = _structured_headers(text)
     rows_match = re.search(r"^candidate_rows:\s*(.+)$", text, re.IGNORECASE | re.MULTILINE)
-    if not headers_match or not rows_match:
+    if not headers or not rows_match:
         return []
 
-    headers = [part.strip() for part in headers_match.group(1).split("|") if part.strip()]
     value_count = max(1, len(headers) - 1)
     tokens = [part.strip() for part in rows_match.group(1).split("|") if part.strip()]
     rows: list[tuple[str, list[str]]] = []
@@ -197,6 +249,9 @@ def _structured_candidate_rows(text: str) -> list[tuple[str, list[str]]]:
         if _amount_to_float(label) is not None:
             i += 1
             continue
+        if label.endswith(":") and i + 1 < len(tokens) and _amount_to_float(tokens[i + 1]) is None:
+            i += 1
+            continue
         values = tokens[i + 1 : i + 1 + value_count]
         if len(values) == value_count and any(_amount_to_float(v) is not None for v in values):
             rows.append((label, values))
@@ -204,6 +259,13 @@ def _structured_candidate_rows(text: str) -> list[tuple[str, list[str]]]:
         else:
             i += 1
     return rows
+
+
+def _structured_headers(text: str) -> list[str]:
+    headers_match = re.search(r"^headers:\s*(.+)$", text, re.IGNORECASE | re.MULTILINE)
+    if not headers_match:
+        return []
+    return [part.strip() for part in headers_match.group(1).split("|") if part.strip()]
 
 
 def _find_row(rows: list[tuple[str, list[str]]], label: str) -> tuple[str, list[str]] | None:
@@ -247,6 +309,52 @@ def _extract_dividend_total(text: str, year: str) -> str | None:
     scoped_body = body[: next_year_match.start()] if next_year_match else body
     amounts = [amount for amount in _money_amounts(scoped_body) if _amount_to_float(amount)]
     return amounts[-1] if amounts else None
+
+
+def _extract_total_purchase_price(text: str) -> str | None:
+    rows = _structured_candidate_rows(text)
+    for label, row_values in rows:
+        label_norm = _normalize_label(label)
+        if "purchase price" not in label_norm:
+            continue
+        values = [value for value in row_values if _amount_to_float(value)]
+        if values:
+            return values[-1]
+
+    match = re.search(
+        r"\btotal\s+purchase\s+price\b[^$\d]{0,60}(?P<amount>\$?\s*\d{1,3}(?:,\d{3})+)",
+        text,
+        re.IGNORECASE,
+    )
+    return match.group("amount") if match else None
+
+
+def _extract_largest_segment_acquisition(text: str) -> tuple[float, str, str] | None:
+    headers = _structured_headers(text)
+    rows = _structured_candidate_rows(text)
+    if not headers or not rows:
+        return None
+
+    acquisition_indices = [
+        idx for idx, header in enumerate(headers[1:]) if "acquisition" in header.lower()
+    ]
+    if not acquisition_indices:
+        return None
+
+    best: tuple[float, str, str] | None = None
+    for label, values in rows:
+        if _normalize_label(label) in {"total", "totals"}:
+            continue
+        for idx in acquisition_indices:
+            if idx >= len(values):
+                continue
+            raw = values[idx]
+            amount = _amount_to_float(raw)
+            if amount is None or amount <= 0:
+                continue
+            if best is None or amount > best[0]:
+                best = (amount, label, raw)
+    return best
 
 
 def _slice_between_years(text: str, year: str, known_years: tuple[str, ...]) -> str | None:

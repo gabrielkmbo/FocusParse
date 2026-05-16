@@ -30,7 +30,7 @@ def test_infers_corresponding_finance_value_status_from_structured_rows() -> Non
         "Gemini structured extraction: kind=table\n"
         "headers: Years ended | September 27, 2025 | September 28, 2024 | "
         "September 30, 2023\n"
-        "candidate_rows: Products | $ 307,003 | $ 294,866 | $ 298,085 | "
+        "candidate_rows: Net sales: | | | | Products | $ 307,003 | $ 294,866 | $ 298,085 | "
         "Gross margin | 195,201 | 180,683 | 169,148\n"
         "confidence=0.95",
     )
@@ -82,3 +82,45 @@ def test_infers_repurchase_dividend_ratio_from_two_regions() -> None:
     assert adjudication.answer == "0.53"
     assert finance_answers_match("0.53", adjudication)
     assert not finance_answers_match("0.51", adjudication)
+
+
+def test_infers_segment_purchase_price_percent_from_two_tables() -> None:
+    question = (
+        "Using the information from the purchase price allocation (including "
+        "goodwill and intangible assets) and the segment table showing the "
+        "impact of acquisitions, determine which business segment was primarily "
+        "affected by the acquisition and calculate what percentage of the total "
+        "purchase price is represented by the increase in net assets for that "
+        "segment. Show your answer as a percentage to the nearest whole number."
+    )
+    segment_table = _packet(
+        "pkt_000",
+        "Gemini structured extraction: kind=table\n"
+        "headers: (In millions) | June 30, 2023 | Acquisitions | Other | June 30, 2024\n"
+        "candidate_rows: Productivity and Business Processes | $ 31,359 | $ 0 | $ 2 | "
+        "$ 31,361 | Intelligent Cloud | 25,676 | 0 | (28) | 25,648 | "
+        "More Personal Computing | 10,851 | 51,235 | 125 | 62,211 | "
+        "Total | $ 67,886 | $ 51,235 | $ 99 | $ 119,220\n"
+        "confidence=0.95",
+    )
+    purchase_price = _packet(
+        "pkt_001",
+        "Gemini structured extraction: kind=table\n"
+        "headers: (In millions)\n"
+        "candidate_rows: Goodwill | 51,001 | Intangible assets | 21,969 | "
+        "Total purchase price | $ 75,408\n"
+        "notes: Goodwill was assigned to our More Personal Computing segment.\n"
+        "confidence=0.95",
+    )
+
+    adjudication = infer_finance_answer_from_evidence(
+        question,
+        [segment_table, purchase_price],
+        answer_type="numeric",
+    )
+
+    assert adjudication is not None
+    assert adjudication.answer == "68%"
+    assert adjudication.mechanism == "segment_purchase_price_percent"
+    assert finance_answers_match("68%", adjudication)
+    assert not finance_answers_match("96%", adjudication)

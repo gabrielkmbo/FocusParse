@@ -115,6 +115,8 @@ def build_answer_contract(
     )
     if answer_stem == "boolean":
         requires_multi_field = False
+    if answer_stem == "numeric" and not requires_min_typ_max:
+        requires_multi_field = False
     requires_visual_explanation = bool(_VISUAL_EXPLANATION_RE.search(question)) and bool(
         re.search(
             r"\b(?:cue|cues|diagram|explain|how\s+(?:does|is|was|do|did)|"

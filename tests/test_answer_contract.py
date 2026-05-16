@@ -30,6 +30,18 @@ def test_min_typ_max_label_and_value_passes_contract() -> None:
     assert answer_contract_failures("min: 0.697 V", contract) == []
 
 
+def test_numeric_scalar_contract_does_not_force_secondary_yes_no_field() -> None:
+    contract = build_answer_contract(
+        "If +600 V exceeds the CDM rating, what maximum input current must be "
+        "ensured according to the footnote?",
+        answer_type="numeric",
+        domain="datasheet",
+    )
+
+    assert not contract.requires_multi_field
+    assert answer_contract_failures("10 mA", contract) == []
+
+
 def test_value_question_rejects_row_label_without_value() -> None:
     contract = build_answer_contract(
         "Which value should be used when comparing the single pulse avalanche "

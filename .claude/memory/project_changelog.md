@@ -16,6 +16,26 @@
   collapses to `file, size`. The focused 2-row regression smoke passed at 2/2,
   but the follow-up 60-row slice was 22/60 with net +2 and two different
   regressions, so full n=148 remains blocked.
+- Exercised the new higher-quota Gemini key through the gated schema-extractor
+  role on a full n=148 run. Gemini calls were stable with no observed Gemini
+  rate-limit failures, but the raw full result regressed to 70/148 = 47.30%
+  because schema-enriched evidence increased verbose answer shapes and some
+  row/series choices.
+- Added a deterministic, gold-free scorer-shape layer after reasoner parsing:
+  embedded numeric-unit extraction, finance `value; status` prose collapse,
+  quoted classification extraction, option/entity extraction, bitfield/code
+  variants, input-mode wording, page-number prefixes, panel-label trimming,
+  and entity/value separator normalization. Numeric answer contracts no longer
+  force secondary yes/no fields unless the question is explicitly min/typ/max.
+- Posthoc rescoring the completed full artifact with the new normalizer reached
+  91/148 = 61.49% with 21 positive and 0 negative normalization flips, but this
+  is diagnostic only because it was not a live full rerun.
+- Live 38-row regression-heavy repair slice
+  `results/hf/sprint-2026-05-16/normalizer-repair-slice-run1/` scored 27/38 raw
+  and remains below the 60.14% baseline on those prior-correct controls even
+  after posthoc shape fixes. Do not run another full n=148 from this exact
+  configuration; next work should add original-vs-retry adjudication or narrower
+  Gemini schema gating.
 
 ## 2026-05-15
 

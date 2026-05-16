@@ -1022,6 +1022,45 @@ def test_answer_shape_normalizes_label_prefixed_hex_span() -> None:
     )
 
 
+def test_answer_shape_uses_hex_after_distractor_label() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "K 32; Serializer Lanes Enabled 0xFF (SERDIN0 to SERDIN7)",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "0xFF (SERDIN0 to SERDIN7)"
+    )
+
+
+def test_answer_shape_removes_endian_label_from_hex_assignment() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Little-endian r2= 0x44",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "r2= 0x44"
+    )
+
+
+def test_answer_shape_collapses_leading_person_name_explanation() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            'Stephanie Aliaga \u2014 her portrait is directly above "Grant Papa".',
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "Stephanie Aliaga"
+    )
+
+
 def test_answer_shape_collapses_leading_code_identifier_explanation() -> None:
     from focusparse.pipeline.reasoner import _normalize_answer_shape
 
@@ -1111,6 +1150,15 @@ def test_answer_shape_collapses_inline_finance_value_status_pair() -> None:
         )
         == "180,683; typical"
     )
+    assert (
+        _normalize_answer_shape(
+            "September 28, 2024: Gross margin 180,683 (in millions), which is "
+            "the typical value among the three years' gross margins.",
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "180,683; typical"
+    )
 
 
 def test_answer_shape_formats_datasheet_file_size_pair() -> None:
@@ -1192,4 +1240,190 @@ def test_answer_shape_does_not_parenthesize_tickers() -> None:
             domain="finance",
         )
         == "GOOG"
+    )
+
+
+def test_answer_shape_extracts_numeric_unit_from_verbose_answer() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Yes; +600 V CDM exceeds the specified CDM ESD rating of +-500 V, "
+            "and the maximum input current must be limited to 10 mA or less.",
+            answer_type="numeric",
+            domain="datasheet",
+            question_text=(
+                "If you apply an electrostatic discharge of +600 V, what is the "
+                "maximum input current you must ensure is not exceeded?"
+            ),
+        )
+        == "10 mA"
+    )
+
+
+def test_answer_shape_collapses_exact_match_explanatory_suffixes() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Large accelerated filer \u2014 the checkbox next to Large accelerated filer is marked.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Based on the check mark selections, what is the correct classification?",
+        )
+        == "Large accelerated filer"
+    )
+    assert (
+        _normalize_answer_shape(
+            "C. FX bonds; the VIX coefficient is closest to 0 in that panel.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which panel has the smallest VIX coefficient?",
+        )
+        == "FX bonds"
+    )
+
+
+def test_answer_shape_collapses_common_table_code_shapes() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "16-Bit Stereo b0010",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="What DMA R_POWER Setting code corresponds to the lower row?",
+        )
+        == "b0010"
+    )
+    assert (
+        _normalize_answer_shape(
+            "[31:16], Reserved. RAZ.",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which bit fields are guaranteed to always read as zero?",
+        )
+        == "[31:16]"
+    )
+    assert (
+        _normalize_answer_shape(
+            "[31:16] and Reserved. RAZ.",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which bit fields are guaranteed to always read as zero?",
+        )
+        == "[31:16]"
+    )
+    assert (
+        _normalize_answer_shape(
+            "[15:14]=b00, [8:5]=b1111, [4:3]=b11",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which bit fields must be configured with these values?",
+        )
+        == "[15:14]=b00, [8:5]=b1111, [4:3]=b11"
+    )
+    assert (
+        _normalize_answer_shape(
+            "CRn; CRm",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which field is immediately adjacent on the lower bit side?",
+        )
+        == "CRn"
+    )
+
+
+def test_answer_shape_collapses_option_and_entity_value_answers() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Using the fair value totals, government bonds increased about 80.5%. "
+            "The largest percentage increase was Government bonds.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text=(
+                "Which class of securities (government bonds, corporate debt securities, "
+                "or mortgage-backed and asset-backed securities) experienced the largest "
+                "percentage increase?"
+            ),
+        )
+        == "Government bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "France and 49.9",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which country and value are lowest in the Developed section?",
+        )
+        == "France, 49.9"
+    )
+    assert (
+        _normalize_answer_shape(
+            "France 49.9",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which country and value are lowest in the Developed section?",
+        )
+        == "France, 49.9"
+    )
+    assert (
+        _normalize_answer_shape(
+            'The registrant is a "Large accelerated filer" \u2014 the checkbox is marked.',
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Based on the check mark selections, what is the correct classification?",
+        )
+        == "Large accelerated filer"
+    )
+
+
+def test_answer_shape_normalizes_input_mode_wording() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Configure the signals at INxP and INxN to be 180 degrees "
+            "out-of-phase centered around a common voltage to use a fully "
+            "differential input method.",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which input mode results in both input pins having equal swings?",
+        )
+        == "Fully-differential input mode"
+    )
+
+
+def test_answer_shape_collapses_live_verbose_chart_variants() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "C. FX bonds. Using the VIX coefficient, the FX bonds panel shows "
+            "the smallest estimated change.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which panel has the smallest VIX coefficient?",
+        )
+        == "FX bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "2 Data Abort (including data TLB miss) and 4 IRQ",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which exception will be handled first according to the priority table?",
+        )
+        == "Data Abort (including data TLB miss)"
+    )
+    assert (
+        _normalize_answer_shape(
+            "Micro firms show the more noticeable uptick",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which group shows a more noticeable uptick in NPL ratios at the end?",
+        )
+        == "Micro firms show a more noticeable uptick in NPL ratios at the end of the period"
     )

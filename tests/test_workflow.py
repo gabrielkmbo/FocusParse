@@ -733,6 +733,70 @@ def test_deterministic_finance_adjudication_does_not_accept_mismatch():
     )
 
 
+def test_deterministic_finance_adjudication_accepts_purchase_price_percent():
+    question = QuestionEvent(
+        example_id="fin-segment-percent",
+        question=(
+            "Using the information from the purchase price allocation and the "
+            "segment table showing the impact of acquisitions, determine which "
+            "business segment was primarily affected by the acquisition and "
+            "calculate what percentage of the total purchase price is represented "
+            "by the increase in net assets for that segment. Show your answer as "
+            "a percentage to the nearest whole number."
+        ),
+        doc_id="10-K",
+        pages_available=2,
+        domain="finance",
+        answer_type="numeric",
+    )
+    evidence = EvidenceEvent(
+        packets=[
+            _make_packet(packet_id="pkt_000", page=98, bbox=(0.0, 0.0, 1.0, 1.0)).model_copy(
+                update={
+                    "ocr_snippet": (
+                        "headers: (In millions) | June 30, 2023 | Acquisitions | Other | "
+                        "June 30, 2024\n"
+                        "candidate_rows: Productivity and Business Processes | $ 31,359 | "
+                        "$ 0 | $ 2 | $ 31,361 | Intelligent Cloud | 25,676 | 0 | "
+                        "(28) | 25,648 | More Personal Computing | 10,851 | 51,235 | "
+                        "125 | 62,211 | Total | $ 67,886 | $ 51,235 | $ 99 | $ 119,220"
+                    )
+                }
+            ),
+            _make_packet(packet_id="pkt_001", page=97, bbox=(0.0, 0.0, 1.0, 1.0)).model_copy(
+                update={
+                    "ocr_snippet": (
+                        "headers: (In millions)\n"
+                        "candidate_rows: Goodwill | 51,001 | Intangible assets | 21,969 | "
+                        "Total purchase price | $ 75,408\n"
+                        "notes: Goodwill was assigned to our More Personal Computing segment."
+                    )
+                }
+            ),
+        ]
+    )
+    answer = AnswerEvent(answer="68%", citations=["pkt_000", "pkt_001"], confidence=0.87)
+    verdict = VerdictEvent(
+        supported=False,
+        reason="Verifier agrees with the facts but asks for another reasoner pass.",
+        next_action="escalate_reasoner",
+        confidence=0.72,
+    )
+
+    adjudicated = _maybe_accept_deterministic_finance_answer(
+        question_event=question,
+        evidence=evidence,
+        answer=answer,
+        verdict=verdict,
+    )
+
+    assert adjudicated.supported
+    assert adjudicated.next_action == "accept"
+    assert adjudicated.diagnostics["finance_adjudication"]["mechanism"] == (
+        "segment_purchase_price_percent"
+    )
+
+
 # ---------------------------------------------------------------------------
 # FocusWorkflow.run end-to-end (requires parser-bench submodule)
 # ---------------------------------------------------------------------------
