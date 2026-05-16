@@ -189,6 +189,9 @@ Two targeted live checks validated those mechanisms:
 | leading identifier minifacts run2 | 20/60 | 33.3% | $0.848 | $0.042 | 4.09s | 0.978 | 0.933 | 0.000 | 3 | 3 | 0 | 3 |
 | Gemini schema + contracts slice run1 | 22/60 | 36.7% | $0.963 | $0.044 | 3.75s | 0.967 | 0.951 | 0.017 | 4 | 2 | +2 | 2 |
 | Gemini schema + contracts slice run2 | 22/60 | 36.7% | $0.992 | $0.045 | 6.71s | 0.944 | 0.900 | 0.033 | 4 | 2 | +2 | 2 |
+| finance adjudication slice run1 | 23/60 | 38.3% | $0.939 | $0.041 | 3.66s | 0.975 | 0.949 | 0.000 | 5 | 2 | +3 | 2 |
+| finance adjudication + shape smoke | 2/2 | 100.0% | $0.028 | $0.014 | 3.88s | 1.000 | 1.000 | 0.000 | n/a | n/a | n/a | n/a |
+| finance adjudication slice run2 | 22/60 | 36.7% | $0.921 | $0.042 | 3.56s | 0.953 | 0.890 | 0.017 | 4 | 2 | +2 | 2 |
 
 The first disk-light answer-shape run was the best clean slice so far, but it
 still failed the mixed-slice gate because prior-correct control regressions
@@ -206,6 +209,25 @@ Run2 still had two finance regressions: `fin-aapl-20250927-0002` flipped from
 again abstained despite an initial correct `0.53` answer in the prior slice
 trace. This means the next bottleneck is finance row/calculation verifier
 adjudication, not raw schema extraction.
+
+The deterministic finance adjudicator fixed two verifier false-reject families
+in focused smoke: `fin-aapl-20250927-0002` normalized to `180,683; typical`,
+and `fin-10-K-0033` normalized to `0.53` from the same evidence packets. The
+first 60-row slice with this path reached the best hard-slice result so far
+(`23/60`, net +3), but still had two prior-correct regressions:
+`fin-aapl-20250927-0002` became a verbose but semantically right shape
+(`September 28, 2024: Gross margin $180,683 -- typical...`) and
+`dat-adrv9040-reference-manual-ug-2192-0032` appended an explanation after the
+correct file/size pair.
+
+I added two syntax-only normalizers for those regressions: one collapses a
+single inline finance value/status pair to `value; status`; the other strips
+explanatory prose after a datasheet `file, size` pair. A two-row regression
+smoke then scored 2/2 with no retries. However, the follow-up 60-row slice
+still failed the gate at `22/60`, net +2, because different control rows
+regressed (`dat-Arm_EE382N_4-0001`: `50%` vs gold `70%`; `fin-10-K-0036`:
+`96%` vs gold `68%`). That makes the current gain non-reproducible enough to
+block a full n=148 run.
 
 One earlier disk-light attempt was discarded as invalid: it hit an Anthropic
 429 rate-limit error mid-run and the harness converted affected rows to error
@@ -299,12 +321,13 @@ rows. However, prompt/schema augmentation alone also increases answer
 verbosity, over-abstention, wrong-row selection, and cost/latency on previously
 correct controls.
 
-The best clean slices now show positive net flips (+2), which is encouraging,
-but the control-regression gate still blocks a full n=148 run. The remaining
-regressions are mostly finance wrong-row / calculation-verifier decisions, not
-syntax-only shape mistakes. Gemini 3.1 Pro works technically with the new key,
-but using it as a broadly gated schema extractor is not yet a cost-effective
-accuracy mechanism.
+The best clean slices now show positive net flips (+2 to +3), which is
+encouraging, but the control-regression gate still blocks a full n=148 run. The
+remaining regressions are a mix of finance wrong-row / calculation-verifier
+decisions and visual proportion mistakes, not syntax-only shape mistakes. Gemini
+3.1 Pro works technically with the new key as a gated schema extractor for
+table/chart/element packets, but the current broad schema path is not yet a
+reproducible cost-effective accuracy mechanism.
 
 The next mechanism should not be broader retrieval or another prompt-only full
 run. The next step should be gated repair/adjudication:
@@ -323,8 +346,8 @@ questions; several regressions were semantically plausible but shape-wrong.
 ## Decision
 
 Do not claim progress toward 65% from these runs yet. The implementation
-created useful infrastructure and the best clean slices improved to 22/60 on a
-hard target/control mix, but every slice still failed the regression gate. Full
-n=148 should wait until finance row/calculation adjudication or tighter Gemini
-schema gating shows positive net flips with <=1 prior-correct control
-regression on the mixed slice.
+created useful infrastructure and the best clean slice improved to 23/60 on a
+hard target/control mix, but every 60-row slice still failed the regression
+gate. Full n=148 should wait until finance row/calculation adjudication or
+tighter Gemini schema gating shows positive net flips with <=1 prior-correct
+control regression on the mixed slice.

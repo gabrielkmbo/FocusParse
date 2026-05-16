@@ -1,5 +1,22 @@
 # Project Changelog
 
+## 2026-05-16
+
+- Added narrow deterministic finance adjudication for two same-evidence finance
+  verifier false-reject families: corresponding row/value/status answers and
+  repurchase-dividend ratio calculations. The adjudicator only accepts when the
+  current cited answer already matches a deterministic reconstruction from the
+  same packets; it does not invent replacement answers or use gold/example ids.
+  A 2-row smoke passed, and the first mixed slice improved to 23/60 with net +3,
+  but still failed the control-regression gate with two prior-correct
+  regressions.
+- Tightened syntax-only answer-shape normalization for two regressions observed
+  after the finance adjudicator: inline finance `value -- status` sentences now
+  collapse to `value; status`, and datasheet `file, size; explanatory prose`
+  collapses to `file, size`. The focused 2-row regression smoke passed at 2/2,
+  but the follow-up 60-row slice was 22/60 with net +2 and two different
+  regressions, so full n=148 remains blocked.
+
 ## 2026-05-15
 
 - Added a dedicated Gemini schema-extraction path for CV-heavy table/chart/

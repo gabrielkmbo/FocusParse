@@ -590,6 +590,10 @@ def _normalize_answer_shape(
             if corresponding_value:
                 return corresponding_value
 
+            embedded_value_status = _normalize_embedded_finance_value_status_shape(text)
+            if embedded_value_status:
+                return embedded_value_status
+
         if stem == "exact_match" and "datasheet" in domain_l:
             file_size = _normalize_datasheet_file_size_shape(text)
             if file_size:
@@ -747,6 +751,29 @@ def _normalize_finance_value_status_shape(text: str) -> str | None:
     )
 
 
+def _normalize_embedded_finance_value_status_shape(text: str) -> str | None:
+    """Collapse one inline finance value/status pair inside a short sentence."""
+
+    value = r"\$?\s*\(?[-+]?(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?%|\d+\.\d+)\)?%?"
+    status = r"typical|middle|minimum|maximum|lowest|highest|smallest|largest|min|max"
+    matches = list(
+        re.finditer(
+            rf"(?P<value>{value})\s*(?:[,;/]|[-\u2013\u2014]|\bis\b|\bwas\b|\bwere\b)\s*"
+            rf"(?:the\s+)?(?P<status>{status})\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    if len(matches) != 1:
+        return None
+
+    match = matches[0]
+    return (
+        f"{_normalize_finance_exact_value(match.group('value'))}; "
+        f"{_canonical_finance_status(match.group('status'))}"
+    )
+
+
 def _canonical_finance_status(text: str) -> str:
     status = str(text or "").strip().lower()
     return {
@@ -781,7 +808,14 @@ def _normalize_datasheet_file_size_shape(text: str) -> str | None:
         return None
 
     tail = match.group("tail").strip()
-    if tail and not re.match(r"^[,;]\s*state\b", tail, re.IGNORECASE):
+    if tail and not (
+        re.match(r"^[,;]\s*state\b", tail, re.IGNORECASE)
+        or re.match(
+            r"^;\s*(?:the|this|these|that|after|following|because|as|which|where)\b",
+            tail,
+            re.IGNORECASE,
+        )
+    ):
         return None
     size_text = re.sub(r"\s+", " ", match.group("size").strip())
     return f"{match.group('file')}, {size_text}"

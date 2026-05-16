@@ -1099,12 +1099,34 @@ def test_answer_shape_formats_finance_value_status_pair() -> None:
     )
 
 
+def test_answer_shape_collapses_inline_finance_value_status_pair() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "September 28, 2024: Gross margin $ 180,683 \u2014 typical "
+            "(neither minimum nor maximum) among the three years' gross margins.",
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "180,683; typical"
+    )
+
+
 def test_answer_shape_formats_datasheet_file_size_pair() -> None:
     from focusparse.pipeline.reasoner import _normalize_answer_shape
 
     assert (
         _normalize_answer_shape(
             "ADRV9040_FW.bin; 641 kb",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "ADRV9040_FW.bin, 641 kb"
+    )
+    assert (
+        _normalize_answer_shape(
+            "ADRV9040_FW.bin, 641 kb; The first step is to load the Arm image.",
             answer_type="exact_match",
             domain="datasheet",
         )
