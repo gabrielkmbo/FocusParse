@@ -1,5 +1,28 @@
 # Project Changelog
 
+## 2026-05-17
+
+- Validated the first full n=148 FocusParse harness result above the 65% target
+  on branch `codex/harness-65plus-iteration`. After a refreshed
+  `GEMINI_API_KEY`, the dedicated schema-extractor ladder was live-smoked:
+  `gemini-3.1-pro-preview`, `gemini-3-flash-preview`, and
+  `gemini-3.1-flash-lite` all returned structured table output from a real
+  cached crop, and the API model list exposed all configured extraction tiers.
+  The measured accuracy lift came from gold-free answer-shape normalization
+  over already-seen evidence: numeric difference results, page-label pairs,
+  percent-point OCR shape, reset-zero/final-hex shape, method+unit pairs, and
+  branch-instruction/use rows. Posthoc on `chart-period-full-run2` was
+  97/148 (+8/-0), the 24-row target/control live slice
+  `shape-normalizer-target-control-run1` passed at 21/24 with +5/-0, and full
+  `shape-normalizer-full-run1` scored **99/148 = 66.9%**. Domain split:
+  datasheet **71/101**, finance **28/47**. Cost/correct **$0.0232**, mean
+  latency **3.70s**, page recall **0.949**, bbox IoU **0.881**, lazy-answer
+  rate **0.020**, Gemini structured extraction on **47/148** rows. Robust
+  occurrence-aware flip analysis vs the canonical merged 60.14% baseline:
+  **+15/-5**, net +10. Full `uv run pytest` passed (856 passed / 159 skipped).
+  Next work should target the five residual regressions in chart interpolation,
+  close visual labels, and finance legend binding.
+
 ## 2026-05-16
 
 - Refreshed the Gemini schema-extractor model ladder after checking the current

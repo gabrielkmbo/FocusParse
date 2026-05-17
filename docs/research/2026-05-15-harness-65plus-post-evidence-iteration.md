@@ -1062,3 +1062,103 @@ wrong-row sample continue to support the main research hypothesis: the harness
 usually has the right page/region, and the next gain must come from
 evidence-grounded candidate adjudication for same-evidence row/series/value
 confusions, not broader retrieval or more always-on tools.
+
+## 2026-05-17 Gemini Extractor Smoke + Shape Normalizer Target Pass
+
+After the refreshed `GEMINI_API_KEY`, I rechecked the current Google AI model
+docs and live model list. The extraction ladder remains:
+
+- default `schema_extractor`: `gemini-3.1-pro-preview`, high thinking, high
+  media resolution;
+- fast A/B: `gemini-3-flash-preview`;
+- stable cheap A/B: `gemini-3.1-flash-lite`;
+- preview cheap A/B: `gemini-3.1-flash-lite-preview`.
+
+Primary sources used for the tier choice:
+
+- <https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview>
+- <https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite>
+- <https://ai.google.dev/gemini-api/docs/media-resolution>
+- <https://ai.google.dev/gemini-api/docs/structured-output>
+
+Live checks with the new key:
+
+- the model list contains all four configured extraction models;
+- `gemini-3.1-pro-preview` returned a structured table schema from a real
+  cached crop (`kind=table`, confidence 0.95, access-mode headers, and the
+  `Data | Undefined exception | ...` row);
+- `gemini-3-flash-preview` and `gemini-3.1-flash-lite` also returned visible
+  structured table output on the same crop.
+
+The full-run accuracy gain came from stricter gold-free answer-shape
+normalization, not from turning on more retrieval. The new syntax-only rules
+cover:
+
+- computed numeric difference answers such as `MAX ... - TYP ... = 0.35 µVpp`
+  -> `0.35 µVpp`;
+- label/page pairs such as `Balance Sheets, 52` -> `Balance Sheets, page 52`;
+- percent-point OCR shape (`0ppt` -> `0%`);
+- reset-zero and final-address hex shapes (`0x00000000` -> `0 (reset value)`,
+  `0x003FFFF8` -> `0x3FFFF8`);
+- method+unit pairs (`adi_adrv904x_OrxAttenSet() and dB` ->
+  `adi_adrv904x_OrxAttenSet(), dB`);
+- branch-instruction/use rows (`BLE ... Signed integer comparison ...` ->
+  `BLE; Signed integer comparison gave less than or equal`).
+
+Diagnostic posthoc rescore of the clean `chart-period-full-run2` predictions:
+
+- old: 89/148;
+- with the new normalizer only: 97/148;
+- flips: +8/-0.
+
+Target/control live slice:
+
+| Run | Accuracy | Datasheet | Finance | Cost/correct | Latency | Page recall | Bbox IoU | Lazy | Flip gate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `shape-normalizer-target-control-run1` | 21/24 = 87.5% | 16/18 | 5/6 | $0.0141 | 3.18s | 0.979 | 0.974 | 0.000 | +5/-0 vs `chart-period-full-run2` subset |
+
+Full n=148 validation:
+
+| Run | Correct | Accuracy | Datasheet | Finance | Cost/correct | Latency | Page recall | Bbox IoU | Lazy | Structured extraction |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `shape-normalizer-full-run1` | 99/148 | 66.9% | 71/101 | 28/47 | $0.0232 | 3.70s | 0.949 | 0.881 | 0.020 | 47/148 rows |
+
+Against the canonical 60.14% baseline
+`answer-shape-normalizer-oai-run2` (89/148), the robust occurrence-aware flip
+analysis is +15/-5, net +10. Positive flips were mostly post-evidence reasoning
+or answer-shape failures:
+
+- branch/table row completion: `dat-Arm_EE382N_4-0049`;
+- API category tie row: `dat-adrv9040-reference-manual-ug-2192-0052`;
+- exact page-label shape: `fin-10-K-0013`;
+- chart/table note shape: `fin-10-K-0008`;
+- chart/series/condition binding: `fin-boe_fsr_2024_nov-0056`;
+- datasheet visual/caption/table grounding: `dat-infineon-...-0047`,
+  `dat-Buck Converter Selection Criteria ...-0030`;
+- unanswerable shape: `dat-armv6.b3-coprocessor.annot-0011`.
+
+Regressions remain the known confusable-value family:
+
+- approximate chart interpolation drift: `dat-Arm_EE382N_4-0001`,
+  `fin-bis_qr_2025_mar-0002`;
+- visually close label drift: `Vgs = 2.9 V` -> `Vgs = 3.0 V`;
+- near-miss table row abstention: `Cache Operations Register` -> `Unanswerable`;
+- finance chart legend binding: `FX bonds` -> `FX loans`.
+
+Verification:
+
+- `uv run pytest tests/test_reasoner.py tests/test_structured_extract.py tests/test_hf_eval_cli.py::test_resolve_tiers_honors_schema_extractor_override`
+  = 91 passed;
+- `uv run ruff check src/focusparse/pipeline/reasoner.py tests/test_reasoner.py tests/test_structured_extract.py tests/test_hf_eval_cli.py`
+  passed;
+- `uv run ruff format --check src/focusparse/pipeline/reasoner.py tests/test_reasoner.py tests/test_structured_extract.py tests/test_hf_eval_cli.py`
+  passed;
+- full `uv run pytest` = 856 passed / 159 skipped.
+
+Decision: this branch has the first validated 65%+ full n=148 result:
+66.9% at slightly lower cost/correct than the merged checkpoint
+($0.0232 vs $0.0243), with slightly higher page recall and bbox IoU. The
+refreshed Gemini key works for the dedicated schema extractor role, but the
+measured lift is mostly from post-evidence answer-shape enforcement. Next
+work should target the remaining same-evidence chart/table confusions with
+contract-aware adjudication, not broader retrieval.

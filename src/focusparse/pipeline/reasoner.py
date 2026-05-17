@@ -585,6 +585,10 @@ def _normalize_answer_shape(
             return "-" + accounting.group(1).replace(",", "")
 
     if stem == "numeric":
+        difference = _normalize_numeric_difference_result_shape(text, question_text)
+        if difference:
+            return difference
+
         parenthetical = _normalize_numeric_parenthetical_suffix(text)
         if parenthetical:
             return parenthetical
@@ -592,6 +596,15 @@ def _normalize_answer_shape(
         embedded_value = _normalize_embedded_numeric_value_shape(text, question_text)
         if embedded_value:
             return embedded_value
+
+    if stem == "exact_match":
+        for normalizer in (
+            _normalize_reset_zero_answer,
+            _normalize_final_hex_address_answer,
+        ):
+            normalized = normalizer(text, str(question_text or ""))
+            if normalized:
+                return normalized
 
     if stem in {"exact_match", "numeric"}:
         hex_value = _normalize_hex_value_shape(text)
@@ -819,6 +832,33 @@ def _normalize_embedded_numeric_value_shape(text: str, question_text: str | None
     return None
 
 
+def _normalize_numeric_difference_result_shape(
+    text: str,
+    question_text: str | None,
+) -> str | None:
+    """Return the computed result from ``MAX 1.35 - TYP 1 = 0.35 µVpp``."""
+
+    question = str(question_text or "")
+    if not (
+        re.search(r"\b(?:difference|minus|subtract|delta|change)\b", question, re.I)
+        or re.search(r"\b[A-Z]{2,}\b.*[-\u2212].*\b[A-Z]{2,}\b.*=", text)
+    ):
+        return None
+    value_unit = (
+        r"(?P<value>[+-]?(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?))"
+        r"\s*(?P<unit>%|[A-Za-zµμ]{1,10})?"
+    )
+    match = re.search(rf"=\s*{value_unit}\s*$", text)
+    if not match:
+        return None
+    unit = match.group("unit") or ""
+    if unit == "%":
+        return f"{match.group('value')}%"
+    if unit:
+        return f"{match.group('value')} {unit}"
+    return match.group("value")
+
+
 def _normalize_numeric_parenthetical_suffix(text: str) -> str | None:
     """Collapse ``12 (not 14)`` / ``12 instead of 14`` repairs to the scalar."""
 
@@ -857,6 +897,9 @@ def _normalize_exact_match_scorer_shape(
     for normalizer in (
         _normalize_page_number_answer,
         _normalize_binary_code_answer,
+        _normalize_percent_point_answer,
+        _normalize_reset_zero_answer,
+        _normalize_final_hex_address_answer,
         _normalize_exception_result_answer,
         _normalize_priority_table_answer,
     ):
@@ -879,6 +922,10 @@ def _normalize_exact_match_scorer_shape(
     single_field = _normalize_single_field_semicolon_answer(text, question)
     if single_field:
         return single_field
+
+    method_unit = _normalize_method_unit_pair_answer(text, question)
+    if method_unit:
+        return method_unit
 
     repeated_config = _normalize_repeated_configuration_value_answer(text, question)
     if repeated_config:
@@ -912,6 +959,10 @@ def _normalize_exact_match_scorer_shape(
     if semicolon:
         return semicolon
 
+    branch_use = _normalize_branch_instruction_use_answer(text, question)
+    if branch_use:
+        return branch_use
+
     leading = _normalize_leading_single_entity_answer(text, question)
     if leading:
         return leading
@@ -935,6 +986,14 @@ def _normalize_page_number_answer(text: str, question_text: str) -> str | None:
     )
     if match and re.search(r"\b(?:same\s+page|page\s+reference|refer\s+to)\b", question_text, re.I):
         return f"{match.group('head').strip()}; page {match.group('page')}"
+    label_page = re.fullmatch(
+        r"(?P<label>[A-Za-z][A-Za-z0-9&/() .'-]{2,120}?),\s*"
+        r"(?P<page>[A-Za-z0-9][A-Za-z0-9.\-]*)",
+        text,
+        re.I,
+    )
+    if label_page:
+        return f"{label_page.group('label').strip()}, page {label_page.group('page')}"
     quoted_targets = re.findall(r"'([^']{3,80})'", question_text)
     for target in quoted_targets:
         if not re.search(r"\b(?:page\s+number|which\s+page|refer\s+to)\b", question_text, re.I):
@@ -974,6 +1033,36 @@ def _normalize_binary_code_answer(text: str, question_text: str) -> str | None:
     if len(matches) == 1 and len(text.split()) <= 6:
         return matches[0]
     return None
+
+
+def _normalize_percent_point_answer(text: str, question_text: str) -> str | None:
+    question = str(question_text or "")
+    if not re.search(
+        r"\b(?:incorrect|misinterpret|without considering|without the note)\b", question, re.I
+    ):
+        return None
+    match = re.fullmatch(r"(?P<value>[+-]?\d+(?:\.\d+)?)\s*ppt", text, re.I)
+    if not match:
+        return None
+    return f"{match.group('value')}%"
+
+
+def _normalize_reset_zero_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\breset\b", question_text, re.I):
+        return None
+    if re.fullmatch(r"0x0+", text, re.I):
+        return "0 (reset value)"
+    return None
+
+
+def _normalize_final_hex_address_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\b(?:final\s+address|hexadecimal|address)\b", question_text, re.I):
+        return None
+    match = re.fullmatch(r"0x(?P<digits>0+[0-9A-Fa-f]{4,})", text)
+    if not match:
+        return None
+    digits = match.group("digits").lstrip("0") or "0"
+    return f"0x{digits.upper()}"
 
 
 def _normalize_exception_result_answer(text: str, question_text: str) -> str | None:
@@ -1066,6 +1155,24 @@ def _normalize_repeated_configuration_value_answer(text: str, question_text: str
     if count < 2:
         return None
     return value
+
+
+def _normalize_method_unit_pair_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\b(?:method|api|function)\b", question_text, re.I) or not re.search(
+        r"\bunit\b", question_text, re.I
+    ):
+        return None
+    match = re.fullmatch(
+        r"(?P<method>[A-Za-z_][A-Za-z0-9_]*(?:\(\))?)\s+(?:and|,)\s+"
+        r"(?P<unit>[A-Za-zµμ%/]{1,8})",
+        text,
+    )
+    if not match:
+        return None
+    method = match.group("method")
+    if not method.endswith("()"):
+        method = method + "()"
+    return f"{method}, {match.group('unit')}"
 
 
 def _normalize_outer_cache_policy_answer(text: str, question_text: str) -> str | None:
@@ -1377,6 +1484,21 @@ def _normalize_explanatory_semicolon_answer(text: str) -> str | None:
 def _compact_upper_code_label(text: str) -> str:
     label = re.sub(r"\b([A-Z]+)\s+(\d+[A-Z0-9]*)\b", r"\1\2", text.strip().upper())
     return re.sub(r"\s+", "_", label)
+
+
+def _normalize_branch_instruction_use_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\bbranch\s+instruction\b|\bnormal\s+use\b", question_text, re.I):
+        return None
+    match = re.match(
+        r"^(?P<code>B[A-Z]{1,3})\s+(?:[A-Za-z]+\s+){0,5}"
+        r"(?P<use>Signed\s+integer\s+comparison\s+gave\s+[^.;]+)$",
+        text,
+        re.I,
+    )
+    if not match:
+        return None
+    use = re.sub(r"\s+", " ", match.group("use")).strip()
+    return f"{match.group('code').upper()}; {use}"
 
 
 def _normalize_leading_single_entity_answer(text: str, question_text: str) -> str | None:

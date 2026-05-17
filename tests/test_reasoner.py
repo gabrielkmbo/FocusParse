@@ -1277,6 +1277,18 @@ def test_answer_shape_extracts_numeric_unit_from_verbose_answer() -> None:
         )
         == "12"
     )
+    assert (
+        _normalize_answer_shape(
+            "MAX 1.35 \u00b5Vpp - TYP 1 \u00b5Vpp = 0.35 \u00b5Vpp",
+            answer_type="numeric",
+            domain="datasheet",
+            question_text=(
+                "Within the DC channel performance table, what is the difference "
+                "(MAX minus TYP) in input-referred noise?"
+            ),
+        )
+        == "0.35 \u00b5Vpp"
+    )
 
 
 def test_answer_shape_collapses_exact_match_explanatory_suffixes() -> None:
@@ -1388,6 +1400,69 @@ def test_answer_shape_collapses_exact_match_explanatory_suffixes() -> None:
             ),
         )
         == "2806"
+    )
+    assert (
+        _normalize_answer_shape(
+            "Balance Sheets, 52",
+            answer_type="exact_match",
+            domain="finance",
+            question_text=(
+                "Which financial statement contains the current liability total, "
+                "and what is its corresponding page number?"
+            ),
+        )
+        == "Balance Sheets, page 52"
+    )
+    assert (
+        _normalize_answer_shape(
+            "0ppt",
+            answer_type="exact_match",
+            domain="finance",
+            question_text=(
+                "If you interpreted the chart without considering the note, "
+                "what incorrect numeric value might you report?"
+            ),
+        )
+        == "0%"
+    )
+    assert (
+        _normalize_answer_shape(
+            "0x00000000",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Immediately after a system reset, what value is read?",
+        )
+        == "0 (reset value)"
+    )
+    assert (
+        _normalize_answer_shape(
+            "0x003FFFF8",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Provide the final address in hexadecimal format.",
+        )
+        == "0x3FFFF8"
+    )
+    assert (
+        _normalize_answer_shape(
+            "adi_adrv904x_OrxAttenSet() and dB",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which API method sets the ORx attenuation and what unit is used?",
+        )
+        == "adi_adrv904x_OrxAttenSet(), dB"
+    )
+    assert (
+        _normalize_answer_shape(
+            "BLE Less or equal Signed integer comparison gave less than or equal",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text=(
+                "Which ARM branch instruction has this condition, and what is "
+                "its normal use according to the table?"
+            ),
+        )
+        == "BLE; Signed integer comparison gave less than or equal"
     )
     assert (
         _normalize_answer_shape(
