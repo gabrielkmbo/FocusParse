@@ -585,6 +585,10 @@ def _normalize_answer_shape(
             return "-" + accounting.group(1).replace(",", "")
 
     if stem == "numeric":
+        parenthetical = _normalize_numeric_parenthetical_suffix(text)
+        if parenthetical:
+            return parenthetical
+
         embedded_value = _normalize_embedded_numeric_value_shape(text, question_text)
         if embedded_value:
             return embedded_value
@@ -815,6 +819,31 @@ def _normalize_embedded_numeric_value_shape(text: str, question_text: str | None
     return None
 
 
+def _normalize_numeric_parenthetical_suffix(text: str) -> str | None:
+    """Collapse ``12 (not 14)`` / ``12 instead of 14`` repairs to the scalar."""
+
+    value_unit = (
+        r"(?P<value>[+-]?(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?))"
+        r"\s*(?P<unit>%|[A-Za-zµμ]{1,8})?"
+    )
+    match = re.fullmatch(rf"{value_unit}\s+\([^)]{{1,80}}\)", text)
+    if not match:
+        match = re.fullmatch(
+            rf"{value_unit}\s+(?:instead\s+of|rather\s+than|not)\s+"
+            r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)(?:\s*[A-Za-zµμ%]{1,8})?",
+            text,
+            re.IGNORECASE,
+        )
+    if not match:
+        return None
+    unit = match.group("unit") or ""
+    if unit == "%":
+        return f"{match.group('value')}%"
+    if unit:
+        return f"{match.group('value')} {unit}"
+    return match.group("value")
+
+
 def _normalize_exact_match_scorer_shape(
     text: str,
     question_text: str | None,
@@ -906,6 +935,21 @@ def _normalize_page_number_answer(text: str, question_text: str) -> str | None:
     )
     if match and re.search(r"\b(?:same\s+page|page\s+reference|refer\s+to)\b", question_text, re.I):
         return f"{match.group('head').strip()}; page {match.group('page')}"
+    quoted_targets = re.findall(r"'([^']{3,80})'", question_text)
+    for target in quoted_targets:
+        if not re.search(r"\b(?:page\s+number|which\s+page|refer\s+to)\b", question_text, re.I):
+            continue
+        target_pattern = re.escape(target)
+        target_match = re.search(rf"{target_pattern}\D{{0,80}}(?P<page>\d{{3,5}})", text, re.I)
+        if target_match:
+            return target_match.group("page")
+    trailing_page = re.match(
+        r"^(?P<head>(?:\d+(?:\.\d+){1,4}\s+)?[A-Za-z][A-Za-z0-9()/_ -]{3,140}?)"
+        r"\s+(?P<page>\d{3,5})$",
+        text,
+    )
+    if trailing_page:
+        return trailing_page.group("page")
     return None
 
 
@@ -1276,9 +1320,21 @@ def _match_original_case(text: str, phrase: str) -> str | None:
 
 
 def _normalize_explanatory_semicolon_answer(text: str) -> str | None:
+    code_comma = re.match(
+        r"^(?P<label>[A-Z][A-Z0-9]*(?:\s+[A-Z0-9]*[0-9][A-Z0-9]*){1,2})"
+        r",\s+(?P<tail>.+)$",
+        text,
+    )
+    if code_comma and re.search(
+        r"\b(?:table|chart|figure|region|update|axis|legend|caption|because|shows?|indicates?)\b",
+        code_comma.group("tail"),
+        re.I,
+    ):
+        return _compact_upper_code_label(code_comma.group("label"))
+
     panel_comma = re.match(
         r"^[A-Z]\.\s+(?P<label>[^,.;\u2013\u2014-]{2,80}),\s+"
-        r"(?:about|approximately|around|roughly|-?\d|\$)",
+        r"(?:about|approximately|around|roughly|determined|based|because|from|using|which|where|-?\d|\$)",
         text,
         re.I,
     )
@@ -1316,6 +1372,11 @@ def _normalize_explanatory_semicolon_answer(text: str) -> str | None:
     ):
         return prefix_without_panel
     return None
+
+
+def _compact_upper_code_label(text: str) -> str:
+    label = re.sub(r"\b([A-Z]+)\s+(\d+[A-Z0-9]*)\b", r"\1\2", text.strip().upper())
+    return re.sub(r"\s+", "_", label)
 
 
 def _normalize_leading_single_entity_answer(text: str, question_text: str) -> str | None:

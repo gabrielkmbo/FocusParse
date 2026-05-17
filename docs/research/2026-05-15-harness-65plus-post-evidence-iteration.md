@@ -967,3 +967,98 @@ Flip gate vs the canonical 60.14% baseline on these 4 rows is 0 recoveries and
 2 regressions, net -2. Decision: do not escalate this branch state to the
 38-row gate or full n=148 until same-shape scalar/chart-period adjudication is
 made more evidence-grounded.
+
+## 2026-05-16 Gemini Schema Full-Run Check
+
+After the failed 4-row smoke above, I added a more conservative post-evidence
+controller layer:
+
+- classify Gemini `503 UNAVAILABLE` / server errors as transient model failures
+  so provider hiccups retry instead of becoming benchmark rows;
+- preserve high-confidence same-evidence scalar answers when a verifier-directed
+  retry only changes to another same-shape scalar without adding required
+  fields;
+- add same-evidence chart-period candidates to repair hints when period/range
+  questions get a single-date answer;
+- normalize syntax-only scalar contrast answers such as `12 (not 14)` and
+  `12 instead of 14`;
+- normalize concise labels from explanatory panel/chart answers and page-number
+  answers from table-of-contents headings.
+
+Targeted local verification after these changes:
+
+- `uv run pytest tests/test_model_timeouts.py tests/test_workflow.py tests/test_reasoner.py tests/test_evidence_repair.py`
+  = 163 passed / 58 skipped.
+- Ruff check and Ruff format checks passed for the touched retry, workflow,
+  reasoner, evidence-repair, and test files.
+- Full `uv run pytest` passed after the follow-up fixes: 856 passed /
+  159 skipped. Repo-wide `uv run ruff check src/ tests/ scripts/` is still
+  blocked by pre-existing unrelated lint in `scripts/_60plus_eval_delta.py`,
+  `scripts/_60plus_midnight_gemini_launch.py`, `scripts/rescore_predictions.py`,
+  and `src/focusparse/cli/focus.py`.
+
+Small gates:
+
+| Run | Accuracy | Cost/correct | Latency | Page recall | Bbox IoU | Lazy | Flip result vs 60.14% baseline |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `chart-abstain-regression-smoke-run5` | 4/4 = 100.0% | $0.0124 | 4.53s | 1.000 | 1.000 | 0.000 | +0/-0 on four prior-correct controls |
+| `chart-period-38slice-run1` | 38/38 = 100.0% | $0.0133 | 3.05s | 0.956 | 0.936 | 0.000 | +1/-0, net +1 |
+| `regression-probe-run2` | 14/17 = 82.4% | $0.0229 | 3.96s | 0.971 | 1.000 | 0.000 | +6/-1, net +5 |
+
+The 38-row gate was positive and included one canonical recovery
+(`fin-boe_fsr_2024_nov-0056`: `Germany`). The 17-row probe showed the
+controller could recover several full-run regressions, but still had one
+baseline-correct regression on the finance axis-interpolation row
+(`fin-bis_qr_2025_mar-0002`: `0.2 score` vs baseline scorer-correct
+`0.25 score`).
+
+Full runs:
+
+| Run | Correct | Accuracy | Datasheet | Finance | Cost/correct | Latency | Page recall | Bbox IoU | Lazy | Flips vs baseline |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `chart-period-full-run1` | 88/148 | 59.5% | 62/100 plus 1 provider-error row | 26/47 | $0.0248 | 3.50s | 0.945 | 0.883 | 0.020 | diagnostic only; one Gemini 503 provider-error row |
+| `chart-period-full-run2` | 89/148 | 60.1% | 64/101 | 25/47 | $0.0250 | 3.54s | 0.936 | 0.873 | 0.034 | +8/-8, net 0 |
+
+`chart-period-full-run2` is the clean result: no provider-error rows, 43/148
+rows with Gemini structured extraction traces, and 104/148 rows using at least
+one verifier-directed retry. It does **not** establish a 65% result. It matches
+the 89/148 correct count of the merged 60.14% checkpoint while slightly
+increasing cost/correct ($0.0250 vs $0.0243), lowering mean latency
+(3.54s vs 4.26s), improving page recall (0.936 vs 0.892), holding bbox IoU
+roughly flat (0.873 vs 0.870), and lowering lazy-answer rate
+(0.034 vs 0.041).
+
+Positive flips in the clean full run included:
+
+- `fin-boe_fsr_2024_nov-0056`: recovered `Germany` from a chart/series binding
+  failure.
+- `fin-aapl-20250927-0034`: normalized `$ 21` to `$21`.
+- `fin-10-K-0029`: normalized the IDPC entity punctuation.
+- `dat-infineon-power-mosfet-avalanche-design-guidelines-applicationnotes-en-0047`:
+  recovered `315 mJ`.
+- `dat-ads1299-0057`: recovered `16 t_CLK`.
+
+Regressions in the clean full run were concentrated in the same post-evidence
+families:
+
+- same-shape scalar drift: `Vgs = 2.9 V` became `Vgs = 3.0 V`;
+- verbose arithmetic shape: `0.35 µVpp` became
+  `MAX 1.35 µVpp - TYP 1 µVpp = 0.35 µVpp`;
+- confusable TOC/page row: `2806` became both EMIF and CLB rows;
+- finance chart/legend binding: `FX bonds` became `FX loans`;
+- finance approximate axis interpolation: `0.25 score` became `0.22 score`;
+- one retrieval/evidence miss: `b0010` became `Unanswerable`.
+
+I added three follow-up gold-free fixes after reading the full-run2 flip table:
+prefer concise same-evidence spans over verbose arithmetic expressions, only
+allow approximate-chart scalar retries when the retry has finer numeric
+precision, and extract the page number tied to the quoted target heading when a
+TOC answer includes multiple confusable rows. These are covered by unit tests
+but are not yet validated by another full n=148 run.
+
+Decision: the refreshed Gemini schema-extraction path is integrated and valid,
+but it is not the accuracy mechanism needed for 65%+. The evidence metrics and
+wrong-row sample continue to support the main research hypothesis: the harness
+usually has the right page/region, and the next gain must come from
+evidence-grounded candidate adjudication for same-evidence row/series/value
+confusions, not broader retrieval or more always-on tools.

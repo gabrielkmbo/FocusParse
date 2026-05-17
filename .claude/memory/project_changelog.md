@@ -251,6 +251,20 @@
   canonical 60.14% baseline flip gate (1 recovery, 4 regressions, net -3).
   Do not full-run this checkpoint yet; next step is evidence-grounded
   same-shape scalar/chart adjudication and chart-period range extraction.
+- Refreshed the Gemini schema-extraction experiment with the new key and added
+  provider hardening for Gemini/server `503` retries, chart-period repair
+  candidates, same-evidence scalar drift guards, scalar contrast normalization
+  (`12 instead of 14`), confusable TOC page-number normalization, and concise
+  expression preference. The best gates were `chart-period-38slice-run1`
+  (38/38, +1/-0 vs the 60.14% baseline) and `regression-probe-run2` (14/17,
+  +6/-1). The clean full n=148 run
+  `chart-period-full-run2` was neutral: 89/148 = 60.1%, datasheet 64/101,
+  finance 25/47, cost/correct $0.0250, mean latency 3.54s, page recall 0.936,
+  bbox IoU 0.873, lazy rate 0.034, and flips +8/-8 vs the merged 60.14%
+  checkpoint. No 65% claim should be made from this checkpoint; the Gemini
+  schema path is valid but not sufficient, and the next mechanism should be
+  evidence-grounded candidate adjudication for same-evidence row/series/value
+  confusions.
 
 ## 2026-05-14
 

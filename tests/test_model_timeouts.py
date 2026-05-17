@@ -89,6 +89,19 @@ def test_transient_model_error_detects_rate_limit_marker():
     assert is_model_throttle_error(ProviderRateLimitError("429 Too Many Requests"))
 
 
+def test_transient_model_error_detects_gemini_unavailable():
+    class ServerError(Exception):
+        pass
+
+    ServerError.__module__ = "google.genai.errors"
+    exc = ServerError(
+        "503 UNAVAILABLE. {'error': {'code': 503, 'message': "
+        "'The service is currently unavailable.', 'status': 'UNAVAILABLE'}}"
+    )
+    assert is_transient_model_error(exc)
+    assert not is_model_throttle_error(exc)
+
+
 def test_quota_exhaustion_is_not_treated_as_retryable_transient():
     class ProviderQuotaError(Exception):
         pass

@@ -23,6 +23,42 @@ _CHART_LINE_RE = re.compile(
     r"\b(?:legend|series|axis|axes|caption|figure|panel|line|bar|curve|footnote|marker)\b",
     re.IGNORECASE,
 )
+_PERIOD_QUESTION_RE = re.compile(
+    r"\b(?:during which period|which period|date range|time period|fastest|steepest|decline|increase)\b",
+    re.IGNORECASE,
+)
+_DATE_RE = re.compile(
+    r"\b(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
+    r"Dec(?:ember)?)\.?,?\s+(?P<year>\d{4})\b",
+    re.IGNORECASE,
+)
+_MONTHS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
 _STOPWORDS = frozenset(
     {
         "a",
@@ -117,6 +153,15 @@ def build_same_evidence_repair_context(
             sections.append(
                 "Chart binding lines:\n" + "\n".join(f"- {line}" for line in chart_lines)
             )
+        period_lines = _chart_period_lines(
+            evidence.packets,
+            question_text=question.question,
+            cited_packet_ids=set(answer.citations or []),
+        )
+        if period_lines:
+            sections.append(
+                "Chart period candidates:\n" + "\n".join(f"- {line}" for line in period_lines)
+            )
 
     if not sections:
         return ""
@@ -196,6 +241,79 @@ def _chart_binding_lines(
             ordinal += 1
     scored.sort(key=lambda item: (-item[0], item[1]))
     return [line for _score, _ordinal, line in scored[:_MAX_LINES]]
+
+
+def _chart_period_lines(
+    packets: Iterable[EvidencePacket],
+    *,
+    question_text: str,
+    cited_packet_ids: set[str],
+) -> list[str]:
+    if not _PERIOD_QUESTION_RE.search(question_text or ""):
+        return []
+    scored: list[tuple[int, int, str]] = []
+    ordinal = 0
+    for packet in packets:
+        cited_bonus = 3 if packet.packet_id in cited_packet_ids else 0
+        for line in _packet_lines(packet):
+            dates = _dates_in_line(line)
+            if len(dates) < 2:
+                continue
+            for months_delta, start, end in _shortest_adjacent_date_ranges(dates)[:3]:
+                label = f"{start[1]} to {end[1]} ({months_delta} months)"
+                score = 10 + cited_bonus - min(months_delta, 36)
+                scored.append((score, ordinal, f"[{packet.packet_id}] {label}"))
+                ordinal += 1
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return _dedupe(line for _score, _ordinal, line in scored[:3])
+
+
+def _dates_in_line(line: str) -> list[tuple[int, str]]:
+    dates: list[tuple[int, str]] = []
+    seen: set[tuple[int, int]] = set()
+    for match in _DATE_RE.finditer(line):
+        month_raw = match.group("month").lower().rstrip(".")
+        month = _MONTHS.get(month_raw[:3], _MONTHS.get(month_raw))
+        if month is None:
+            continue
+        year = int(match.group("year"))
+        key = (year, month)
+        if key in seen:
+            continue
+        seen.add(key)
+        dates.append((year * 12 + month, f"{_canonical_month(month)} {year}"))
+    return dates
+
+
+def _shortest_adjacent_date_ranges(
+    dates: list[tuple[int, str]],
+) -> list[tuple[int, tuple[int, str], tuple[int, str]]]:
+    ordered = sorted(dates, key=lambda item: item[0])
+    ranges: list[tuple[int, tuple[int, str], tuple[int, str]]] = []
+    for start, end in zip(ordered, ordered[1:], strict=False):
+        months_delta = end[0] - start[0]
+        if months_delta <= 0:
+            continue
+        ranges.append((months_delta, start, end))
+    ranges.sort(key=lambda item: (item[0], item[1][0]))
+    return ranges
+
+
+def _canonical_month(month: int) -> str:
+    return (
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+    )[month - 1]
 
 
 def _packet_lines(packet: EvidencePacket) -> list[str]:

@@ -103,3 +103,23 @@ def test_chart_repair_context_surfaces_chart_csv_and_binding_lines() -> None:
     assert "chart_csv=series,year,value" in context
     assert "Legend: blue line Products" in context
     assert "Y-axis: net sales" in context
+
+
+def test_chart_repair_context_surfaces_shortest_period_candidates() -> None:
+    packet = _packet(
+        region_type="chart",
+        text=(
+            "Consumer Sentiment Index turning points "
+            "Jan 2000: -2.0% Mar 2003: +32.8% "
+            "Feb 2020: +29.0% Apr 2020: +43.6% Jun 2022: +17.6%"
+        ),
+    )
+    context = build_same_evidence_repair_context(
+        _question("During which period did the Consumer Sentiment Index decline the fastest?"),
+        EvidenceEvent(packets=[packet]),
+        AnswerEvent(answer="Jan 2000", citations=["pkt_000"], confidence=0.7),
+        ["legend_binding_risk"],
+    )
+
+    assert "Chart period candidates" in context
+    assert "Feb 2020 to Apr 2020 (2 months)" in context

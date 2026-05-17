@@ -386,6 +386,104 @@ def test_retry_answer_selector_prefers_same_shape_retry_within_tiny_margin():
     )
 
 
+def test_retry_answer_selector_rejects_unsupported_verbose_chart_scalar_drift():
+    incumbent = AnswerEvent(answer="0.9 W", citations=["pkt_000", "pkt_003"], confidence=0.95)
+    candidate = AnswerEvent(
+        answer="1.8 W; Figure 11 caption confirms the Four-Layer PCB curve",
+        citations=["pkt_000", "pkt_003"],
+        confidence=0.82,
+    )
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "According to Figure 11 and its caption, what is the maximum power "
+            "dissipation allowed at an ambient temperature of 100C for a four-layer PCB?"
+        ),
+    )
+
+
+def test_retry_answer_selector_rejects_unsupported_same_shape_chart_scalar_drift():
+    incumbent = AnswerEvent(answer="0.9 W", citations=["pkt_000", "pkt_003"], confidence=0.95)
+    candidate = AnswerEvent(answer="1.5 W", citations=["pkt_000", "pkt_003"], confidence=0.97)
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "According to Figure 11 and its caption, what is the maximum power "
+            "dissipation allowed at an ambient temperature of 100C for a four-layer PCB?"
+        ),
+    )
+
+
+def test_retry_answer_selector_rejects_same_citation_scalar_drift():
+    incumbent = AnswerEvent(answer="3", citations=["pkt_000"], confidence=0.97)
+    candidate = AnswerEvent(answer="4", citations=["pkt_000"], confidence=0.99)
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="How many signal lines connect SPI-A and SPI-B to the receiver?",
+    )
+
+
+def test_retry_answer_selector_allows_approximate_chart_value_refinement():
+    incumbent = AnswerEvent(answer="0.2 score", citations=["pkt_006", "pkt_000"], confidence=0.76)
+    candidate = AnswerEvent(answer="0.25 score", citations=["pkt_000", "pkt_006"], confidence=0.72)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Estimate the value of the blue EMEs curve for the year 2012 as shown "
+            "in the graph 'G. Status of financial stability objectives'. What is "
+            "the approximate value and its unit?"
+        ),
+    )
+
+
+def test_retry_answer_selector_rejects_same_precision_visual_estimate_drift():
+    incumbent = AnswerEvent(answer="Vgs = 2.9 V", citations=["pkt_000", "pkt_002"], confidence=0.95)
+    candidate = AnswerEvent(answer="Vgs = 3.0 V", citations=["pkt_002", "pkt_000"], confidence=0.93)
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Using the curve's label, determine the approximate gate-source voltage "
+            "(Vgs) set in the circuit to achieve this operation point."
+        ),
+    )
+
+
+def test_retry_answer_selector_prefers_concise_span_over_verbose_expression():
+    incumbent = AnswerEvent(
+        answer="MAX 1.35 µVpp - TYP 1 µVpp = 0.35 µVpp",
+        citations=["pkt_000"],
+        confidence=0.98,
+    )
+    candidate = AnswerEvent(answer="0.35 µVpp", citations=["pkt_000"], confidence=0.98)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="What is the difference (MAX minus TYP) in input-referred noise?",
+    )
+
+
+def test_retry_answer_selector_prefers_period_range_over_single_date():
+    incumbent = AnswerEvent(answer="Jan 2000", citations=["pkt_000"], confidence=0.87)
+    candidate = AnswerEvent(answer="Feb 2020 to Apr 2020", citations=["pkt_000"], confidence=0.43)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="During which period did the Consumer Sentiment Index decline the fastest?",
+    )
+
+
 def test_retry_answer_selector_rejects_opposite_boolean_drift_within_margin():
     incumbent = AnswerEvent(answer="yes", citations=["pkt_000", "pkt_002"], confidence=0.92)
     candidate = AnswerEvent(answer="no", citations=["pkt_000", "pkt_002"], confidence=0.90)
@@ -479,6 +577,52 @@ def test_reasoner_repair_hint_requires_period_range_for_chart_period_question():
     assert "<start> to <end>" in hint
 
 
+def test_reasoner_repair_hint_includes_period_candidates_without_shape_diagnostic():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="Need chart context.",
+        next_action="expand_context",
+        confidence=0.7,
+        diagnostics={"missing_context": ["caption", "legend"]},
+    )
+    answer = AnswerEvent(answer="Jan 2000", citations=["pkt_000"], confidence=0.8)
+    question = QuestionEvent(
+        example_id="ex",
+        question="During which period did the Consumer Sentiment Index decline the fastest?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+        domain="finance",
+    )
+    evidence = EvidenceEvent(
+        packets=[
+            EvidencePacket(
+                packet_id="pkt_000",
+                page=29,
+                bbox_norm=(0.1, 0.2, 0.9, 0.8),
+                region_type="Picture",
+                page_thumbnail_ref="/cache/page.png",
+                local_crop_ref="/cache/crop.png",
+                ocr_snippet=(
+                    "Jan 2000: -2.0% Mar 2003: +32.8% "
+                    "Feb 2020: +29.0% Apr 2020: +43.6% Jun 2022: +17.6%"
+                ),
+                provenance=PacketProvenance(tool="deterministic_inspector", args_hash=""),
+            )
+        ]
+    )
+
+    hint = _build_reasoner_repair_hint(
+        verdict,
+        answer_event=answer,
+        question_event=question,
+        evidence=evidence,
+    )
+
+    assert "Chart period candidates" in hint
+    assert "Feb 2020 to Apr 2020 (2 months)" in hint
+
+
 def test_supported_retry_preserves_concise_answer_over_verbose_rationale():
     initial = AnswerEvent(answer="[31:16]", citations=["pkt_000"], confidence=0.98)
     candidate = AnswerEvent(
@@ -570,6 +714,26 @@ def test_supported_retry_does_not_preserve_scalar_when_retry_is_same_shape():
     )
 
 
+def test_supported_retry_preserves_parenthetical_extension():
+    initial = AnswerEvent(answer="12", citations=["pkt_004"], confidence=0.97)
+    candidate = AnswerEvent(answer="12 (not 14)", citations=["pkt_004"], confidence=0.98)
+    question = QuestionEvent(
+        example_id="ex",
+        question="If LENPRE is programmed to 14, what prescaler value is used?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="numeric",
+        domain="datasheet",
+    )
+
+    assert _should_preserve_initial_answer_on_supported_retry(
+        initial,
+        candidate,
+        question_event=question,
+        retries_used=1,
+    )
+
+
 def test_chart_period_single_date_allows_reasoner_retry():
     answer = AnswerEvent(answer="Jan 2000", citations=["pkt_000"], confidence=0.58)
     verdict = VerdictEvent(
@@ -578,6 +742,35 @@ def test_chart_period_single_date_allows_reasoner_retry():
         next_action="escalate_reasoner",
         confidence=0.75,
         diagnostics={"answer_shape_failure": ["wrong_row_risk", "legend_binding_risk"]},
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="During which period did the Consumer Sentiment Index decline the fastest?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+        domain="finance",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
+def test_chart_period_single_date_allows_reasoner_retry_without_shape_diagnostic():
+    answer = AnswerEvent(answer="Jun, 2022", citations=["pkt_000"], confidence=0.75)
+    verdict = VerdictEvent(
+        supported=False,
+        reason=(
+            "The chart shows Consumer Sentiment Index values, but does not "
+            "identify which period had the fastest decline."
+        ),
+        next_action="escalate_reasoner",
+        confidence=0.75,
     )
     question = QuestionEvent(
         example_id="ex",

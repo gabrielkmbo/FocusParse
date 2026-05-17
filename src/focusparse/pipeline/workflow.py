@@ -2025,6 +2025,62 @@ def _is_better_unsupported_answer(
     ):
         return False
     if (
+        _answer_is_concise_shape(candidate.answer)
+        and _retry_answer_looks_like_verbose_extension(incumbent.answer, candidate.answer)
+        and set(candidate.citations) == set(incumbent.citations)
+        and candidate_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= incumbent_confidence
+    ):
+        return True
+    if (
+        _question_requests_chart_scalar_reading(question_text)
+        and not _question_requests_calculation(question_text)
+        and _answer_looks_numeric_scalar(incumbent.answer)
+        and _answer_starts_with_numeric_scalar(candidate.answer)
+        and incumbent_confidence >= 0.85
+        and candidate_confidence <= incumbent_confidence + _RETRY_SELECTION_TIE_RETRY_MARGIN
+        and (not candidate.citations or bool(set(candidate.citations) & set(incumbent.citations)))
+        and (
+            _answers_are_same_shape_scalars(candidate.answer, incumbent.answer)
+            or _answer_looks_verbose_retry_context(candidate.answer)
+        )
+    ):
+        return False
+    if (
+        _answer_is_concise_shape(incumbent.answer)
+        and _answers_are_same_shape_scalars(candidate.answer, incumbent.answer)
+        and _normalize_answer_for_telemetry(candidate.answer)
+        != _normalize_answer_for_telemetry(incumbent.answer)
+        and set(candidate.citations) == set(incumbent.citations)
+        and incumbent_confidence >= 0.65
+        and candidate_confidence <= incumbent_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN
+        and not _retry_extension_adds_required_fields(candidate.answer, question_text)
+        and not _question_requests_calculation(question_text)
+        and not (
+            _question_requests_visual_numeric_estimate(question_text)
+            and _answer_decimal_places(candidate.answer) > _answer_decimal_places(incumbent.answer)
+        )
+    ):
+        return False
+    if (
+        _question_requests_period_range(question_text)
+        and _answer_looks_date_range(candidate.answer)
+        and _answer_looks_single_date(incumbent.answer)
+        and candidate_confidence >= 0.35
+        and (not candidate.citations or bool(set(candidate.citations) & set(incumbent.citations)))
+    ):
+        return True
+    if (
+        _question_requests_visual_numeric_estimate(question_text)
+        and _answers_are_same_shape_scalars(candidate.answer, incumbent.answer)
+        and _normalize_answer_for_telemetry(candidate.answer)
+        != _normalize_answer_for_telemetry(incumbent.answer)
+        and set(candidate.citations) == set(incumbent.citations)
+        and candidate_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= incumbent_confidence
+        and _answer_decimal_places(candidate.answer) > _answer_decimal_places(incumbent.answer)
+        and not _question_requests_calculation(question_text)
+    ):
+        return True
+    if (
         _question_requests_named_entity_answer(question_text)
         and _answer_is_concise_shape(candidate.answer)
         and not _answer_looks_numeric_status_surrogate(candidate.answer)
@@ -2242,7 +2298,7 @@ def _answer_has_trailing_explanation(candidate: str, initial: str) -> bool:
         return False
     return bool(
         re.match(
-            rf"^{re.escape(initial.strip())}\s*(?:[,;:]|[-\u2013\u2014])\s+\S+",
+            rf"^{re.escape(initial.strip())}\s*(?:(?:[,;:]|[-\u2013\u2014])\s+\S+|\(\S+)",
             candidate.strip(),
         )
     )
@@ -2449,6 +2505,21 @@ def _answer_looks_numeric_scalar(answer: str | None) -> bool:
     return bool(re.fullmatch(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?\s*[A-Za-zµμ%]{0,8}", text))
 
 
+def _answer_starts_with_numeric_scalar(answer: str | None) -> bool:
+    if not answer:
+        return False
+    return bool(re.match(r"^\s*[-+]?\d+(?:,\d{3})*(?:\.\d+)?\s*[A-Za-zµμ%]{0,8}\b", str(answer)))
+
+
+def _answer_decimal_places(answer: str | None) -> int:
+    if not answer:
+        return 0
+    match = re.search(r"[-+]?\d+(?:,\d{3})*(?:\.(?P<decimals>\d+))?", str(answer))
+    if not match:
+        return 0
+    return len(match.group("decimals") or "")
+
+
 def _answer_looks_single_date(answer: str | None) -> bool:
     if not answer:
         return False
@@ -2457,7 +2528,24 @@ def _answer_looks_single_date(answer: str | None) -> bool:
         r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
         r"Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
     )
-    return bool(re.fullmatch(rf"{month}\s+\d{{4}}", text, re.I))
+    return bool(re.fullmatch(rf"{month},?\s+\d{{4}}", text, re.I))
+
+
+def _answer_looks_date_range(answer: str | None) -> bool:
+    if not answer:
+        return False
+    text = str(answer).strip()
+    month = (
+        r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
+        r"Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    )
+    return bool(
+        re.search(
+            rf"{month},?\s+\d{{4}}\s*(?:to|through|[-\u2013\u2014])\s*{month},?\s+\d{{4}}",
+            text,
+            re.I,
+        )
+    )
 
 
 def _answer_looks_numeric_status_surrogate(answer: str | None) -> bool:
@@ -2614,12 +2702,12 @@ def _should_allow_reasoner_shape_retry(
         return False
     if not answer.citations:
         return False
+    if _question_requests_period_range(question_event.question) and _answer_looks_single_date(
+        answer.answer
+    ):
+        return True
     if _verdict_has_answer_shape_failure(verdict):
         failures = set(_verdict_answer_shape_failures(verdict))
-        if _question_requests_period_range(question_event.question) and _answer_looks_single_date(
-            answer.answer
-        ):
-            return True
         return not (
             failures <= {"wrong_row_risk", "legend_binding_risk"}
             and _answer_is_concise_shape(answer.answer)
@@ -2719,15 +2807,19 @@ def _build_reasoner_repair_hint(
             "Adjudicate the current answer against the alternate nearby series using "
             "only the same evidence."
         )
-    if failures:
+    repair_failures = set(failures)
+    if _question_requests_period_range(question_event.question):
+        repair_failures.add("legend_binding_risk")
+    if repair_failures:
         repair_context = build_same_evidence_repair_context(
             question_event,
             evidence,
             answer_event,
-            failures,
+            repair_failures,
         )
         if repair_context:
             parts.append(repair_context)
+    if failures:
         parts.append(_repair_candidate_worksheet(failures))
 
     return "\n".join(dict.fromkeys(parts))

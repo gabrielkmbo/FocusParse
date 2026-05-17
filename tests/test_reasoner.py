@@ -1259,6 +1259,24 @@ def test_answer_shape_extracts_numeric_unit_from_verbose_answer() -> None:
         )
         == "10 mA"
     )
+    assert (
+        _normalize_answer_shape(
+            "12 (not 14)",
+            answer_type="numeric",
+            domain="datasheet",
+            question_text="If LENPRE is programmed to 14, what prescaler value is used?",
+        )
+        == "12"
+    )
+    assert (
+        _normalize_answer_shape(
+            "12 instead of 14",
+            answer_type="numeric",
+            domain="datasheet",
+            question_text="If LENPRE is programmed to 14, what prescaler value is used?",
+        )
+        == "12"
+    )
 
 
 def test_answer_shape_collapses_exact_match_explanatory_suffixes() -> None:
@@ -1276,6 +1294,15 @@ def test_answer_shape_collapses_exact_match_explanatory_suffixes() -> None:
     assert (
         _normalize_answer_shape(
             "C. FX bonds; the VIX coefficient is closest to 0 in that panel.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which panel has the smallest VIX coefficient?",
+        )
+        == "FX bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "C. FX bonds, determined from the VIX coefficient dot being closest to 0.",
             answer_type="exact_match",
             domain="finance",
             question_text="Which panel has the smallest VIX coefficient?",
@@ -1337,6 +1364,28 @@ def test_answer_shape_collapses_exact_match_explanatory_suffixes() -> None:
             answer_type="exact_match",
             domain="datasheet",
             question_text="Which page number should you refer to for EMIF Clock Control?",
+        )
+        == "2806"
+    )
+    assert (
+        _normalize_answer_shape(
+            "25.2.1 EMIF Clock Control 2806",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="What page number should you refer to for EMIF Clock Control?",
+        )
+        == "2806"
+    )
+    assert (
+        _normalize_answer_shape(
+            "25.2.1 EMIF Clock Control 2806; 26.3.2 CLB Input Selection 2879",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text=(
+                "There are two similarly labeled sections in the table of contents: "
+                "'25.2.1 EMIF Clock Control' and '25.2.1 CLB Input Selection'. "
+                "Which page number should you refer to for 'EMIF Clock Control'?"
+            ),
         )
         == "2806"
     )
@@ -1468,6 +1517,15 @@ def test_answer_shape_collapses_common_table_code_shapes() -> None:
             answer_type="exact_match",
             domain="datasheet",
             question_text="Which DPD mode has fewer M-table updates?",
+        )
+        == "DPD_MODE1"
+    )
+    assert (
+        _normalize_answer_shape(
+            "DPD MODE1, NO M-TABLE UPDATE SINCE Tx RMS POWER < MAX POWER",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which DPD mode has fewer M-table updates, and what is the visual cue?",
         )
         == "DPD_MODE1"
     )
