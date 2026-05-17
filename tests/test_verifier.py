@@ -198,6 +198,8 @@ async def test_verify_prompt_includes_packet_summary_and_citations():
         backend_client=client,
     )
     prompt = client.calls[0]["prompt"]
+    assert "Grouped evidence objects the reasoner had access to" in prompt
+    assert "Binding frame" in prompt
     assert "pA" in prompt
     assert "pB" in prompt
     assert "VCC max 3.6 V" in prompt
@@ -211,6 +213,152 @@ async def test_verify_prompt_includes_packet_summary_and_citations():
     assert "same cited row" in system
     assert "AEC-Q100" in system
     assert "lowest/highest/min/max" in system
+
+
+async def test_verify_prompt_includes_question_answer_contract():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "single scalar is incomplete", '
+        '"next_action": "escalate_reasoner", "confidence": 0.8}'
+    )
+    question = _question(domain="datasheet")
+    question.question = (
+        "Which value (min, typ, or max) should be used, and what is the corresponding voltage?"
+    )
+    await verify_answer(
+        question,
+        _evidence(_packet(snippet="FB Error Comparator Threshold 0.697 0.704 0.711 V")),
+        _answer(answer="0.697"),
+        backend_client=client,
+        question_family="spec_table_cell_retrieval",
+    )
+
+    prompt = client.calls[0]["prompt"]
+    assert "Expected answer type:" in prompt
+    assert "Question answer contract" in prompt
+    assert "include every field requested" in prompt
+    assert "min/typ/max" in prompt
+
+
+async def test_verify_prompt_includes_corresponding_row_binding_contract():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "picked output-field minimum instead of corresponding row", '
+        '"next_action": "escalate_reasoner", "confidence": 0.8, '
+        '"diagnostics": {"answer_shape_failure": ["wrong_row"]}}'
+    )
+    question = _question(domain="finance")
+    question.question = (
+        "For the year in which Products net sales reached their minimum among the three years "
+        "shown, what was the corresponding Gross margin value, and is this value also the "
+        "minimum, typical, or maximum among the three years?"
+    )
+    await verify_answer(
+        question,
+        _evidence(
+            _packet(snippet="Products 297,392 220,747 198,270 Gross margin 169,148 180,683 170,782")
+        ),
+        _answer(answer="169,148; minimum"),
+        backend_client=client,
+        question_family="min_typ_max_disambiguation",
+    )
+
+    prompt = client.calls[0]["prompt"]
+    system = client.calls[0]["system"]
+    assert "first bind the source row/year/entity" in prompt
+    assert "Reject answers that instead choose the minimum or maximum of the output field" in system
+
+
+async def test_verify_parses_checkbox_binding_risk():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "checkbox mark is bound to the wrong adjacent label", '
+        '"next_action": "escalate_reasoner", "confidence": 0.8, '
+        '"diagnostics": {"answer_shape_failure": ["checkbox_binding"]}}'
+    )
+    question = _question(domain="finance")
+    question.answer_type = "boolean"
+    question.question = (
+        "Based on the check marks in the table, does the registrant qualify as a "
+        "large accelerated filer and has it filed all required reports?"
+    )
+    verdict, _ = await verify_answer(
+        question,
+        _evidence(
+            _packet(snippet="Large accelerated filer Yes [X] No [ ] Filed reports Yes [X] No [ ]")
+        ),
+        _answer(answer="no"),
+        backend_client=client,
+    )
+
+    assert verdict.next_action == "escalate_reasoner"
+    assert "checkbox_binding_risk" in verdict.diagnostics["answer_shape_failure"]
+    assert "checkbox_binding_cues" in verdict.diagnostics
+
+
+async def test_verify_contract_guard_overrides_false_accept_for_missing_field():
+    client = _FakeVerifierClient(
+        '{"supported": true, "reason": "value appears in the row", '
+        '"next_action": "accept", "confidence": 0.9}'
+    )
+    question = _question(domain="datasheet")
+    question.question = (
+        "Which value (min, typ, or max) should be used, and what is the corresponding voltage?"
+    )
+    verdict, _ = await verify_answer(
+        question,
+        _evidence(_packet(snippet="FB Error Comparator Threshold 0.697 0.704 0.711 V")),
+        _answer(answer="0.697"),
+        backend_client=client,
+        question_family="spec_table_cell_retrieval",
+    )
+
+    assert verdict.supported is False
+    assert verdict.next_action == "escalate_reasoner"
+    assert "missing_field" in verdict.diagnostics["answer_shape_failure"]
+    assert "wrong_row_risk" in verdict.diagnostics["answer_shape_failure"]
+    assert "answer contract" in verdict.reason
+
+
+async def test_verify_contract_guard_overrides_false_accept_for_label_value_mismatch():
+    client = _FakeVerifierClient(
+        '{"supported": true, "reason": "label is present", '
+        '"next_action": "accept", "confidence": 0.9}'
+    )
+    question = _question(domain="datasheet")
+    question.question = (
+        "Which value should be used when comparing the single pulse avalanche "
+        "energy rating of this MOSFET?"
+    )
+    verdict, _ = await verify_answer(
+        question,
+        _evidence(_packet(snippet="Single Pulse Avalanche Energy 315 mJ")),
+        _answer(answer="Single Pulse Avalanche Energy (Thermally Limited)"),
+        backend_client=client,
+    )
+
+    assert verdict.supported is False
+    assert verdict.next_action == "escalate_reasoner"
+    assert "label_value_mismatch" in verdict.diagnostics["answer_shape_failure"]
+    assert "wrong_row_risk" in verdict.diagnostics["answer_shape_failure"]
+
+
+async def test_verify_preserves_answer_shape_failure_diagnostics():
+    client = _FakeVerifierClient(
+        '{"supported": false, "reason": "nearby row is plausible but wrong", '
+        '"next_action": "escalate_reasoner", "confidence": 0.78, '
+        '"diagnostics": {"answer_shape_failure": ["row_confusion"]}}'
+    )
+    question = _question(domain="datasheet")
+    question.question = "Among the visually similar part number rows, which package is lowest?"
+    verdict, _ = await verify_answer(
+        question,
+        _evidence(_packet(snippet="RTQ2510-QA VDFN3x3-8 3.3 V")),
+        _answer(answer="RTQ2510-QB"),
+        backend_client=client,
+    )
+
+    assert verdict.supported is False
+    assert verdict.next_action == "escalate_reasoner"
+    assert verdict.diagnostics["answer_shape_failure"] == ["wrong_row_risk"]
+    assert "row_disambiguation_cues" in verdict.diagnostics
 
 
 async def test_verify_prompt_keeps_enough_table_text_for_math_verdict():

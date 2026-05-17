@@ -292,6 +292,17 @@ def test_resolve_tiers_honors_env_override(script_mod, monkeypatch):
     assert no_override_hash != override_hash
 
 
+def test_resolve_tiers_honors_schema_extractor_override(script_mod, monkeypatch):
+    from focusparse.utils.config import load_config
+
+    config = load_config()
+    monkeypatch.setenv("FOCUSPARSE_TIER_SCHEMA_EXTRACTOR", "gemini_schema_lite")
+
+    resolved = script_mod._resolve_tiers(config)
+    assert resolved["schema_extractor"]["provider"] == "gemini"
+    assert resolved["schema_extractor"]["model"] == "gemini-3.1-flash-lite"
+
+
 # ---------------------------------------------------------------------------
 # argparse smoke — verifies --tier-override ROLE=TIER parses and repeats
 # ---------------------------------------------------------------------------
@@ -339,6 +350,37 @@ def test_argparse_trace_viewer_flags(script_mod, monkeypatch, tmp_path):
     assert args.example_id == "dat-Foo-0001"
     assert args.visualize_trace is True
     assert args.trace_viewer_output == out
+
+
+def test_argparse_example_ids_file(script_mod, monkeypatch, tmp_path):
+    ids_file = tmp_path / "ids.txt"
+    ids_file.write_text("ex-a\nex-b\n")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_hf_eval.py",
+            "--protocol",
+            "agentic_multi_page",
+            "--agent",
+            "focus",
+            "--example-ids-file",
+            str(ids_file),
+        ],
+    )
+    args = script_mod._parse_args()
+    assert args.example_ids_file == ids_file
+
+
+def test_argparse_minimal_artifacts(script_mod, monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_hf_eval.py", "--protocol", "agentic_multi_page", "--minimal-artifacts"],
+    )
+
+    args = script_mod._parse_args()
+    assert args.minimal_artifacts is True
 
 
 def test_argparse_layout_preflight_flags(script_mod, monkeypatch):
@@ -431,6 +473,29 @@ def test_filter_examples_by_id(script_mod):
     examples = [SimpleNamespace(id="a"), SimpleNamespace(id="b")]
     assert script_mod._filter_examples_by_id(examples, "b") == [examples[1]]
     assert script_mod._filter_examples_by_id(examples, "missing") == []
+
+
+def test_requested_example_ids_combines_file_and_single_id(script_mod, tmp_path):
+    ids_file = tmp_path / "ids.txt"
+    ids_file.write_text("# target rows\nb\nc\nb\n\n")
+    args = SimpleNamespace(example_id="a", example_ids_file=ids_file)
+
+    assert script_mod._requested_example_ids(args) == ["a", "b", "c"]
+
+
+def test_filter_examples_by_ids_preserves_dataset_order_and_duplicates(script_mod):
+    examples = [
+        SimpleNamespace(id="a"),
+        SimpleNamespace(id="b"),
+        SimpleNamespace(id="a"),
+        SimpleNamespace(id="c"),
+    ]
+
+    assert script_mod._filter_examples_by_ids(examples, ["c", "a"]) == [
+        examples[0],
+        examples[2],
+        examples[3],
+    ]
 
 
 def test_default_trace_viewer_output(script_mod):

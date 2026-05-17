@@ -8,6 +8,7 @@ image inputs (and is told so in the packet descriptor line).
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from focusparse.evidence.packet import (
@@ -15,13 +16,15 @@ from focusparse.evidence.packet import (
     EvidencePacket,
     PacketProvenance,
 )
-from focusparse.pipeline.events import EvidenceEvent
+from focusparse.models.base import ModelResponse
+from focusparse.pipeline.events import EvidenceEvent, QuestionEvent
 from focusparse.pipeline.reasoner import (
     _MAX_PACKET_TEXT_CHARS,
     _collect_packet_images,
     _format_hint,
     _parse_reasoner_response,
     _render_packet_line,
+    answer_from_evidence,
 )
 
 
@@ -32,6 +35,7 @@ def _packet(
     bbox: tuple[float, float, float, float] = (0.1, 0.2, 0.5, 0.6),
     local_crop_ref: str = "/cache/crops/abc.png",
     page_thumbnail_ref: str = "/cache/pages/p3.png",
+    region_type: str | None = None,
     multi_scale: list[CropRef] | None = None,
     linked_crop_refs: list[str] | None = None,
     linked_neighbor_types: list[str] | None = None,
@@ -42,6 +46,7 @@ def _packet(
         packet_id=packet_id,
         page=page,
         bbox_norm=bbox,
+        region_type=region_type,
         page_thumbnail_ref=page_thumbnail_ref,
         local_crop_ref=local_crop_ref,
         multi_scale_crops=multi_scale or [],
@@ -51,6 +56,21 @@ def _packet(
         ocr_snippet=ocr_snippet,
         provenance=PacketProvenance(tool="t", args_hash=""),
     )
+
+
+class _FakeReasonerClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def predict(
+        self,
+        prompt: str,
+        images: list[Path] | None = None,
+        system: str | None = None,
+        max_tokens: int | None = None,
+    ) -> ModelResponse:
+        self.calls.append({"prompt": prompt, "images": images, "system": system})
+        return ModelResponse(text='{"answer":"0.697 V","citations":["pkt_000"],"confidence":0.8}')
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +301,41 @@ def test_render_packet_line_legacy_packet() -> None:
     assert "pkt_000" in line
     assert "page 3" in line
     assert "image scales" not in line
+
+
+def test_reasoner_prompt_uses_grouped_evidence_objects() -> None:
+    client = _FakeReasonerClient()
+    question = QuestionEvent(
+        example_id="ex",
+        question="Which value (min, typ, or max) should be used?",
+        doc_id="doc",
+        pages_available=1,
+        domain="datasheet",
+        answer_type="exact_match",
+    )
+    packet = _packet(
+        region_type="Table",
+        text_layer_snippet=(
+            "Parameter Test Conditions Min Typ Max Unit\n"
+            "FB Error Comparator Threshold DEM 0.697 0.704 0.711 V\n"
+            "Context [caption_context]: Vcc = 5V"
+        ),
+    )
+
+    asyncio.run(
+        answer_from_evidence(
+            question,
+            EvidenceEvent(packets=[packet]),
+            backend_client=client,
+        )
+    )
+
+    prompt = client.calls[0]["prompt"]
+    assert "Available grouped evidence objects" in prompt
+    assert "group_pkt_000 [table]" in prompt
+    assert "Packet-level descriptors for exact span reading" in prompt
+    assert "Binding frame" in prompt
+    assert "cite the primary packet ids, not group ids" in prompt
 
 
 def test_render_packet_line_multi_scale_packet() -> None:
@@ -868,6 +923,19 @@ def test_answer_shape_normalizes_finance_accounting_negative() -> None:
     )
 
 
+def test_answer_shape_normalizes_verbose_finance_accounting_negative() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "$(40) million; the bar is shown in parentheses in the financing section",
+            answer_type="numeric",
+            domain="finance",
+        )
+        == "-40"
+    )
+
+
 def test_answer_shape_leaves_datasheet_parentheses_alone() -> None:
     from focusparse.pipeline.reasoner import _normalize_answer_shape
 
@@ -907,6 +975,261 @@ def test_answer_shape_formats_page_reference() -> None:
     )
 
 
+def test_answer_shape_formats_min_typ_max_list() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "min=0.697V; typ=0.704V; max=0.711V",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "min: 0.697 V, typ: 0.704 V, max: 0.711 V"
+    )
+
+
+def test_answer_shape_collapses_verbose_boolean_answers() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Yes; the referenced note shows the item is included.",
+            answer_type="boolean",
+            domain="finance",
+        )
+        == "yes"
+    )
+    assert (
+        _normalize_answer_shape(
+            "The answer is false because the row is not present.",
+            answer_type="boolean",
+            domain="datasheet",
+        )
+        == "no"
+    )
+
+
+def test_answer_shape_normalizes_label_prefixed_hex_span() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Serializer Lanes Enabled; OxFF (SERDINO to SERDIN7)",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "0xFF (SERDIN0 to SERDIN7)"
+    )
+
+
+def test_answer_shape_uses_hex_after_distractor_label() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "K 32; Serializer Lanes Enabled 0xFF (SERDIN0 to SERDIN7)",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "0xFF (SERDIN0 to SERDIN7)"
+    )
+
+
+def test_answer_shape_removes_endian_label_from_hex_assignment() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Little-endian r2= 0x44",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "r2= 0x44"
+    )
+
+
+def test_answer_shape_collapses_leading_person_name_explanation() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            'Stephanie Aliaga \u2014 her portrait is directly above "Grant Papa".',
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "Stephanie Aliaga"
+    )
+
+
+def test_answer_shape_collapses_leading_code_identifier_explanation() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "DPD MODE1. The model is updated when the rms power exceeds the previous maximum.",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "DPD_MODE1"
+    )
+
+
+def test_answer_shape_collapses_leading_code_identifier_semicolon_explanation() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "DPD MODE1; NO M-TABLE UPDATE SINCE Tx RMS POWER < MAX POWER",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "DPD_MODE1"
+    )
+
+
+def test_answer_shape_collapses_verbose_corresponding_finance_value_status() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "For the year ended September 28, 2024, when 'Products' net sales were "
+            "at their minimum ($294,866), the corresponding 'Gross margin' was "
+            "180,683, and this was the typical (middle) gross margin among the "
+            "three years.",
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "180,683; typical"
+    )
+
+
+def test_answer_shape_corresponding_finance_status_ignores_setup_number() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "When product revenue was $12, the corresponding expense was $3, "
+            "and this was the lowest value in the table.",
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "3; minimum"
+    )
+
+
+def test_answer_shape_formats_finance_value_status_pair() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "$ 180,683, typical",
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "180,683; typical"
+    )
+    assert (
+        _normalize_answer_shape(
+            "180,683 / middle",
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "180,683; typical"
+    )
+
+
+def test_answer_shape_collapses_inline_finance_value_status_pair() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "September 28, 2024: Gross margin $ 180,683 \u2014 typical "
+            "(neither minimum nor maximum) among the three years' gross margins.",
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "180,683; typical"
+    )
+    assert (
+        _normalize_answer_shape(
+            "September 28, 2024: Gross margin 180,683 (in millions), which is "
+            "the typical value among the three years' gross margins.",
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == "180,683; typical"
+    )
+
+
+def test_answer_shape_formats_datasheet_file_size_pair() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "ADRV9040_FW.bin; 641 kb",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "ADRV9040_FW.bin, 641 kb"
+    )
+    assert (
+        _normalize_answer_shape(
+            "ADRV9040_FW.bin, 641 kb; The first step is to load the Arm image.",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "ADRV9040_FW.bin, 641 kb"
+    )
+    assert (
+        _normalize_answer_shape(
+            "ADRV9040_FW.bin; 641 kb; STATE 0: POWERUP/RESET -> STATE 1: READY/IDLE",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "ADRV9040_FW.bin, 641 kb"
+    )
+
+
+def test_answer_shape_corresponding_finance_requires_status() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    answer = "The corresponding gross margin was 180,683 in the table."
+    assert (
+        _normalize_answer_shape(
+            answer,
+            answer_type="exact_match",
+            domain="finance",
+        )
+        == answer
+    )
+
+
+def test_answer_shape_does_not_collapse_plain_sentence_explanation() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Primary mode. The table describes the setting.",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "Primary mode. The table describes the setting."
+    )
+
+
+def test_answer_shape_keeps_parenthesized_hex_identifier_phrase() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "r0 (0x5)",
+            answer_type="exact_match",
+            domain="datasheet",
+        )
+        == "r0 (0x5)"
+    )
+
+
 def test_answer_shape_does_not_parenthesize_tickers() -> None:
     from focusparse.pipeline.reasoner import _normalize_answer_shape
 
@@ -917,4 +1240,543 @@ def test_answer_shape_does_not_parenthesize_tickers() -> None:
             domain="finance",
         )
         == "GOOG"
+    )
+
+
+def test_answer_shape_extracts_numeric_unit_from_verbose_answer() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Yes; +600 V CDM exceeds the specified CDM ESD rating of +-500 V, "
+            "and the maximum input current must be limited to 10 mA or less.",
+            answer_type="numeric",
+            domain="datasheet",
+            question_text=(
+                "If you apply an electrostatic discharge of +600 V, what is the "
+                "maximum input current you must ensure is not exceeded?"
+            ),
+        )
+        == "10 mA"
+    )
+    assert (
+        _normalize_answer_shape(
+            "12 (not 14)",
+            answer_type="numeric",
+            domain="datasheet",
+            question_text="If LENPRE is programmed to 14, what prescaler value is used?",
+        )
+        == "12"
+    )
+    assert (
+        _normalize_answer_shape(
+            "12 instead of 14",
+            answer_type="numeric",
+            domain="datasheet",
+            question_text="If LENPRE is programmed to 14, what prescaler value is used?",
+        )
+        == "12"
+    )
+    assert (
+        _normalize_answer_shape(
+            "MAX 1.35 \u00b5Vpp - TYP 1 \u00b5Vpp = 0.35 \u00b5Vpp",
+            answer_type="numeric",
+            domain="datasheet",
+            question_text=(
+                "Within the DC channel performance table, what is the difference "
+                "(MAX minus TYP) in input-referred noise?"
+            ),
+        )
+        == "0.35 \u00b5Vpp"
+    )
+
+
+def test_answer_shape_collapses_exact_match_explanatory_suffixes() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Large accelerated filer \u2014 the checkbox next to Large accelerated filer is marked.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Based on the check mark selections, what is the correct classification?",
+        )
+        == "Large accelerated filer"
+    )
+    assert (
+        _normalize_answer_shape(
+            "C. FX bonds; the VIX coefficient is closest to 0 in that panel.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which panel has the smallest VIX coefficient?",
+        )
+        == "FX bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "C. FX bonds, determined from the VIX coefficient dot being closest to 0.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which panel has the smallest VIX coefficient?",
+        )
+        == "FX bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            'As of the date identifier "aapl-20250927", the registrant is a '
+            '"Large accelerated filer" because the checkbox next to it is marked.',
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Based on the check mark selections, what is the correct classification?",
+        )
+        == "Large accelerated filer"
+    )
+    assert (
+        _normalize_answer_shape(
+            "C. FX bonds — the VIX coefficient is the smallest, essentially at the 0.000 line.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which panel has the smallest VIX coefficient?",
+        )
+        == "FX bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "[31:16] - Reserved. RAZ.",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which bit fields are guaranteed to always read as zero?",
+        )
+        == "[31:16]"
+    )
+    assert (
+        _normalize_answer_shape(
+            'adcOvldGainStepAttack; Figure 129/130 compared with Table 68 row "Yes Yes"',
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which gain step parameter is used for the gain decrement?",
+        )
+        == "adcOvldGainStepAttack"
+    )
+    assert (
+        _normalize_answer_shape(
+            "CRn, CRm and opcode2",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text=(
+                "In the instruction encoding table, which field is immediately adjacent "
+                "to the L field on its lower bit side?"
+            ),
+        )
+        == "CRn"
+    )
+    assert (
+        _normalize_answer_shape(
+            "2806 and 26.3.2 CLB Input Selection",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which page number should you refer to for EMIF Clock Control?",
+        )
+        == "2806"
+    )
+    assert (
+        _normalize_answer_shape(
+            "25.2.1 EMIF Clock Control 2806",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="What page number should you refer to for EMIF Clock Control?",
+        )
+        == "2806"
+    )
+    assert (
+        _normalize_answer_shape(
+            "25.2.1 EMIF Clock Control 2806; 26.3.2 CLB Input Selection 2879",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text=(
+                "There are two similarly labeled sections in the table of contents: "
+                "'25.2.1 EMIF Clock Control' and '25.2.1 CLB Input Selection'. "
+                "Which page number should you refer to for 'EMIF Clock Control'?"
+            ),
+        )
+        == "2806"
+    )
+    assert (
+        _normalize_answer_shape(
+            "Balance Sheets, 52",
+            answer_type="exact_match",
+            domain="finance",
+            question_text=(
+                "Which financial statement contains the current liability total, "
+                "and what is its corresponding page number?"
+            ),
+        )
+        == "Balance Sheets, page 52"
+    )
+    assert (
+        _normalize_answer_shape(
+            "0ppt",
+            answer_type="exact_match",
+            domain="finance",
+            question_text=(
+                "If you interpreted the chart without considering the note, "
+                "what incorrect numeric value might you report?"
+            ),
+        )
+        == "0%"
+    )
+    assert (
+        _normalize_answer_shape(
+            "0x00000000",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Immediately after a system reset, what value is read?",
+        )
+        == "0 (reset value)"
+    )
+    assert (
+        _normalize_answer_shape(
+            "0x003FFFF8",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Provide the final address in hexadecimal format.",
+        )
+        == "0x3FFFF8"
+    )
+    assert (
+        _normalize_answer_shape(
+            "adi_adrv904x_OrxAttenSet() and dB",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which API method sets the ORx attenuation and what unit is used?",
+        )
+        == "adi_adrv904x_OrxAttenSet(), dB"
+    )
+    assert (
+        _normalize_answer_shape(
+            "BLE Less or equal Signed integer comparison gave less than or equal",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text=(
+                "Which ARM branch instruction has this condition, and what is "
+                "its normal use according to the table?"
+            ),
+        )
+        == "BLE; Signed integer comparison gave less than or equal"
+    )
+    assert (
+        _normalize_answer_shape(
+            "Data Abort (including data TLB miss), 2; IRQ, 4",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which exception will be handled first according to the priority table?",
+        )
+        == "Data Abort (including data TLB miss)"
+    )
+    assert (
+        _normalize_answer_shape(
+            "typical, GOOG",
+            answer_type="exact_match",
+            domain="finance",
+            question_text=(
+                "Which value from the table (min/typical/max) should be used "
+                "for Alphabet's Class C Capital Stock?"
+            ),
+        )
+        == "GOOG"
+    )
+    assert (
+        _normalize_answer_shape(
+            "(VRECT X lout)",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text=(
+                "Which Y-axis variable should you use--VRECT or IOUT--to determine "
+                "output power at the OUT terminal?"
+            ),
+        )
+        == "IOUT"
+    )
+    assert (
+        _normalize_answer_shape(
+            "Outer Write-Through; Non-Shared Normal, Write-Back Cacheable",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text=(
+                "If a memory system does NOT support the Outer Write-Back cache policy, "
+                "how would the ARMv6 attribute change?"
+            ),
+        )
+        == "Non-Shared Normal, Write-Through Cacheable"
+    )
+
+
+def test_answer_shape_collapses_repeated_configuration_answer() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Push-Pull Driver; SCKOR Output Push-Pull Driver WSOR Output Push-Pull Driver",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="What driver type is used for the listed output pins?",
+        )
+        == "Push-Pull Driver"
+    )
+    assert (
+        _normalize_answer_shape(
+            "SCKOR Outp ut Push-Pull Driver WSOR Output Push-Pull Driver "
+            "SDOR Outp ut Push-Pull Driver",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text=(
+                "Which configuration value from the table should you use, and how can "
+                "you verify that this configuration is consistent?"
+            ),
+        )
+        == "Push-Pull Driver"
+    )
+
+
+def test_answer_shape_collapses_common_table_code_shapes() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "16-Bit Stereo b0010",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="What DMA R_POWER Setting code corresponds to the lower row?",
+        )
+        == "b0010"
+    )
+    assert (
+        _normalize_answer_shape(
+            "[31:16], Reserved. RAZ.",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which bit fields are guaranteed to always read as zero?",
+        )
+        == "[31:16]"
+    )
+    assert (
+        _normalize_answer_shape(
+            "[31:16] and Reserved. RAZ.",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which bit fields are guaranteed to always read as zero?",
+        )
+        == "[31:16]"
+    )
+    assert (
+        _normalize_answer_shape(
+            "[15:14]=b00, [8:5]=b1111, [4:3]=b11",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which bit fields must be configured with these values?",
+        )
+        == "[15:14]=b00, [8:5]=b1111, [4:3]=b11"
+    )
+    assert (
+        _normalize_answer_shape(
+            "CRn; CRm",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which field is immediately adjacent on the lower bit side?",
+        )
+        == "CRn"
+    )
+    assert (
+        _normalize_answer_shape(
+            "DPD MODE1",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which DPD mode has fewer M-table updates?",
+        )
+        == "DPD_MODE1"
+    )
+    assert (
+        _normalize_answer_shape(
+            "DPD MODE1, NO M-TABLE UPDATE SINCE Tx RMS POWER < MAX POWER",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which DPD mode has fewer M-table updates, and what is the visual cue?",
+        )
+        == "DPD_MODE1"
+    )
+
+
+def test_answer_shape_collapses_option_and_entity_value_answers() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Using the fair value totals, government bonds increased about 80.5%. "
+            "The largest percentage increase was Government bonds.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text=(
+                "Which class of securities (government bonds, corporate debt securities, "
+                "or mortgage-backed and asset-backed securities) experienced the largest "
+                "percentage increase?"
+            ),
+        )
+        == "Government bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "Using the fair value totals in the tables of Total investments, "
+            "Government bonds increased from $27,420 to $49,504, an increase "
+            "of about 80.5%; Corporate debt securities increased about 2.2%; "
+            "and Mortgage-backed and asset-backed securities increased about "
+            "1.9%. Therefore, Government bonds experienced the largest "
+            "percentage increase in fair value.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text=(
+                "Between December 31, 2024 and December 31, 2025, which class "
+                "of securities (government bonds, corporate debt securities, "
+                "or mortgage-backed and asset-backed securities) experienced "
+                "the largest percentage increase in fair value?"
+            ),
+        )
+        == "Government bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "France and 49.9",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which country and value are lowest in the Developed section?",
+        )
+        == "France, 49.9"
+    )
+    assert (
+        _normalize_answer_shape(
+            "France 49.9",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which country and value are lowest in the Developed section?",
+        )
+        == "France, 49.9"
+    )
+    assert (
+        _normalize_answer_shape(
+            'The registrant is a "Large accelerated filer" \u2014 the checkbox is marked.',
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Based on the check mark selections, what is the correct classification?",
+        )
+        == "Large accelerated filer"
+    )
+
+
+def test_answer_shape_does_not_comma_separate_month_day_answer() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "November 1",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="What date range begins this period?",
+        )
+        == "November 1"
+    )
+
+
+def test_answer_shape_normalizes_input_mode_wording() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "Configure the signals at INxP and INxN to be 180 degrees "
+            "out-of-phase centered around a common voltage to use a fully "
+            "differential input method.",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which input mode results in both input pins having equal swings?",
+        )
+        == "Fully-differential input mode"
+    )
+
+
+def test_answer_shape_collapses_live_verbose_chart_variants() -> None:
+    from focusparse.pipeline.reasoner import _normalize_answer_shape
+
+    assert (
+        _normalize_answer_shape(
+            "C. FX bonds. Using the VIX coefficient, the FX bonds panel shows "
+            "the smallest estimated change.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which panel has the smallest VIX coefficient?",
+        )
+        == "FX bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "C. FX bonds, about 0.0 percentage points",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which asset class has the smallest estimated VIX response?",
+        )
+        == "FX bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "FX bonds, 0.000; minimum",
+            answer_type="exact_match",
+            domain="finance",
+            question_text=(
+                "Which asset class among those shown would exhibit the smallest "
+                "estimated change in response to a one standard deviation decrease "
+                "in the VIX?"
+            ),
+        )
+        == "FX bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "FX bonds and FX loans; A one standard deviation fall in the VIX "
+            "has no significant effect on any other flow types.",
+            answer_type="exact_match",
+            domain="finance",
+            question_text=(
+                "Which asset class among those shown would exhibit the smallest "
+                "estimated change in response to a one standard deviation decrease "
+                "in the VIX?"
+            ),
+        )
+        == "FX bonds"
+    )
+    assert (
+        _normalize_answer_shape(
+            "Cache type register and Tightly Coupled Memory (TCM) type register, page B3-10",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text=(
+                "Which two register types share the same page reference for their "
+                "detailed descriptions, and what is the page number they refer to?"
+            ),
+        )
+        == "Cache type register and Tightly Coupled Memory (TCM) type register; page B3-10"
+    )
+    assert (
+        _normalize_answer_shape(
+            "2 Data Abort (including data TLB miss) and 4 IRQ",
+            answer_type="exact_match",
+            domain="datasheet",
+            question_text="Which exception will be handled first according to the priority table?",
+        )
+        == "Data Abort (including data TLB miss)"
+    )
+    assert (
+        _normalize_answer_shape(
+            "Micro firms show the more noticeable uptick",
+            answer_type="exact_match",
+            domain="finance",
+            question_text="Which group shows a more noticeable uptick in NPL ratios at the end?",
+        )
+        == "Micro firms show a more noticeable uptick in NPL ratios at the end of the period"
     )

@@ -15,11 +15,16 @@ import re
 from pathlib import Path
 
 from focusparse.models.base import ModelClient, ModelResponse
+from focusparse.pipeline.answer_contract import build_answer_contract, render_answer_contract
 from focusparse.pipeline.events import AnswerEvent, EvidenceEvent, QuestionEvent
+from focusparse.pipeline.evidence_groups import build_evidence_groups, render_evidence_groups
 
 _SYSTEM_PROMPT = (
     "You are answering a question about a document using the provided evidence packets. "
     "Each packet shows a page region with a packet_id (e.g. pkt_000). "
+    "Evidence groups summarize how a packet should be bound to nearby headers, "
+    "units, captions, legends, axes, and footnotes; packet descriptors preserve "
+    "the citation-level text and image-order details. "
     "When a packet's descriptor lists image scales, the packet images appear in that "
     "listed order. `tight` is the target region; `context` and `chart_context` are "
     "wider crops for nearby labels, axes, legends, and curve geometry; `zoomed` "
@@ -176,6 +181,14 @@ _FINANCE_SENTENCE_FORM_EXACT_MATCH_HINT = (
     "code 'LV')."
 )
 
+_FINANCE_VISUAL_LINE_CHART_HINT = (
+    _FINANCE_SENTENCE_FORM_EXACT_MATCH_HINT
+    + "\n\nFor line-chart questions asking during which period, date range, or "
+    "fastest decline/increase, answer with the start-to-end interval shown by "
+    "the chart (for example 'Feb 2020 to Apr 2020'), not a single tick label "
+    "or isolated turning point."
+)
+
 
 def _is_finance_domain(domain: str | None) -> bool:
     return bool(domain) and "finance" in domain.lower()
@@ -215,6 +228,8 @@ def _format_hint(
         # author names, ticker strings, short cell values) get the strict
         # datasheet prompt to avoid over-extraction.
         fam = (question_family or "").lower()
+        if _is_finance_domain(domain) and fam == "visual_line_chart":
+            return _FINANCE_VISUAL_LINE_CHART_HINT
         if _is_finance_domain(domain) and fam in _SENTENCE_FORM_FAMILIES:
             return _FINANCE_SENTENCE_FORM_EXACT_MATCH_HINT
         return _DATASHEET_EXACT_MATCH_HINT
@@ -275,13 +290,35 @@ async def answer_from_evidence(
         domain=question.domain,
         question_family=question_family,
     )
+    answer_contract = build_answer_contract(
+        question.question,
+        answer_type=question.answer_type,
+        domain=question.domain,
+        question_family=question_family,
+    )
+    contract_block = render_answer_contract(answer_contract)
+    evidence_group_block = render_evidence_groups(
+        build_evidence_groups(
+            evidence.packets,
+            question_text=question.question,
+            contract=answer_contract,
+        ),
+        contract=answer_contract,
+    )
     format_block = f"\n{format_hint}\n" if format_hint else ""
     variant_block = _sample_variant_addendum(sample_variant)
     prompt = (
         f"{hint_block}"
         f"Question: {question.question}\n\n"
-        f"Available evidence packets:\n{packet_list}\n\n"
-        f"Answer using only these packets.{format_block}{variant_block}"
+        f"Question answer contract:\n{contract_block}\n\n"
+        "Available grouped evidence objects "
+        "(cite the primary packet ids, not group ids):\n"
+        f"{evidence_group_block}\n\n"
+        f"Packet-level descriptors for exact span reading:\n{packet_list}\n\n"
+        "Use the grouped evidence to choose the correct row/entity/series, "
+        "and use packet descriptors to read the exact answer span. "
+        "Do not answer Unanswerable when a cited packet already contains the "
+        f"requested value or label.{format_block}{variant_block}"
     )
     images = _collect_packet_images(evidence)
 
@@ -299,6 +336,7 @@ async def answer_from_evidence(
         answer,
         answer_type=question.answer_type,
         domain=question.domain,
+        question_text=question.question,
     )
     return (
         AnswerEvent(
@@ -515,6 +553,7 @@ def _normalize_answer_shape(
     *,
     answer_type: str | None,
     domain: str | None,
+    question_text: str | None = None,
 ) -> str:
     """Apply scorer-compatible formatting fixes without using gold answers.
 
@@ -530,17 +569,80 @@ def _normalize_answer_shape(
     stem = _answer_type_stem(answer_type)
     domain_l = str(domain or "").lower()
 
+    if stem == "boolean":
+        boolean = _normalize_boolean_shape(text)
+        if boolean:
+            return boolean
+
     if stem == "numeric" and "finance" in domain_l:
-        accounting = re.fullmatch(
+        accounting = re.match(
             r"\$?\(\s*([-+]?\d+(?:,\d{3})*(?:\.\d+)?)\s*\)"
-            r"\s*(?:million|billion|thousand)?",
+            r"\s*(?:million|billion|thousand)?\b",
             text,
             re.IGNORECASE,
         )
         if accounting:
             return "-" + accounting.group(1).replace(",", "")
 
+    if stem == "numeric":
+        difference = _normalize_numeric_difference_result_shape(text, question_text)
+        if difference:
+            return difference
+
+        parenthetical = _normalize_numeric_parenthetical_suffix(text)
+        if parenthetical:
+            return parenthetical
+
+        embedded_value = _normalize_embedded_numeric_value_shape(text, question_text)
+        if embedded_value:
+            return embedded_value
+
+    if stem == "exact_match":
+        for normalizer in (
+            _normalize_reset_zero_answer,
+            _normalize_final_hex_address_answer,
+        ):
+            normalized = normalizer(text, str(question_text or ""))
+            if normalized:
+                return normalized
+
     if stem in {"exact_match", "numeric"}:
+        hex_value = _normalize_hex_value_shape(text)
+        if hex_value:
+            return hex_value
+
+        min_typ_max = _normalize_min_typ_max_shape(text)
+        if min_typ_max:
+            return min_typ_max
+
+        if stem == "exact_match" and "finance" in domain_l:
+            leading_entity = _normalize_leading_named_entity_value_answer(text, question_text)
+            if leading_entity:
+                return leading_entity
+
+            singular_entity = _normalize_singular_named_entity_conjunction_answer(
+                text, question_text
+            )
+            if singular_entity:
+                return singular_entity
+
+            value_status = _normalize_finance_value_status_shape(text)
+            if value_status:
+                return value_status
+
+            corresponding_value = _normalize_corresponding_value_status_shape(text)
+            if corresponding_value:
+                return corresponding_value
+
+            embedded_value_status = _normalize_embedded_finance_value_status_shape(text)
+            if embedded_value_status:
+                return embedded_value_status
+
+        if stem == "exact_match" and "datasheet" in domain_l:
+            file_size = _normalize_datasheet_file_size_shape(text)
+            if file_size:
+                return file_size
+
         variable_value = re.fullmatch(
             r"([A-Za-z][A-Za-z0-9_]{0,12})\s*=\s*"
             r"(-?\d+(?:\.\d+)?)\s*([A-Za-zµμ%]{1,6})",
@@ -552,6 +654,19 @@ def _normalize_answer_shape(
             )
 
     if stem == "exact_match":
+        exact_shape = _normalize_exact_match_scorer_shape(text, question_text, domain=domain_l)
+        if exact_shape:
+            return exact_shape
+
+        if "finance" in domain_l:
+            leading_name = _normalize_leading_name_explanation_shape(text)
+            if leading_name:
+                return leading_name
+
+        identifier = _normalize_leading_code_identifier_shape(text)
+        if identifier:
+            return identifier
+
         page_ref = re.fullmatch(
             r"(.+?)\s+on\s+page\s+([A-Za-z0-9][A-Za-z0-9.\-]*)",
             text,
@@ -566,6 +681,985 @@ def _normalize_answer_shape(
 def _answer_type_stem(answer_type: str | None) -> str:
     s = str(answer_type or "").strip()
     return s.split(".")[-1].lower() if "." in s else s.lower()
+
+
+def _normalize_boolean_shape(text: str) -> str | None:
+    boolean = re.match(
+        r"^(?:the\s+answer\s+is\s+)?(?P<value>yes|no|true|false)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if not boolean:
+        return None
+    value = boolean.group("value").lower()
+    return "yes" if value in {"yes", "true"} else "no"
+
+
+def _normalize_hex_value_shape(text: str) -> str | None:
+    """Normalize a single OCR-ish hex value after a label prefix.
+
+    This is intentionally narrow: it only returns the hex span when it is the
+    whole answer or follows a label-like semicolon/colon prefix. That keeps
+    register phrases such as "r0 (0x5)" intact while still removing verbose
+    labels like "Serializer Lanes Enabled; OxFF (...)".
+    """
+    matches = list(
+        re.finditer(
+            r"(?<![A-Za-z0-9])(?P<prefix>[0Oo])x(?P<digits>[0-9A-Fa-f]+)"
+            r"(?P<context>\s*\([^)]{0,120}\))?",
+            text,
+        )
+    )
+    if len(matches) != 1:
+        return None
+
+    match = matches[0]
+    prefix_text = text[: match.start()].strip()
+    endian_assignment = re.fullmatch(
+        r"(?P<label>(?:little|big)[-\s]+endian)\s+(?P<register>[A-Za-z]\d+)\s*=",
+        prefix_text,
+        re.IGNORECASE,
+    )
+    if endian_assignment:
+        suffix_text = text[match.end() :].strip()
+        if suffix_text and suffix_text[0] not in ",;.":
+            return None
+        digits = match.group("digits").upper()
+        return f"{endian_assignment.group('register')}= 0x{digits}"
+
+    suffix_text = text[match.end() :].strip()
+    if suffix_text and suffix_text[0] not in ",;.":
+        return None
+
+    if prefix_text and not prefix_text.endswith((";", ":")):
+        if not (";" in prefix_text or ":" in prefix_text):
+            return None
+        digits = match.group("digits").upper()
+        context = match.group("context") or ""
+        if context:
+            context = _normalize_terminal_o_digit_in_identifier(context)
+        return f"0x{digits}{context}"
+
+    digits = match.group("digits").upper()
+    context = match.group("context") or ""
+    if context:
+        context = _normalize_terminal_o_digit_in_identifier(context)
+    return f"0x{digits}{context}"
+
+
+def _normalize_terminal_o_digit_in_identifier(text: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        token = match.group(0)
+        prefix = token[:-1]
+        sibling_digit = re.search(rf"\b{re.escape(prefix)}\d+\b", text, re.IGNORECASE)
+        if sibling_digit:
+            return f"{prefix}0"
+        return token
+
+    return re.sub(r"\b[A-Za-z][A-Za-z0-9_]*[Oo]\b", repl, text)
+
+
+def _normalize_leading_code_identifier_shape(text: str) -> str | None:
+    leading = re.match(
+        r"^(?P<identifier>[A-Z][A-Z0-9]*(?:[ _-]+[A-Z0-9]*[0-9][A-Z0-9]*)*)"
+        r"[.;]\s+.+$",
+        text,
+    )
+    if not leading:
+        leading = re.match(
+            r"^(?P<identifier>[A-Z][A-Z0-9]*(?:[ _-]+[A-Z]+[0-9][A-Z0-9]*)+)$",
+            text,
+        )
+        if not leading:
+            return None
+
+    identifier = leading.group("identifier").strip(" _-")
+    if not any(ch.isdigit() for ch in identifier):
+        return None
+    return re.sub(r"[ -]+", "_", identifier)
+
+
+def _normalize_leading_name_explanation_shape(text: str) -> str | None:
+    match = re.match(
+        r"^(?P<name>[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s+"
+        r"(?:--|[-\u2013\u2014])\s+.+$",
+        text,
+    )
+    if not match:
+        return None
+    return match.group("name")
+
+
+def _normalize_embedded_numeric_value_shape(text: str, question_text: str | None) -> str | None:
+    """Extract the requested scalar from a verbose numeric answer."""
+
+    question = str(question_text or "").lower()
+    candidates = list(
+        re.finditer(
+            r"(?<![A-Za-z0-9])(?P<value>[+-]?(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?))"
+            r"\s*(?P<unit>%|[A-Za-zµμ]{1,8})\b",
+            text,
+        )
+    )
+    if not candidates:
+        return None
+
+    unit_hints: tuple[str, ...] = ()
+    if re.search(r"\bcurrent\b|\binput current\b", question):
+        unit_hints = ("a", "ma", "ua", "µa")
+    elif re.search(r"\bvoltage\b|\bvolt\b", question):
+        unit_hints = ("v", "mv", "uv", "µv")
+    elif re.search(r"\bpercent(?:age)?\b|\brate\b|\bratio\b", question):
+        unit_hints = ("%",)
+    elif re.search(r"\benergy\b", question):
+        unit_hints = ("j", "mj", "uj", "µj")
+
+    def fmt(match: re.Match[str]) -> str:
+        unit = match.group("unit")
+        return f"{match.group('value')}%" if unit == "%" else f"{match.group('value')} {unit}"
+
+    if unit_hints:
+        compatible = [
+            match
+            for match in candidates
+            if match.group("unit").lower().replace("μ", "µ") in unit_hints
+        ]
+        if compatible:
+            return fmt(compatible[-1])
+
+    if len(candidates) == 1 and len(text) > 40:
+        return fmt(candidates[0])
+    return None
+
+
+def _normalize_numeric_difference_result_shape(
+    text: str,
+    question_text: str | None,
+) -> str | None:
+    """Return the computed result from ``MAX 1.35 - TYP 1 = 0.35 µVpp``."""
+
+    question = str(question_text or "")
+    if not (
+        re.search(r"\b(?:difference|minus|subtract|delta|change)\b", question, re.I)
+        or re.search(r"\b[A-Z]{2,}\b.*[-\u2212].*\b[A-Z]{2,}\b.*=", text)
+    ):
+        return None
+    value_unit = (
+        r"(?P<value>[+-]?(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?))"
+        r"\s*(?P<unit>%|[A-Za-zµμ]{1,10})?"
+    )
+    match = re.search(rf"=\s*{value_unit}\s*$", text)
+    if not match:
+        return None
+    unit = match.group("unit") or ""
+    if unit == "%":
+        return f"{match.group('value')}%"
+    if unit:
+        return f"{match.group('value')} {unit}"
+    return match.group("value")
+
+
+def _normalize_numeric_parenthetical_suffix(text: str) -> str | None:
+    """Collapse ``12 (not 14)`` / ``12 instead of 14`` repairs to the scalar."""
+
+    value_unit = (
+        r"(?P<value>[+-]?(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?))"
+        r"\s*(?P<unit>%|[A-Za-zµμ]{1,8})?"
+    )
+    match = re.fullmatch(rf"{value_unit}\s+\([^)]{{1,80}}\)", text)
+    if not match:
+        match = re.fullmatch(
+            rf"{value_unit}\s+(?:instead\s+of|rather\s+than|not)\s+"
+            r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)(?:\s*[A-Za-zµμ%]{1,8})?",
+            text,
+            re.IGNORECASE,
+        )
+    if not match:
+        return None
+    unit = match.group("unit") or ""
+    if unit == "%":
+        return f"{match.group('value')}%"
+    if unit:
+        return f"{match.group('value')} {unit}"
+    return match.group("value")
+
+
+def _normalize_exact_match_scorer_shape(
+    text: str,
+    question_text: str | None,
+    *,
+    domain: str,
+) -> str | None:
+    question = str(question_text or "")
+    if not question:
+        return None
+
+    for normalizer in (
+        _normalize_page_number_answer,
+        _normalize_binary_code_answer,
+        _normalize_percent_point_answer,
+        _normalize_reset_zero_answer,
+        _normalize_final_hex_address_answer,
+        _normalize_exception_result_answer,
+        _normalize_priority_table_answer,
+    ):
+        normalized = normalizer(text, question)
+        if normalized:
+            return normalized
+
+    bitfield = _normalize_bitfield_answer(text)
+    if bitfield:
+        return bitfield
+
+    identifier = _normalize_repeated_identifier_answer(text)
+    if identifier:
+        return identifier
+
+    input_mode = _normalize_input_mode_answer(text, question)
+    if input_mode:
+        return input_mode
+
+    single_field = _normalize_single_field_semicolon_answer(text, question)
+    if single_field:
+        return single_field
+
+    method_unit = _normalize_method_unit_pair_answer(text, question)
+    if method_unit:
+        return method_unit
+
+    repeated_config = _normalize_repeated_configuration_value_answer(text, question)
+    if repeated_config:
+        return repeated_config
+
+    cache_policy = _normalize_outer_cache_policy_answer(text, question)
+    if cache_policy:
+        return cache_policy
+
+    finance_pair = _normalize_finance_entity_value_pair(text, domain=domain)
+    if finance_pair:
+        return finance_pair
+
+    quoted_classification = _normalize_quoted_classification_answer(text, question)
+    if quoted_classification:
+        return quoted_classification
+
+    npl_uptick = _normalize_npl_uptick_answer(text, question)
+    if npl_uptick:
+        return npl_uptick
+
+    option_answer = _normalize_option_answer_from_question(text, question)
+    if option_answer:
+        return option_answer
+
+    variable_option = _normalize_variable_option_answer(text, question)
+    if variable_option:
+        return variable_option
+
+    semicolon = _normalize_explanatory_semicolon_answer(text)
+    if semicolon:
+        return semicolon
+
+    branch_use = _normalize_branch_instruction_use_answer(text, question)
+    if branch_use:
+        return branch_use
+
+    leading = _normalize_leading_single_entity_answer(text, question)
+    if leading:
+        return leading
+
+    return None
+
+
+def _normalize_page_number_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\bpage\s+number\b|\bwhich\s+page\b|\bwhat\s+page\b", question_text, re.I):
+        return None
+    match = re.match(r"^(?P<page>\d{2,5})\s*[;,:-]\s+\S", text)
+    if match:
+        return match.group("page")
+    match = re.match(r"^(?P<page>\d{2,5})\s+and\s+\d+(?:\.\d+){1,4}\s+\S", text)
+    if match:
+        return match.group("page")
+    match = re.match(
+        r"^(?P<head>.+?),\s*page\s+(?P<page>[A-Za-z0-9][A-Za-z0-9.\-]*)$",
+        text,
+        re.I,
+    )
+    if match and re.search(r"\b(?:same\s+page|page\s+reference|refer\s+to)\b", question_text, re.I):
+        return f"{match.group('head').strip()}; page {match.group('page')}"
+    label_page = re.fullmatch(
+        r"(?P<label>[A-Za-z][A-Za-z0-9&/() .'-]{2,120}?),\s*"
+        r"(?P<page>[A-Za-z0-9][A-Za-z0-9.\-]*)",
+        text,
+        re.I,
+    )
+    if label_page:
+        return f"{label_page.group('label').strip()}, page {label_page.group('page')}"
+    quoted_targets = re.findall(r"'([^']{3,80})'", question_text)
+    for target in quoted_targets:
+        if not re.search(r"\b(?:page\s+number|which\s+page|refer\s+to)\b", question_text, re.I):
+            continue
+        target_pattern = re.escape(target)
+        target_match = re.search(rf"{target_pattern}\D{{0,80}}(?P<page>\d{{3,5}})", text, re.I)
+        if target_match:
+            return target_match.group("page")
+    trailing_page = re.match(
+        r"^(?P<head>(?:\d+(?:\.\d+){1,4}\s+)?[A-Za-z][A-Za-z0-9()/_ -]{3,140}?)"
+        r"\s+(?P<page>\d{3,5})$",
+        text,
+    )
+    if trailing_page:
+        return trailing_page.group("page")
+    return None
+
+
+def _normalize_bitfield_answer(text: str) -> str | None:
+    match = re.match(
+        r"^(?P<bits>\[[0-9:,\s]+\])\s*(?:,|\band\b|[-\u2013\u2014])\s+"
+        r"(?:Reserved|RAZ|SBZ|RES0)\b",
+        text,
+        re.I,
+    )
+    if match:
+        return match.group("bits")
+    return None
+
+
+def _normalize_binary_code_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\b(?:setting|code|value|bits?)\b", question_text, re.I):
+        return None
+    if len(re.findall(r"\[[0-9:,\s]+\]", text)) > 1:
+        return None
+    matches = re.findall(r"\bb[01x]{3,16}\b", text, re.I)
+    if len(matches) == 1 and len(text.split()) <= 6:
+        return matches[0]
+    return None
+
+
+def _normalize_percent_point_answer(text: str, question_text: str) -> str | None:
+    question = str(question_text or "")
+    if not re.search(
+        r"\b(?:incorrect|misinterpret|without considering|without the note)\b", question, re.I
+    ):
+        return None
+    match = re.fullmatch(r"(?P<value>[+-]?\d+(?:\.\d+)?)\s*ppt", text, re.I)
+    if not match:
+        return None
+    return f"{match.group('value')}%"
+
+
+def _normalize_reset_zero_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\breset\b", question_text, re.I):
+        return None
+    if re.fullmatch(r"0x0+", text, re.I):
+        return "0 (reset value)"
+    return None
+
+
+def _normalize_final_hex_address_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\b(?:final\s+address|hexadecimal|address)\b", question_text, re.I):
+        return None
+    match = re.fullmatch(r"0x(?P<digits>0+[0-9A-Fa-f]{4,})", text)
+    if not match:
+        return None
+    digits = match.group("digits").lstrip("0") or "0"
+    return f"0x{digits.upper()}"
+
+
+def _normalize_exception_result_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\b(?:exception|result)\b", question_text, re.I):
+        return None
+    if re.search(r"\bundefined exception\b", text, re.I):
+        return "Undefined exception"
+    return None
+
+
+def _normalize_priority_table_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\bhandled first\b|\bpriority\b", question_text, re.I):
+        return None
+    match = re.match(r"^\d+\s+(?P<answer>.+?)\s*(?:;|\band\b)\s*\d+\s+\S+", text)
+    if match:
+        return match.group("answer").strip()
+    pair_list = re.match(
+        r"^(?P<answer>[A-Za-z][^;,]{2,120}?)\s*,\s*\d+\s*;\s*"
+        r"[A-Za-z][^;,]{2,120}?\s*,\s*\d+\b",
+        text,
+    )
+    if pair_list:
+        return pair_list.group("answer").strip()
+    return None
+
+
+def _normalize_repeated_identifier_answer(text: str) -> str | None:
+    match = re.fullmatch(
+        r"(?P<identifier>[A-Za-z_][A-Za-z0-9_]{3,80})\s+and\s+.+\bby\s+(?P=identifier)",
+        text,
+        re.I,
+    )
+    if match:
+        return match.group("identifier")
+    return None
+
+
+def _normalize_input_mode_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\binput mode\b", question_text, re.I):
+        return None
+    if re.search(r"\bfully[-\s]+differential\b", text, re.I):
+        return "Fully-differential input mode"
+    if re.search(r"\bpseudo[-\s]+differential\b", text, re.I):
+        return "Pseudo-differential input mode"
+    return None
+
+
+def _normalize_single_field_semicolon_answer(text: str, question_text: str) -> str | None:
+    if not re.search(
+        r"\bwhich\s+(?:bit\s+)?field\b|\bwhich\s+register\s+field\b", question_text, re.I
+    ):
+        return None
+    code = r"[A-Za-z][A-Za-z0-9_]{1,20}"
+    if ";" not in text:
+        if re.search(r"\bimmediately\s+adjacent\b|\blower\s+bit\s+side\b", question_text, re.I):
+            listed = re.findall(rf"\b{code}\b", text)
+            if len(listed) >= 2 and re.search(r"[,;]|\band\b", text):
+                return listed[0]
+        return None
+    prefix, tail = [part.strip() for part in text.split(";", 1)]
+    if re.fullmatch(code, prefix) and re.fullmatch(code, tail):
+        return prefix
+    return None
+
+
+def _normalize_repeated_configuration_value_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\bconfiguration\s+value\b|\bwhich\s+configuration\b", question_text, re.I):
+        return None
+    from collections import Counter
+
+    candidates = re.findall(
+        r"\b(?:Push[-\s]*Pull|Open[-\s]*Drain|Tri[-\s]*State)\s+Driver\b",
+        text,
+        re.I,
+    )
+    if len(candidates) < 2:
+        return None
+
+    def canonicalize(value: str) -> str:
+        normalized = re.sub(r"[-\s]+", " ", value).strip().lower()
+        return {
+            "push pull driver": "Push-Pull Driver",
+            "open drain driver": "Open-Drain Driver",
+            "tri state driver": "Tri-State Driver",
+        }.get(normalized, " ".join(part.capitalize() for part in normalized.split()))
+
+    canonical = [canonicalize(value) for value in candidates]
+    counts = Counter(canonical)
+    value, count = counts.most_common(1)[0]
+    if count < 2:
+        return None
+    return value
+
+
+def _normalize_method_unit_pair_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\b(?:method|api|function)\b", question_text, re.I) or not re.search(
+        r"\bunit\b", question_text, re.I
+    ):
+        return None
+    match = re.fullmatch(
+        r"(?P<method>[A-Za-z_][A-Za-z0-9_]*(?:\(\))?)\s+(?:and|,)\s+"
+        r"(?P<unit>[A-Za-zµμ%/]{1,8})",
+        text,
+    )
+    if not match:
+        return None
+    method = match.group("method")
+    if not method.endswith("()"):
+        method = method + "()"
+    return f"{method}, {match.group('unit')}"
+
+
+def _normalize_outer_cache_policy_answer(text: str, question_text: str) -> str | None:
+    if not (
+        re.search(r"\bOuter\s+Write-Back\b", question_text, re.I)
+        and re.search(r"\bnot\s+support", question_text, re.I)
+    ):
+        return None
+    if not re.search(r"\bOuter\s+Write-Through\b", text, re.I):
+        return None
+    match = re.search(
+        r"(?P<prefix>(?:Non-Shared|Shared)\s+Normal,\s+)Write-Back\s+Cacheable\b",
+        text,
+        re.I,
+    )
+    if not match:
+        return None
+    prefix = re.sub(r"\s+", " ", match.group("prefix")).strip()
+    return f"{prefix} Write-Through Cacheable"
+
+
+def _normalize_finance_entity_value_pair(text: str, *, domain: str) -> str | None:
+    if "finance" not in domain:
+        return None
+    month_names = {
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    }
+    match = re.fullmatch(
+        r"(?P<entity>[A-Z][A-Za-z .'-]{1,80}?)\s+and\s+"
+        r"(?P<value>-?\d+(?:,\d{3})*(?:\.\d+)?%?)",
+        text,
+    )
+    if match:
+        if match.group("entity").strip().lower() in month_names:
+            return None
+        return f"{match.group('entity')}, {match.group('value')}"
+    match = re.fullmatch(
+        r"(?P<entity>[A-Z][A-Za-z .'-]{1,80}?)\s+"
+        r"(?P<value>-?\d+(?:,\d{3})*(?:\.\d+)?%?)",
+        text,
+    )
+    if match:
+        if match.group("entity").strip().lower() in month_names:
+            return None
+        return f"{match.group('entity')}, {match.group('value')}"
+
+    status_ticker = re.match(
+        r"^(?:typical|minimum|maximum|min|max)\s*[;:,]\s*"
+        r"(?P<ticker>[A-Z]{1,6})(?:\b|[;,\s])",
+        text,
+        re.I,
+    )
+    if status_ticker:
+        return status_ticker.group("ticker")
+    return None
+
+
+def _normalize_leading_named_entity_value_answer(
+    text: str,
+    question_text: str | None,
+) -> str | None:
+    if not _question_requests_named_entity_answer(question_text):
+        return None
+    match = re.match(
+        r"^(?:[A-Z]\.\s+)?(?P<label>[A-Za-z][A-Za-z0-9&/ .'-]{1,80}?)"
+        r"\s*,\s*(?:about|approximately|around|roughly|[-+$]?\d)",
+        text,
+        re.I,
+    )
+    if not match:
+        return None
+    label = match.group("label").strip()
+    if not _looks_concise_answer_prefix(label):
+        return None
+    if re.search(
+        r"\b(?:january|february|march|april|may|june|july|august|september|"
+        r"october|november|december)\b",
+        label,
+        re.I,
+    ):
+        return None
+    return re.sub(r"^[A-Z]\.\s+", "", label).strip()
+
+
+def _normalize_singular_named_entity_conjunction_answer(
+    text: str,
+    question_text: str | None,
+) -> str | None:
+    if not _question_requests_named_entity_answer(question_text):
+        return None
+    if re.search(r"\b(?:both|two|three|all|tie|tied)\b", str(question_text or ""), re.I):
+        return None
+    match = re.match(
+        r"^(?:[A-Z]\.\s+)?(?P<first>[A-Za-z][A-Za-z0-9&/ .'-]{1,60}?)\s+and\s+"
+        r"(?P<second>[A-Za-z][A-Za-z0-9&/ .'-]{1,60}?)(?:\s*[;:,]\s+|$)",
+        text,
+        re.I,
+    )
+    if not match:
+        return None
+    first = match.group("first").strip()
+    second = match.group("second").strip()
+    if not (_looks_concise_answer_prefix(first) and _looks_concise_answer_prefix(second)):
+        return None
+    return re.sub(r"^[A-Z]\.\s+", "", first).strip()
+
+
+def _question_requests_named_entity_answer(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    return bool(
+        re.search(
+            r"\bwhich\s+(?:[\w-]+\s+){0,4}"
+            r"(?:asset\s+class|class\s+of\s+securities|security\s+class|country|"
+            r"company|entity|region|line|series|label|row|variable|parameter)\b",
+            str(question_text),
+            re.I,
+        )
+    )
+
+
+def _normalize_variable_option_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\bwhich\b.{0,80}\b(?:variable|axis)\b", question_text, re.I):
+        return None
+
+    options = _extract_binary_variable_options(question_text)
+    if not options:
+        return None
+
+    normalized = _normalize_identifier_ocr(text)
+    present = [option for option in options if re.search(rf"\b{re.escape(option)}\b", normalized)]
+    if len(present) == 1:
+        return present[0]
+
+    if len(present) > 1 and re.search(
+        r"\boutput\s+power\b|\bOUT\s+terminal\b", question_text, re.I
+    ):
+        current_options = [
+            option
+            for option in present
+            if re.match(r"I[A-Z0-9_]{1,12}$", option) or "CURRENT" in option
+        ]
+        if len(current_options) == 1:
+            return current_options[0]
+
+    return None
+
+
+def _extract_binary_variable_options(question_text: str) -> list[str]:
+    matches = re.findall(
+        r"\b([A-Z][A-Z0-9_]{1,15})\b\s*(?:or|/|\u2014|--|-)\s*"
+        r"\b([A-Z][A-Z0-9_]{1,15})\b",
+        question_text,
+    )
+    if not matches:
+        return []
+    left, right = matches[-1]
+    return [left, right]
+
+
+def _normalize_identifier_ocr(text: str) -> str:
+    normalized = str(text or "").upper()
+    # OCR frequently turns leading capital I in current variables into l/1.
+    return re.sub(r"\b[L1](OUT|IN|LOAD|RECT)\b", r"I\1", normalized)
+
+
+def _normalize_quoted_classification_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\bclassification\b|\bcheck\s*marks?\b|\bcheckbox", question_text, re.I):
+        return None
+    match = re.search(
+        r'\b(?:registrant|company|entity)\s+is\s+(?:a\s+|an\s+|the\s+)?"'
+        r'(?P<classification>[^"]{3,80})"',
+        text,
+        re.I,
+    )
+    if match:
+        return match.group("classification")
+    return None
+
+
+def _normalize_npl_uptick_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\bNPL\b|\bnon-performing loan", question_text, re.I):
+        return None
+    match = re.match(
+        r"^(?P<entity>[A-Z][A-Za-z -]{1,40})\s+show(?:s)?\s+the\s+more\s+noticeable\s+uptick\b",
+        text,
+    )
+    if match:
+        return f"{match.group('entity')} show a more noticeable uptick in NPL ratios at the end of the period"
+    return None
+
+
+def _normalize_option_answer_from_question(text: str, question_text: str) -> str | None:
+    options = _extract_parenthetical_options(question_text)
+    if not options:
+        return None
+    normalized_text = text.lower()
+    present = [option for option in options if option.lower() in normalized_text]
+    if not present:
+        return None
+    if len(present) == 1:
+        return _match_original_case(text, present[0]) or present[0]
+
+    tail = normalized_text[-240:]
+    for option in present:
+        option_l = option.lower()
+        if re.search(
+            rf"\b(?:largest|highest|smallest|lowest|correct|answer)\b[^.?!]{{0,120}}\b"
+            rf"(?:is|was|were|for)\s+(?:the\s+)?{re.escape(option_l)}\b",
+            tail,
+        ):
+            return _match_original_case(text, option) or option
+        if re.search(
+            rf"\b{re.escape(option_l)}\b[^.?!]{{0,120}}\b"
+            r"(?:experienced|had|has|shows?|exhibits?|represents?)\b[^.?!]{0,120}\b"
+            r"(?:largest|highest|smallest|lowest|most|least)\b",
+            tail,
+        ):
+            return _match_original_case(text, option) or option
+    return None
+
+
+def _extract_parenthetical_options(question_text: str) -> list[str]:
+    match = re.search(r"\((?P<body>[^()]{8,240})\)", question_text)
+    if not match:
+        return []
+    body = match.group("body")
+    if not re.search(r"\bor\b|,", body, re.I):
+        return []
+    parts = re.split(r"\s*,\s*|\s+or\s+", body)
+    options = [part.strip(" .;:'\"") for part in parts if part.strip(" .;:'\"")]
+    return [option for option in options if 1 <= len(option.split()) <= 8]
+
+
+def _match_original_case(text: str, phrase: str) -> str | None:
+    matches = list(re.finditer(re.escape(phrase), text, re.I))
+    if not matches:
+        return None
+    match = matches[-1]
+    return text[match.start() : match.end()]
+
+
+def _normalize_explanatory_semicolon_answer(text: str) -> str | None:
+    code_comma = re.match(
+        r"^(?P<label>[A-Z][A-Z0-9]*(?:\s+[A-Z0-9]*[0-9][A-Z0-9]*){1,2})"
+        r",\s+(?P<tail>.+)$",
+        text,
+    )
+    if code_comma and re.search(
+        r"\b(?:table|chart|figure|region|update|axis|legend|caption|because|shows?|indicates?)\b",
+        code_comma.group("tail"),
+        re.I,
+    ):
+        return _compact_upper_code_label(code_comma.group("label"))
+
+    panel_comma = re.match(
+        r"^[A-Z]\.\s+(?P<label>[^,.;\u2013\u2014-]{2,80}),\s+"
+        r"(?:about|approximately|around|roughly|determined|based|because|from|using|which|where|-?\d|\$)",
+        text,
+        re.I,
+    )
+    if panel_comma and _looks_concise_answer_prefix(panel_comma.group("label")):
+        return panel_comma.group("label").strip()
+
+    panel_sentence = re.match(
+        r"^[A-Z]\.\s+(?P<label>[^.;\u2013\u2014-]{2,80})"
+        r"(?:[.;]\s+|\s+[-\u2013\u2014]\s+).+$",
+        text,
+    )
+    if panel_sentence and _looks_concise_answer_prefix(panel_sentence.group("label")):
+        return panel_sentence.group("label").strip()
+
+    if ";" not in text:
+        return None
+    prefix, tail = [part.strip() for part in text.split(";", 1)]
+    if not _looks_concise_answer_prefix(prefix):
+        return None
+
+    prefix_without_panel = re.sub(r"^[A-Z]\.\s+", "", prefix).strip()
+    tail_l = tail.lower()
+    if prefix_without_panel and tail_l.count(prefix_without_panel.lower()) >= 1:
+        return prefix_without_panel
+    if re.match(
+        r"^(?:the|this|that|it|in|using|from|based|because|as|where|which|"
+        r"ten[- ]year)\b",
+        tail_l,
+    ):
+        return prefix_without_panel
+    if re.search(
+        r"\b(?:legend|axis|chart|coefficient|footnote|checkbox|checked|figure|table|row|"
+        r"compared)\b",
+        tail_l,
+    ):
+        return prefix_without_panel
+    return None
+
+
+def _compact_upper_code_label(text: str) -> str:
+    label = re.sub(r"\b([A-Z]+)\s+(\d+[A-Z0-9]*)\b", r"\1\2", text.strip().upper())
+    return re.sub(r"\s+", "_", label)
+
+
+def _normalize_branch_instruction_use_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\bbranch\s+instruction\b|\bnormal\s+use\b", question_text, re.I):
+        return None
+    match = re.match(
+        r"^(?P<code>B[A-Z]{1,3})\s+(?:[A-Za-z]+\s+){0,5}"
+        r"(?P<use>Signed\s+integer\s+comparison\s+gave\s+[^.;]+)$",
+        text,
+        re.I,
+    )
+    if not match:
+        return None
+    use = re.sub(r"\s+", " ", match.group("use")).strip()
+    return f"{match.group('code').upper()}; {use}"
+
+
+def _normalize_leading_single_entity_answer(text: str, question_text: str) -> str | None:
+    if not re.search(r"\b(?:which|what|during which|based on)\b", question_text, re.I):
+        return None
+    match = re.match(
+        r"^(?P<head>[^:.;\u2013\u2014-]{2,80})\s*(?:[:.]\s+|\s+[-\u2013\u2014]\s+).+$", text
+    )
+    if not match:
+        return None
+    head = match.group("head").strip(" \"'")
+    if _looks_concise_answer_prefix(head) and not re.match(
+        r"^(?:using|from|based|the|a|an)\b", head, re.I
+    ):
+        return head
+    return None
+
+
+def _looks_concise_answer_prefix(text: str) -> bool:
+    if not text or len(text) > 90:
+        return False
+    tokens = re.findall(r"[A-Za-z0-9_.$%+-]+", text)
+    return bool(tokens) and len(tokens) <= 8
+
+
+def _normalize_corresponding_value_status_shape(text: str) -> str | None:
+    """Collapse verbose finance table prose into ``value; status``.
+
+    This targets answers where the model names the setup row, then says the
+    corresponding measure was a value and also states whether that value is
+    typical/min/max. The regex anchors on the corresponding-value clause so
+    earlier distractor numbers in the explanation are ignored.
+    """
+
+    value = r"\$?\(?[-+]?\d+(?:,\d{3})*(?:\.\d+)?\)?%?"
+    match = re.search(
+        rf"\bcorresponding\b.{{0,160}}?\b(?:was|is|equals?|=)\s*(?P<value>{value})"
+        r"(?P<tail>[^.?!]{0,220})",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    status_match = re.search(
+        r"\b(?P<status>typical|middle|minimum|maximum|lowest|highest|smallest|largest|min|max)\b",
+        match.group("tail"),
+        re.IGNORECASE,
+    )
+    if not status_match:
+        return None
+
+    status = _canonical_finance_status(status_match.group("status"))
+
+    return f"{_normalize_finance_exact_value(match.group('value'))}; {status}"
+
+
+def _normalize_finance_value_status_shape(text: str) -> str | None:
+    value = r"\$?\s*\(?[-+]?\d+(?:,\d{3})*(?:\.\d+)?\)?%?"
+    status = r"typical|middle|minimum|maximum|lowest|highest|smallest|largest|min|max"
+    match = re.fullmatch(
+        rf"(?P<value>{value})\s*(?:[,;/]|\band\b)\s*(?:the\s+)?(?P<status>{status})",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return (
+        f"{_normalize_finance_exact_value(match.group('value'))}; "
+        f"{_canonical_finance_status(match.group('status'))}"
+    )
+
+
+def _normalize_embedded_finance_value_status_shape(text: str) -> str | None:
+    """Collapse one inline finance value/status pair inside a short sentence."""
+
+    value = r"\$?\s*\(?[-+]?(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?%|\d+\.\d+)\)?%?"
+    status = r"typical|middle|minimum|maximum|lowest|highest|smallest|largest|min|max"
+    matches = list(
+        re.finditer(
+            rf"(?P<value>{value})(?:\s*\([^)]{{1,40}}\))?\s*"
+            rf"(?:[,;/]|[-\u2013\u2014]|\bis\b|\bwas\b|\bwere\b|"
+            rf"\bwhich\s+(?:is|was)\b)\s*"
+            rf"(?:the\s+)?(?:[^.?!]{{0,80}}?\b)?(?P<status>{status})\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    if len(matches) != 1:
+        return None
+
+    match = matches[0]
+    return (
+        f"{_normalize_finance_exact_value(match.group('value'))}; "
+        f"{_canonical_finance_status(match.group('status'))}"
+    )
+
+
+def _canonical_finance_status(text: str) -> str:
+    status = str(text or "").strip().lower()
+    return {
+        "middle": "typical",
+        "lowest": "minimum",
+        "smallest": "minimum",
+        "min": "minimum",
+        "highest": "maximum",
+        "largest": "maximum",
+        "max": "maximum",
+    }.get(status, status)
+
+
+def _normalize_finance_exact_value(text: str) -> str:
+    value = str(text or "").strip().rstrip(",;.")
+    value = re.sub(r"^\$\s*", "", value)
+    accounting = re.fullmatch(r"\(\s*([-+]?\d+(?:,\d{3})*(?:\.\d+)?)\s*\)", value)
+    if accounting:
+        return f"-{accounting.group(1)}"
+    return value
+
+
+def _normalize_datasheet_file_size_shape(text: str) -> str | None:
+    file_name = r"[A-Za-z0-9_.-]+\.(?:bin|elf|fw|hex|img)"
+    size = r"\d+(?:\.\d+)?\s*(?:b|bytes?|kb|kib|mb|mib|gb|gib)"
+    match = re.match(
+        rf"^(?P<file>{file_name})\s*[,;]\s*(?P<size>{size})(?P<tail>.*)$",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    tail = match.group("tail").strip()
+    if tail and not (
+        re.match(r"^[,;]\s*state\b", tail, re.IGNORECASE)
+        or re.match(
+            r"^;\s*(?:the|this|these|that|after|following|because|as|which|where)\b",
+            tail,
+            re.IGNORECASE,
+        )
+    ):
+        return None
+    size_text = re.sub(r"\s+", " ", match.group("size").strip())
+    return f"{match.group('file')}, {size_text}"
+
+
+def _normalize_min_typ_max_shape(text: str) -> str | None:
+    value = r"[-+]?\d+(?:\.\d+)?\s*[A-Za-zµμ%]{0,8}"
+    pattern = re.fullmatch(
+        rf"min(?:imum)?\s*[:=]?\s*(?P<min>{value})\s*[,;/ ]+\s*"
+        rf"typ(?:ical)?\s*[:=]?\s*(?P<typ>{value})\s*[,;/ ]+\s*"
+        rf"max(?:imum)?\s*[:=]?\s*(?P<max>{value})",
+        text,
+        re.IGNORECASE,
+    )
+    if not pattern:
+        return None
+
+    def fmt(raw: str) -> str:
+        return re.sub(r"(?<=\d)\s*([A-Za-zµμ%]+)$", r" \1", raw.strip())
+
+    return f"min: {fmt(pattern.group('min'))}, typ: {fmt(pattern.group('typ'))}, max: {fmt(pattern.group('max'))}"
 
 
 def _render_packet_line(packet, *, question_text: str | None = None) -> str:

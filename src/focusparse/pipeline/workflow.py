@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from focusparse.evidence.packet import EvidencePacket
 from focusparse.models.base import ModelClient, ModelResponse
+from focusparse.pipeline.answer_contract import answer_contract_failures, build_answer_contract
 from focusparse.pipeline.events import (
     AnswerEvent,
     EvidenceEvent,
@@ -27,7 +28,12 @@ from focusparse.pipeline.events import (
     RegionsEvent,
     VerdictEvent,
 )
+from focusparse.pipeline.evidence_repair import build_same_evidence_repair_context
 from focusparse.pipeline.expander import expand_context
+from focusparse.pipeline.finance_adjudication import (
+    finance_answers_match,
+    infer_finance_answer_from_evidence,
+)
 from focusparse.pipeline.inspector import _FINE_DETAIL_QUESTION_FAMILIES, inspect_regions
 from focusparse.pipeline.localizer import propose_regions
 from focusparse.pipeline.planner import plan_question
@@ -79,6 +85,8 @@ _DEFAULT_ADJACENCY_PAD = 0.08
 _EXPAND_RETRY_FACTOR = 1.5  # multiplied each retry → wider neighbor net
 _MAX_ADJACENCY_PAD = 0.30  # cap so the pad stays meaningful
 _RETRY_SELECTION_CONFIDENCE_MARGIN = 0.15
+_RETRY_SELECTION_TIE_RETRY_MARGIN = 0.05
+_NAMED_ENTITY_RETRY_SELECTION_MARGIN = 0.35
 _ABSTAIN_OVERRIDE_MIN_CONFIDENCE = 0.45
 _VERBOSE_SHAPE_RETRY_MAX_CHARS = 90
 _VERBOSE_SHAPE_RETRY_MAX_WORDS = 12
@@ -460,6 +468,18 @@ class FocusWorkflow:
             return None
         return endpoints.get("layout") if isinstance(endpoints, dict) else None
 
+    def _schema_extraction_client(self) -> ModelClient | None:
+        """Resolve the gated table/chart schema-extraction model.
+
+        The default role is Gemini 3.1 Pro with high media resolution. Older
+        configs without `schema_extractor` fall back to the previous
+        localizer-rerank backend so chart extraction remains backward
+        compatible.
+        """
+        if self.tool_set != "full":
+            return None
+        return self._client_for("schema_extractor") or self._client_for("localizer_rerank")
+
     def _layout_cache_dir(self) -> Path | None:
         """Resolve the on-disk cache dir for layout responses.
 
@@ -705,6 +725,15 @@ class FocusWorkflow:
             backend_client=verifier_client,
             recorder=recorder,
             step_counter=step_counter,
+            question_family=plan.question_family,
+        )
+        verdict = _maybe_accept_deterministic_finance_answer(
+            question_event=question_event,
+            evidence=evidence,
+            answer=answer_event,
+            verdict=verdict,
+            recorder=recorder,
+            retry_attempt=0,
         )
 
         # --- RETRY LOOP ----------------------------------------------------
@@ -723,6 +752,9 @@ class FocusWorkflow:
         loop_terminated = ""  # set in the loop body before break
         escalation_hint: str | None = None
         answer_evidence = evidence
+        initial_answer_event = answer_event
+        initial_answer_evidence = answer_evidence
+        accepted_retry_preserved_initial = False
         best_unsupported_answer: AnswerEvent | None = None
         best_unsupported_evidence: EvidenceEvent | None = None
         if not verdict.supported:
@@ -732,9 +764,56 @@ class FocusWorkflow:
         while True:
             action = verdict.next_action
             if action == "accept":
+                if _should_preserve_initial_answer_on_supported_retry(
+                    initial_answer_event,
+                    answer_event,
+                    question_event=question_event,
+                    retries_used=retries_used,
+                ):
+                    _add_debug_event(
+                        recorder,
+                        stage="answer",
+                        event_type="selection",
+                        retry_attempt=retries_used,
+                        payload={
+                            "selected": "initial_answer",
+                            "reason": "supported_retry_looked_like_shape_regression",
+                            "selected_answer": initial_answer_event.answer,
+                            "selected_confidence": initial_answer_event.confidence,
+                            "discarded_answer": answer_event.answer,
+                            "discarded_confidence": answer_event.confidence,
+                        },
+                    )
+                    answer_event = initial_answer_event
+                    answer_evidence = initial_answer_evidence
+                    accepted_retry_preserved_initial = True
+                    loop_terminated = "accepted_preserved_initial"
+                    break
                 loop_terminated = "accepted"
                 break
             if action == "abstain":
+                if _should_keep_cited_answer_on_initial_visual_estimate_abstain(
+                    answer_event,
+                    question_event=question_event,
+                    verdict=verdict,
+                    retries_used=retries_used,
+                ):
+                    _add_debug_event(
+                        recorder,
+                        stage="answer",
+                        event_type="selection",
+                        retry_attempt=retries_used,
+                        payload={
+                            "selected": "current_answer",
+                            "reason": "initial_visual_estimate_abstain_guard",
+                            "selected_answer": answer_event.answer,
+                            "selected_confidence": answer_event.confidence,
+                            "discarded_next_action": verdict.next_action,
+                            "discarded_verifier_confidence": verdict.confidence,
+                        },
+                    )
+                    loop_terminated = "exhausted"
+                    break
                 if _should_keep_best_unsupported_on_retry_abstain(
                     best_unsupported_answer,
                     question_event=question_event,
@@ -876,12 +955,22 @@ class FocusWorkflow:
                 # missing. When there are no cited/target packets, the explicit
                 # empty target list keeps expansion from sweeping every packet;
                 # the hint still gives the reasoner a focused repair instruction.
-                escalation_hint = verdict.reason
+                escalation_hint = _build_reasoner_repair_hint(
+                    verdict,
+                    answer_event=answer_event,
+                    question_event=question_event,
+                    evidence=retry_answer_evidence,
+                )
             elif action == "escalate_reasoner":
                 # No state change — just feed the verifier's reason into the
                 # next reasoner call so it knows what to address.
                 retry_answer_evidence = evidence
-                escalation_hint = verdict.reason
+                escalation_hint = _build_reasoner_repair_hint(
+                    verdict,
+                    answer_event=answer_event,
+                    question_event=question_event,
+                    evidence=retry_answer_evidence,
+                )
             else:
                 # Unknown action (future verifier extension) — accept the
                 # current answer rather than thrash. Trace shows the action
@@ -910,6 +999,15 @@ class FocusWorkflow:
                 recorder=recorder,
                 step_counter=step_counter,
                 retry_attempt=retries_used,
+                question_family=plan.question_family,
+            )
+            verdict = _maybe_accept_deterministic_finance_answer(
+                question_event=question_event,
+                evidence=answer_evidence,
+                answer=answer_event,
+                verdict=verdict,
+                recorder=recorder,
+                retry_attempt=retries_used,
             )
             if not verdict.supported and _is_better_unsupported_answer(
                 answer_event,
@@ -924,7 +1022,11 @@ class FocusWorkflow:
         # treats null as "not measured", same as the StageMetrics block).
         loop_retry_helped: bool | None = None
         if retries_used > 0:
-            loop_retry_helped = (not initial_supported) and verdict.supported
+            loop_retry_helped = (
+                (not initial_supported)
+                and verdict.supported
+                and not accepted_retry_preserved_initial
+            )
 
         if (
             loop_terminated == "exhausted"
@@ -965,6 +1067,7 @@ class FocusWorkflow:
         telemetry["evidence_retries_used"] = evidence_retries_used
         telemetry["loop_terminated"] = loop_terminated
         telemetry["loop_retry_helped"] = loop_retry_helped
+        telemetry["accepted_retry_preserved_initial"] = accepted_retry_preserved_initial
         telemetry["available_tools"] = self.available_tools()
         telemetry["answer_changed_after_tool"] = (
             tool_retry_used
@@ -1148,6 +1251,7 @@ class FocusWorkflow:
             from focusparse.pipeline.inspector_react import react_inspect
 
             inspector_client = self._client_for("inspector_dispatch")
+            schema_extractor_client = self._schema_extraction_client()
             result = await react_inspect(
                 question_event,
                 plan,
@@ -1160,7 +1264,8 @@ class FocusWorkflow:
                 auto_zoom=self.auto_zoom,
                 multi_scale=self.multi_scale_packets,
                 chart_to_table_enabled=self.chart_to_table_enabled,
-                chart_to_table_backend=self._client_for("localizer_rerank"),
+                chart_to_table_backend=schema_extractor_client,
+                schema_extractor_backend=schema_extractor_client,
             )
             evidence = result.evidence
             n_real_packets = sum(
@@ -1214,6 +1319,7 @@ class FocusWorkflow:
             )
             return evidence
 
+        schema_extractor_client = self._schema_extraction_client()
         evidence = await inspect_regions(
             question_event,
             plan,
@@ -1226,11 +1332,11 @@ class FocusWorkflow:
             multi_scale=self.multi_scale_packets,
             chart_to_table_enabled=self.chart_to_table_enabled,
             # Phase 7 (2026-05-11): swap the OCR-based chart extractor for
-            # a vision-LLM call. localizer_rerank tier is mid (claude-haiku),
-            # cheap enough at ~$0.005/chart and capable enough to read most
-            # finance charts where the OCR pipeline returned empty CSV on
-            # 100% of Phase 4 attempts.
-            chart_to_table_backend=self._client_for("localizer_rerank"),
+            # a vision-LLM call. Phase 8 (2026-05-15) routes this through the
+            # dedicated schema_extractor role so table/chart CV parsing can use
+            # Gemini 3.1 Pro without changing planner/reasoner/verifier tiers.
+            chart_to_table_backend=schema_extractor_client,
+            schema_extractor_backend=schema_extractor_client,
         )
         n_real_packets = sum(
             1 for p in evidence.packets if p.provenance.tool != "skeleton_inspector_fallback"
@@ -1557,12 +1663,14 @@ class FocusWorkflow:
         recorder: TrajectoryRecorder,
         step_counter: _StepCounter,
         retry_attempt: int = 0,
+        question_family: str | None = None,
     ) -> tuple[VerdictEvent, ModelResponse | None]:
         verdict, verify_response = await verify_answer(
             question_event,
             evidence,
             answer_event,
             backend_client=backend_client,
+            question_family=question_family,
         )
         recorder.record(
             TrajectoryStep(
@@ -1893,6 +2001,14 @@ def _is_better_unsupported_answer(
     """
     if incumbent is None:
         return True
+    if _answer_looks_unanswerable(candidate.answer) and not _answer_looks_unanswerable(
+        incumbent.answer
+    ):
+        return False
+    if _answer_looks_unanswerable(incumbent.answer) and not _answer_looks_unanswerable(
+        candidate.answer
+    ):
+        return True
     if candidate.citations and not incumbent.citations:
         return True
     if incumbent.citations and not candidate.citations:
@@ -1901,6 +2017,89 @@ def _is_better_unsupported_answer(
     incumbent_confidence = float(incumbent.confidence or 0.0)
     candidate_overlap = _answer_question_overlap(candidate.answer, question_text)
     incumbent_overlap = _answer_question_overlap(incumbent.answer, question_text)
+    if (
+        _answer_is_concise_shape(incumbent.answer)
+        and _retry_answer_looks_like_verbose_extension(candidate.answer, incumbent.answer)
+        and not _retry_extension_adds_required_fields(candidate.answer, question_text)
+        and candidate_confidence <= incumbent_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN
+    ):
+        return False
+    if (
+        _answer_is_concise_shape(candidate.answer)
+        and _retry_answer_looks_like_verbose_extension(incumbent.answer, candidate.answer)
+        and set(candidate.citations) == set(incumbent.citations)
+        and candidate_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= incumbent_confidence
+    ):
+        return True
+    if (
+        _question_requests_chart_scalar_reading(question_text)
+        and not _question_requests_calculation(question_text)
+        and _answer_looks_numeric_scalar(incumbent.answer)
+        and _answer_starts_with_numeric_scalar(candidate.answer)
+        and incumbent_confidence >= 0.85
+        and candidate_confidence <= incumbent_confidence + _RETRY_SELECTION_TIE_RETRY_MARGIN
+        and (not candidate.citations or bool(set(candidate.citations) & set(incumbent.citations)))
+        and (
+            _answers_are_same_shape_scalars(candidate.answer, incumbent.answer)
+            or _answer_looks_verbose_retry_context(candidate.answer)
+        )
+    ):
+        return False
+    if (
+        _answer_is_concise_shape(incumbent.answer)
+        and _answers_are_same_shape_scalars(candidate.answer, incumbent.answer)
+        and _normalize_answer_for_telemetry(candidate.answer)
+        != _normalize_answer_for_telemetry(incumbent.answer)
+        and set(candidate.citations) == set(incumbent.citations)
+        and incumbent_confidence >= 0.65
+        and candidate_confidence <= incumbent_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN
+        and not _retry_extension_adds_required_fields(candidate.answer, question_text)
+        and not _question_requests_calculation(question_text)
+        and not (
+            _question_requests_visual_numeric_estimate(question_text)
+            and _answer_decimal_places(candidate.answer) > _answer_decimal_places(incumbent.answer)
+        )
+    ):
+        return False
+    if (
+        _question_requests_period_range(question_text)
+        and _answer_looks_date_range(candidate.answer)
+        and _answer_looks_single_date(incumbent.answer)
+        and candidate_confidence >= 0.35
+        and (not candidate.citations or bool(set(candidate.citations) & set(incumbent.citations)))
+    ):
+        return True
+    if (
+        _question_requests_visual_numeric_estimate(question_text)
+        and _answers_are_same_shape_scalars(candidate.answer, incumbent.answer)
+        and _normalize_answer_for_telemetry(candidate.answer)
+        != _normalize_answer_for_telemetry(incumbent.answer)
+        and set(candidate.citations) == set(incumbent.citations)
+        and candidate_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= incumbent_confidence
+        and _answer_decimal_places(candidate.answer) > _answer_decimal_places(incumbent.answer)
+        and not _question_requests_calculation(question_text)
+    ):
+        return True
+    if (
+        _question_requests_named_entity_answer(question_text)
+        and _answer_is_concise_shape(candidate.answer)
+        and not _answer_looks_numeric_status_surrogate(candidate.answer)
+        and _answer_looks_numeric_status_surrogate(incumbent.answer)
+        and candidate_confidence + _NAMED_ENTITY_RETRY_SELECTION_MARGIN >= incumbent_confidence
+    ):
+        return True
+    if _question_requests_variable(question_text):
+        if _answer_looks_formula_like(candidate.answer) and not _answer_looks_formula_like(
+            incumbent.answer
+        ):
+            return False
+        if _answer_looks_formula_like(incumbent.answer) and not _answer_looks_formula_like(
+            candidate.answer
+        ):
+            return (
+                candidate_confidence + _entity_retry_selection_margin(question_text)
+                >= incumbent_confidence
+            )
     if (
         _question_requests_single_entity(question_text)
         and _answer_looks_list_like(incumbent.answer)
@@ -1919,7 +2118,266 @@ def _is_better_unsupported_answer(
         and incumbent_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN >= candidate_confidence
     ):
         return False
+    if _answers_are_opposite_booleans(candidate.answer, incumbent.answer):
+        return candidate_confidence > incumbent_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN
+    if (
+        candidate_overlap == incumbent_overlap
+        and _answers_are_same_shape_scalars(candidate.answer, incumbent.answer)
+        and set(candidate.citations) == set(incumbent.citations)
+        and candidate_confidence + _RETRY_SELECTION_TIE_RETRY_MARGIN >= incumbent_confidence
+        and _normalize_answer_for_telemetry(candidate.answer)
+        != _normalize_answer_for_telemetry(incumbent.answer)
+    ):
+        return True
     return candidate_confidence > incumbent_confidence
+
+
+def _answers_are_opposite_booleans(left: str | None, right: str | None) -> bool:
+    left_bool = _answer_boolean_value(left)
+    right_bool = _answer_boolean_value(right)
+    return left_bool is not None and right_bool is not None and left_bool != right_bool
+
+
+def _answer_boolean_value(answer: str | None) -> bool | None:
+    text = str(answer or "").strip().lower().strip(" .,:;")
+    if text in {"yes", "true"}:
+        return True
+    if text in {"no", "false"}:
+        return False
+    return None
+
+
+def _should_preserve_initial_answer_on_supported_retry(
+    initial: AnswerEvent,
+    candidate: AnswerEvent,
+    *,
+    question_event: QuestionEvent,
+    retries_used: int,
+) -> bool:
+    """Keep a concise initial answer when a supported retry looks regressive.
+
+    The verifier can be right that the evidence supports a retry while the
+    retry is still worse for parser-bench scoring: extra rationale, adjacent
+    row labels, formulas, or a row-shifted list-like answer can overwrite the
+    original concise span. This guard is intentionally conservative. It only
+    fires after a retry, only when the original cited answer satisfies the
+    gold-free answer contract at least as well as the retry, and only when the
+    retry has clear shape-regression signals.
+    """
+
+    if retries_used <= 0:
+        return False
+    if initial is candidate:
+        return False
+    if not initial.citations or _answer_looks_unanswerable(initial.answer):
+        return False
+    if _normalize_answer_for_telemetry(initial.answer) == _normalize_answer_for_telemetry(
+        candidate.answer
+    ):
+        return False
+    if candidate.citations and not (set(initial.citations) & set(candidate.citations)):
+        return False
+
+    contract = build_answer_contract(
+        question_event.question,
+        answer_type=question_event.answer_type,
+        domain=question_event.domain,
+    )
+    initial_failures = answer_contract_failures(initial.answer, contract)
+    candidate_failures = answer_contract_failures(candidate.answer, contract)
+    if initial_failures and len(candidate_failures) < len(initial_failures):
+        return False
+
+    initial_confidence = float(initial.confidence or 0.0)
+    candidate_confidence = float(candidate.confidence or 0.0)
+    if candidate_confidence > initial_confidence + _RETRY_SELECTION_CONFIDENCE_MARGIN:
+        return False
+
+    initial_text = str(initial.answer or "").strip()
+    candidate_text = str(candidate.answer or "").strip()
+    if not _answer_is_concise_shape(initial_text):
+        return False
+    if (
+        _answers_are_same_shape_scalars(initial_text, candidate_text)
+        and initial_confidence >= 0.85
+        and candidate_confidence <= initial_confidence + _RETRY_SELECTION_TIE_RETRY_MARGIN
+        and _question_requests_chart_scalar_reading(question_event.question)
+        and not _question_requests_calculation(question_event.question)
+    ):
+        return True
+
+    if _answer_looks_unanswerable(candidate_text):
+        return True
+    if _answer_looks_formula_like(candidate_text) and not _answer_looks_formula_like(initial_text):
+        return True
+
+    initial_norm = _normalize_answer_for_telemetry(initial_text)
+    candidate_norm = _normalize_answer_for_telemetry(candidate_text)
+    candidate_is_much_longer = (
+        len(candidate_text) >= len(initial_text) + 35
+        or len(_answer_selection_tokens(candidate_text))
+        >= len(_answer_selection_tokens(initial_text)) + 4
+    )
+
+    if (
+        _answer_contains_initial_span(candidate_text, initial_text)
+        or initial_norm in candidate_norm
+    ) and (
+        candidate_is_much_longer or _answer_has_trailing_explanation(candidate_text, initial_text)
+    ):
+        return True
+    return bool(
+        candidate_is_much_longer
+        and (
+            _answer_looks_list_like(candidate_text)
+            or _answer_looks_verbose_retry_context(candidate_text)
+        )
+    )
+
+
+def _retry_answer_looks_like_verbose_extension(
+    candidate: str | None,
+    incumbent: str | None,
+) -> bool:
+    if not candidate or not incumbent:
+        return False
+    if not _answer_contains_initial_span(candidate, incumbent):
+        return False
+    candidate_text = str(candidate).strip()
+    incumbent_text = str(incumbent).strip()
+    if _normalize_answer_for_telemetry(candidate_text) == _normalize_answer_for_telemetry(
+        incumbent_text
+    ):
+        return False
+    return bool(
+        len(candidate_text) >= len(incumbent_text) + 12
+        or len(_answer_selection_tokens(candidate_text))
+        >= len(_answer_selection_tokens(incumbent_text)) + 2
+        or _answer_has_trailing_explanation(candidate_text, incumbent_text)
+    )
+
+
+def _retry_extension_adds_required_fields(candidate: str | None, question_text: str | None) -> bool:
+    """Avoid blocking a retry that clearly completes a multi-field contract."""
+
+    if not candidate or not question_text:
+        return False
+    question = str(question_text).lower()
+    candidate_text = str(candidate)
+    if re.search(r"\bmin(?:imum)?\s*/?\s*typ(?:ical)?\s*/?\s*max(?:imum)?\b", question, re.I):
+        return bool(
+            re.search(r"\bmin(?:imum)?\b", candidate_text, re.I)
+            and re.search(r"\btyp(?:ical)?\b", candidate_text, re.I)
+            and re.search(r"\bmax(?:imum)?\b", candidate_text, re.I)
+        )
+    if re.search(r"\b(?:both|two|three|all)\b", question, re.I):
+        return bool(re.search(r"\s+(?:and|;)\s+", candidate_text, re.I))
+    return False
+
+
+def _answer_contains_initial_span(candidate: str | None, initial: str | None) -> bool:
+    candidate_norm = _canonical_answer_span_for_selection(candidate)
+    initial_norm = _canonical_answer_span_for_selection(initial)
+    if not candidate_norm or not initial_norm:
+        return False
+    return initial_norm in candidate_norm
+
+
+def _canonical_answer_span_for_selection(answer: str | None) -> str:
+    text = str(answer or "").strip().lower()
+    text = re.sub(r"^[a-e]\.\s+", "", text)
+    text = text.replace("_", " ")
+    text = text.replace("µ", "u")
+    text = re.sub(r"[\"'“”‘’]", "", text)
+    text = re.sub(r"[^a-z0-9.%+-]+", " ", text)
+    return " ".join(text.split())
+
+
+def _answer_has_trailing_explanation(candidate: str, initial: str) -> bool:
+    if not candidate or not initial:
+        return False
+    return bool(
+        re.match(
+            rf"^{re.escape(initial.strip())}\s*(?:(?:[,;:]|[-\u2013\u2014])\s+\S+|\(\S+)",
+            candidate.strip(),
+        )
+    )
+
+
+def _answer_looks_verbose_retry_context(answer: str | None) -> bool:
+    if not answer:
+        return False
+    return bool(
+        re.search(
+            r"\b(?:figure|table|row|caption|legend|axis|compared|because|using|shows|"
+            r"indicates|verified|confirm)\b",
+            str(answer),
+            re.I,
+        )
+    )
+
+
+def _maybe_accept_deterministic_finance_answer(
+    *,
+    question_event: QuestionEvent,
+    evidence: EvidenceEvent,
+    answer: AnswerEvent,
+    verdict: VerdictEvent,
+    recorder: TrajectoryRecorder | None = None,
+    retry_attempt: int = 0,
+) -> VerdictEvent:
+    """Override verifier false-rejects only when evidence independently agrees.
+
+    This is intentionally conservative: it never invents a new answer. It only
+    accepts the current cited answer when a deterministic, gold-free finance
+    table reconstruction from the same packets produces the same value.
+    """
+
+    if verdict.supported:
+        return verdict
+    if str(question_event.domain or "").lower() != "finance":
+        return verdict
+    if not answer.citations or _answer_looks_unanswerable(answer.answer):
+        return verdict
+
+    adjudication = infer_finance_answer_from_evidence(
+        question_event.question,
+        evidence.packets,
+        answer_type=question_event.answer_type,
+    )
+    if not adjudication or not finance_answers_match(answer.answer, adjudication):
+        return verdict
+
+    diagnostics = dict(verdict.diagnostics or {})
+    diagnostics["finance_adjudication"] = {
+        "mechanism": adjudication.mechanism,
+        "candidate_answer": adjudication.answer,
+        "packet_ids": list(adjudication.packet_ids),
+    }
+    if recorder is not None:
+        _add_debug_event(
+            recorder,
+            stage="verify",
+            event_type="selection",
+            retry_attempt=retry_attempt,
+            payload={
+                "selected": "deterministic_finance_adjudication",
+                "mechanism": adjudication.mechanism,
+                "candidate_answer": adjudication.answer,
+                "prior_next_action": verdict.next_action,
+                "prior_reason": verdict.reason,
+            },
+        )
+    return VerdictEvent(
+        supported=True,
+        reason=(
+            "Deterministic finance evidence adjudication confirmed the cited "
+            f"answer from the same evidence packets: {adjudication.rationale}"
+        ),
+        next_action="accept",
+        confidence=max(float(verdict.confidence or 0.0), float(answer.confidence or 0.0)),
+        diagnostics=diagnostics,
+    )
 
 
 def _question_requests_single_entity(question_text: str | None) -> bool:
@@ -1940,11 +2398,188 @@ def _question_requests_single_entity(question_text: str | None) -> bool:
     )
 
 
+def _question_requests_named_entity_answer(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    normalized = str(question_text).lower()
+    return bool(
+        re.search(
+            r"\bwhich\s+(?:[\w-]+\s+){0,4}"
+            r"(?:asset\s+class|class\s+of\s+securities|security\s+class|country|"
+            r"company|entity|region|line|series|label|row|variable|parameter)\b",
+            normalized,
+        )
+    )
+
+
+def _question_requests_variable(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    return bool(re.search(r"\b(?:variable|y[- ]axis|x[- ]axis)\b", str(question_text), re.I))
+
+
+def _question_requests_visual_numeric_estimate(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    question = str(question_text)
+    return bool(
+        re.search(r"\b(?:estimate|approximately|approximate|rounded|nearest)\b", question, re.I)
+        and re.search(
+            r"\b(?:aspect\s+ratio|ratio|width|height|visible|borders?|curve|axis|chart|figure)\b",
+            question,
+            re.I,
+        )
+    )
+
+
+def _question_requests_chart_scalar_reading(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    question = str(question_text)
+    return bool(
+        re.search(r"\b(?:chart|figure|curve|axis|caption|plot|graph)\b", question, re.I)
+        and re.search(
+            r"\b(?:what|which|read|allowed|at|ambient|temperature|dissipation|voltage|current)\b",
+            question,
+            re.I,
+        )
+    )
+
+
+def _question_requests_calculation(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    return bool(
+        re.search(
+            r"\b(?:calculate|calculation|computed?|formula|equation|divider|show your)\b",
+            str(question_text),
+            re.I,
+        )
+    )
+
+
+def _question_requests_period_range(question_text: str | None) -> bool:
+    if not question_text:
+        return False
+    question = str(question_text)
+    return bool(
+        re.search(
+            r"\b(?:during which period|which period|date range|time period)\b", question, re.I
+        )
+        or (
+            re.search(
+                r"\b(?:decline|increase|fall|rise|dropped|fastest|steepest)\b", question, re.I
+            )
+            and re.search(r"\b(?:period|from|to|between)\b", question, re.I)
+        )
+    )
+
+
 def _entity_retry_selection_margin(question_text: str | None) -> float:
     normalized = (question_text or "").lower()
     if re.search(r"\b(?:variable|parameter|y[- ]axis|x[- ]axis)\b", normalized):
         return 0.25
     return _RETRY_SELECTION_CONFIDENCE_MARGIN
+
+
+def _answer_is_concise_shape(answer: str | None) -> bool:
+    if not answer or _answer_looks_unanswerable(answer):
+        return False
+    text = str(answer).strip()
+    if len(text) > 80:
+        return False
+    return len(_answer_selection_tokens(text)) <= 5
+
+
+def _answer_looks_formula_like(answer: str | None) -> bool:
+    if not answer:
+        return False
+    text = str(answer)
+    return bool("=" in text and re.search(r"[+*/()]|\b(?:eff|loss|offset)\b", text, re.I))
+
+
+def _answer_looks_numeric_scalar(answer: str | None) -> bool:
+    if not answer:
+        return False
+    text = str(answer).strip()
+    return bool(re.fullmatch(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?\s*[A-Za-zµμ%]{0,8}", text))
+
+
+def _answer_starts_with_numeric_scalar(answer: str | None) -> bool:
+    if not answer:
+        return False
+    return bool(re.match(r"^\s*[-+]?\d+(?:,\d{3})*(?:\.\d+)?\s*[A-Za-zµμ%]{0,8}\b", str(answer)))
+
+
+def _answer_decimal_places(answer: str | None) -> int:
+    if not answer:
+        return 0
+    match = re.search(r"[-+]?\d+(?:,\d{3})*(?:\.(?P<decimals>\d+))?", str(answer))
+    if not match:
+        return 0
+    return len(match.group("decimals") or "")
+
+
+def _answer_looks_single_date(answer: str | None) -> bool:
+    if not answer:
+        return False
+    text = str(answer).strip()
+    month = (
+        r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
+        r"Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    )
+    return bool(re.fullmatch(rf"{month},?\s+\d{{4}}", text, re.I))
+
+
+def _answer_looks_date_range(answer: str | None) -> bool:
+    if not answer:
+        return False
+    text = str(answer).strip()
+    month = (
+        r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
+        r"Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    )
+    return bool(
+        re.search(
+            rf"{month},?\s+\d{{4}}\s*(?:to|through|[-\u2013\u2014])\s*{month},?\s+\d{{4}}",
+            text,
+            re.I,
+        )
+    )
+
+
+def _answer_looks_numeric_status_surrogate(answer: str | None) -> bool:
+    if not answer:
+        return False
+    text = str(answer).strip()
+    if _answer_looks_unanswerable(text):
+        return False
+    numeric = bool(re.search(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?\s*%?", text))
+    status = bool(
+        re.search(
+            r"\b(?:min(?:imum)?|max(?:imum)?|typ(?:ical)?|score|percentage|points?)\b",
+            text,
+            re.I,
+        )
+    )
+    if numeric and status:
+        return True
+    return bool(re.fullmatch(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?\s*%?", text))
+
+
+def _answers_are_same_shape_scalars(left: str | None, right: str | None) -> bool:
+    if not _answer_is_concise_shape(left) or not _answer_is_concise_shape(right):
+        return False
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    scalar_pattern = r"[-+]?\d+(?:\.\d+)?\s*[A-Za-zµμ%]{0,8}"
+    left_numeric = bool(re.fullmatch(scalar_pattern, left_text))
+    right_numeric = bool(re.fullmatch(scalar_pattern, right_text))
+    if left_numeric or right_numeric:
+        return left_numeric and right_numeric
+    return (
+        len(_answer_selection_tokens(left_text)) == len(_answer_selection_tokens(right_text)) == 1
+    )
 
 
 def _answer_looks_list_like(answer: str | None) -> bool:
@@ -2015,6 +2650,35 @@ def _should_keep_best_unsupported_on_retry_abstain(
     return float(answer.confidence or 0.0) >= _ABSTAIN_OVERRIDE_MIN_CONFIDENCE
 
 
+def _should_keep_cited_answer_on_initial_visual_estimate_abstain(
+    answer: AnswerEvent,
+    *,
+    question_event: QuestionEvent,
+    verdict: VerdictEvent,
+    retries_used: int,
+) -> bool:
+    """Keep a cited visual estimate when the first verifier abstains.
+
+    This is narrower than the retry-abstain guard. It only applies before any
+    retry, only for non-unanswerable numeric visual-estimate questions, and
+    only when the reasoner produced a concise cited scalar. The goal is to
+    avoid erasing approximate measurements when the verifier cannot read the
+    visual crop with enough certainty.
+    """
+
+    if retries_used != 0 or verdict.supported or verdict.next_action != "abstain":
+        return False
+    if _answer_type_is_unanswerable(question_event.answer_type):
+        return False
+    if not answer.citations or _answer_looks_unanswerable(answer.answer):
+        return False
+    if float(answer.confidence or 0.0) < 0.70:
+        return False
+    if not _question_requests_visual_numeric_estimate(question_event.question):
+        return False
+    return _answer_looks_numeric_scalar(answer.answer)
+
+
 def _should_allow_reasoner_shape_retry(
     *,
     action: str,
@@ -2038,6 +2702,16 @@ def _should_allow_reasoner_shape_retry(
         return False
     if not answer.citations:
         return False
+    if _question_requests_period_range(question_event.question) and _answer_looks_single_date(
+        answer.answer
+    ):
+        return True
+    if _verdict_has_answer_shape_failure(verdict):
+        failures = set(_verdict_answer_shape_failures(verdict))
+        return not (
+            failures <= {"wrong_row_risk", "legend_binding_risk"}
+            and _answer_is_concise_shape(answer.answer)
+        )
     reason = verdict.reason.lower()
     if _question_requests_single_entity(question_event.question) and _answer_looks_list_like(
         answer.answer
@@ -2058,6 +2732,151 @@ def _should_allow_reasoner_shape_retry(
         answer.answer,
         answer_type=question_event.answer_type,
         verifier_reason=verdict.reason,
+    )
+
+
+def _build_reasoner_repair_hint(
+    verdict: VerdictEvent,
+    *,
+    answer_event: AnswerEvent,
+    question_event: QuestionEvent,
+    evidence: EvidenceEvent | None = None,
+) -> str:
+    """Build targeted same-evidence repair guidance from verifier diagnostics."""
+
+    parts: list[str] = []
+    reason = str(verdict.reason or "").strip()
+    if reason:
+        parts.append(reason)
+    if answer_event.answer:
+        parts.append(f"Previous answer: {answer_event.answer}")
+    if answer_event.citations:
+        parts.append("Previous cited packet_ids: " + ", ".join(answer_event.citations))
+
+    failures = set(_verdict_answer_shape_failures(verdict))
+    question = str(question_event.question or "").lower()
+
+    if _question_requests_period_range(question_event.question):
+        parts.append(
+            "Targeted chart-period repair: the question asks for a period/range, "
+            "so do not answer with a single date or turning point. Bind the start "
+            "and end labels of the steepest visual interval from the same chart "
+            "and answer as '<start> to <end>'."
+        )
+    if "missing_field" in failures:
+        parts.append(
+            "Targeted multi-field repair: list every field requested by the question. "
+            "If the question asks for a value plus a label, condition, cue, or "
+            "min/typ/max status, include both in the concise answer."
+        )
+    if "label_value_mismatch" in failures:
+        parts.append(
+            "Targeted label-value repair: do not return only the row/header label. "
+            "Read the requested numeric/code/text value from the same cited row, "
+            "including its unit when the question asks for one."
+        )
+    if "wrong_row_risk" in failures:
+        if "corresponding" in question or "corresponding_row_binding_cues" in verdict.diagnostics:
+            parts.append(
+                "Targeted corresponding-row repair: first identify the source "
+                "row/year/entity named in the setup clause, then read the requested "
+                "output field from that same row. Do not choose the min/max of the "
+                "output field itself unless the question explicitly asks for that."
+            )
+        else:
+            parts.append(
+                "Targeted table-row repair: verify the exact row/entity against all "
+                "question cues such as among, lowest/highest, part number, condition, "
+                "and value before selecting the answer."
+            )
+        parts.append(
+            "Adjudicate candidates internally using the same evidence: current answer; "
+            "same-row completed answer; nearby confusable row answer. Output only the "
+            "candidate that satisfies the question contract and cited evidence."
+        )
+    if "checkbox_binding_risk" in failures:
+        parts.append(
+            "Targeted checkbox repair: bind each check mark to the nearest Yes/No or "
+            "status label, evaluate every required checkbox condition separately, and "
+            "return the concise boolean answer."
+        )
+    if "legend_binding_risk" in failures:
+        parts.append(
+            "Targeted chart-binding repair: bind the series style/legend, panel or "
+            "caption, axes/ticks, and any footnote before reading the value or label. "
+            "Adjudicate the current answer against the alternate nearby series using "
+            "only the same evidence."
+        )
+    repair_failures = set(failures)
+    if _question_requests_period_range(question_event.question):
+        repair_failures.add("legend_binding_risk")
+    if repair_failures:
+        repair_context = build_same_evidence_repair_context(
+            question_event,
+            evidence,
+            answer_event,
+            repair_failures,
+        )
+        if repair_context:
+            parts.append(repair_context)
+    if failures:
+        parts.append(_repair_candidate_worksheet(failures))
+
+    return "\n".join(dict.fromkeys(parts))
+
+
+def _repair_candidate_worksheet(failures: set[str]) -> str:
+    """Prompt a bounded candidate adjudication pass without extra model samples."""
+
+    candidate_b = (
+        "Candidate B = same cited row/entity/series, repaired to include every requested field"
+    )
+    candidate_c = "Candidate C = nearest plausible alternative from the same evidence"
+    if "wrong_row_risk" in failures:
+        candidate_c = "Candidate C = nearby confusable row/entity using the same headers/units"
+    elif "checkbox_binding_risk" in failures:
+        candidate_b = "Candidate B = checkbox marks bound to nearest labels for every condition"
+        candidate_c = "Candidate C = alternate Yes/No binding if the mark is visually ambiguous"
+    elif "legend_binding_risk" in failures:
+        candidate_b = "Candidate B = current series after checking legend, caption, axes, footnotes"
+        candidate_c = "Candidate C = alternate nearby series/panel using the same evidence"
+    elif "label_value_mismatch" in failures:
+        candidate_b = "Candidate B = requested value read from the same cited row/header"
+    elif "missing_field" in failures:
+        candidate_b = "Candidate B = same answer completed with all requested fields"
+
+    return (
+        "Same-evidence repair worksheet (do internally; do not include this worksheet "
+        "in the final answer):\n"
+        "- Candidate A = previous answer.\n"
+        f"- {candidate_b}.\n"
+        f"- {candidate_c}.\n"
+        "- Select the candidate that exactly satisfies the question answer contract "
+        "and is best supported by cited packet text/crops.\n"
+        "- Return only the selected concise scorer-shaped answer JSON."
+    )
+
+
+def _verdict_answer_shape_failures(verdict: VerdictEvent) -> tuple[str, ...]:
+    raw = verdict.diagnostics.get("answer_shape_failure")
+    if isinstance(raw, str):
+        return (raw,)
+    if isinstance(raw, list):
+        return tuple(str(value) for value in raw if isinstance(value, str))
+    return ()
+
+
+def _verdict_has_answer_shape_failure(verdict: VerdictEvent) -> bool:
+    return any(
+        value
+        in {
+            "missing_field",
+            "label_value_mismatch",
+            "wrong_row_risk",
+            "legend_binding_risk",
+            "checkbox_binding_risk",
+        }
+        for value in _verdict_answer_shape_failures(verdict)
     )
 
 

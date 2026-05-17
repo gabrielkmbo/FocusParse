@@ -29,13 +29,16 @@ from focusparse.pipeline.workflow import (
     FocusWorkflow,
     SimpleBaselineAgent,
     WorkflowResult,
+    _build_reasoner_repair_hint,
     _citations_from_packets,
     _focused_retry_evidence,
     _images_by_page,
     _infer_doc_id,
     _is_better_unsupported_answer,
+    _maybe_accept_deterministic_finance_answer,
     _page_number_from_filename,
     _should_allow_reasoner_shape_retry,
+    _should_preserve_initial_answer_on_supported_retry,
     _should_use_react_inspector,
     _verifier_requests_visual_readability_retry,
     _verifier_target_packet_ids,
@@ -351,6 +354,462 @@ def test_retry_answer_selector_prefers_variable_over_descriptive_fragment():
     )
 
 
+def test_retry_answer_selector_rejects_formula_over_variable_answer():
+    incumbent = AnswerEvent(
+        answer="I_OUT is the output current from ADC",
+        citations=["pkt_000", "pkt_005"],
+        confidence=0.65,
+    )
+    candidate = AnswerEvent(
+        answer="Prx,ac = (VRECT x IOUT) / EffRECT + Pres_loss + Poffset",
+        citations=["pkt_005", "pkt_000"],
+        confidence=0.72,
+    )
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Which Y-axis variable, VRECT or IOUT, should be used to calculate output power at OUT?"
+        ),
+    )
+
+
+def test_retry_answer_selector_prefers_same_shape_retry_within_tiny_margin():
+    incumbent = AnswerEvent(answer="0.90 V", citations=["pkt_003", "pkt_007"], confidence=0.95)
+    candidate = AnswerEvent(answer="0.56 V", citations=["pkt_007", "pkt_003"], confidence=0.91)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="What voltage is calculated from the resistor divider equation?",
+    )
+
+
+def test_retry_answer_selector_rejects_unsupported_verbose_chart_scalar_drift():
+    incumbent = AnswerEvent(answer="0.9 W", citations=["pkt_000", "pkt_003"], confidence=0.95)
+    candidate = AnswerEvent(
+        answer="1.8 W; Figure 11 caption confirms the Four-Layer PCB curve",
+        citations=["pkt_000", "pkt_003"],
+        confidence=0.82,
+    )
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "According to Figure 11 and its caption, what is the maximum power "
+            "dissipation allowed at an ambient temperature of 100C for a four-layer PCB?"
+        ),
+    )
+
+
+def test_retry_answer_selector_rejects_unsupported_same_shape_chart_scalar_drift():
+    incumbent = AnswerEvent(answer="0.9 W", citations=["pkt_000", "pkt_003"], confidence=0.95)
+    candidate = AnswerEvent(answer="1.5 W", citations=["pkt_000", "pkt_003"], confidence=0.97)
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "According to Figure 11 and its caption, what is the maximum power "
+            "dissipation allowed at an ambient temperature of 100C for a four-layer PCB?"
+        ),
+    )
+
+
+def test_retry_answer_selector_rejects_same_citation_scalar_drift():
+    incumbent = AnswerEvent(answer="3", citations=["pkt_000"], confidence=0.97)
+    candidate = AnswerEvent(answer="4", citations=["pkt_000"], confidence=0.99)
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="How many signal lines connect SPI-A and SPI-B to the receiver?",
+    )
+
+
+def test_retry_answer_selector_allows_approximate_chart_value_refinement():
+    incumbent = AnswerEvent(answer="0.2 score", citations=["pkt_006", "pkt_000"], confidence=0.76)
+    candidate = AnswerEvent(answer="0.25 score", citations=["pkt_000", "pkt_006"], confidence=0.72)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Estimate the value of the blue EMEs curve for the year 2012 as shown "
+            "in the graph 'G. Status of financial stability objectives'. What is "
+            "the approximate value and its unit?"
+        ),
+    )
+
+
+def test_retry_answer_selector_rejects_same_precision_visual_estimate_drift():
+    incumbent = AnswerEvent(answer="Vgs = 2.9 V", citations=["pkt_000", "pkt_002"], confidence=0.95)
+    candidate = AnswerEvent(answer="Vgs = 3.0 V", citations=["pkt_002", "pkt_000"], confidence=0.93)
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Using the curve's label, determine the approximate gate-source voltage "
+            "(Vgs) set in the circuit to achieve this operation point."
+        ),
+    )
+
+
+def test_retry_answer_selector_prefers_concise_span_over_verbose_expression():
+    incumbent = AnswerEvent(
+        answer="MAX 1.35 µVpp - TYP 1 µVpp = 0.35 µVpp",
+        citations=["pkt_000"],
+        confidence=0.98,
+    )
+    candidate = AnswerEvent(answer="0.35 µVpp", citations=["pkt_000"], confidence=0.98)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="What is the difference (MAX minus TYP) in input-referred noise?",
+    )
+
+
+def test_retry_answer_selector_prefers_period_range_over_single_date():
+    incumbent = AnswerEvent(answer="Jan 2000", citations=["pkt_000"], confidence=0.87)
+    candidate = AnswerEvent(answer="Feb 2020 to Apr 2020", citations=["pkt_000"], confidence=0.43)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="During which period did the Consumer Sentiment Index decline the fastest?",
+    )
+
+
+def test_retry_answer_selector_rejects_opposite_boolean_drift_within_margin():
+    incumbent = AnswerEvent(answer="yes", citations=["pkt_000", "pkt_002"], confidence=0.92)
+    candidate = AnswerEvent(answer="no", citations=["pkt_000", "pkt_002"], confidence=0.90)
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="Does the operation point fall within the de-rated SOA?",
+    )
+
+
+def test_retry_answer_selector_rejects_unanswerable_over_cited_answer():
+    incumbent = AnswerEvent(answer="yes", citations=["pkt_000", "pkt_005"], confidence=0.79)
+    candidate = AnswerEvent(answer="Unanswerable", citations=["pkt_000"], confidence=0.97)
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="Does the operation point fall within the de-rated SOA?",
+    )
+
+
+def test_retry_answer_selector_rejects_verbose_extension_of_concise_answer():
+    incumbent = AnswerEvent(answer="FX bonds", citations=["pkt_000", "pkt_003"], confidence=0.84)
+    candidate = AnswerEvent(
+        answer="C. FX bonds, about 0.0 percentage points",
+        citations=["pkt_000"],
+        confidence=0.91,
+    )
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Which asset class among those shown would exhibit the smallest estimated "
+            "change in response to a one standard deviation decrease in the VIX?"
+        ),
+    )
+
+
+def test_retry_answer_selector_rejects_numeric_rationale_extension():
+    incumbent = AnswerEvent(answer="12", citations=["pkt_003"], confidence=0.97)
+    candidate = AnswerEvent(answer="12 instead of 14", citations=["pkt_003"], confidence=0.95)
+
+    assert not _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text="What actual prescaler value applies when LENPRE=14?",
+    )
+
+
+def test_retry_answer_selector_prefers_entity_over_numeric_surrogate():
+    incumbent = AnswerEvent(
+        answer="0.000; minimum",
+        citations=["pkt_000", "pkt_002"],
+        confidence=0.91,
+    )
+    candidate = AnswerEvent(answer="FX bonds", citations=["pkt_000", "pkt_002"], confidence=0.66)
+
+    assert _is_better_unsupported_answer(
+        candidate,
+        incumbent,
+        question_text=(
+            "Which asset class among those shown would exhibit the smallest estimated "
+            "change in response to a one standard deviation decrease in the VIX?"
+        ),
+    )
+
+
+def test_reasoner_repair_hint_requires_period_range_for_chart_period_question():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="Single-date answer does not identify the full decline period.",
+        next_action="expand_context",
+        confidence=0.7,
+        diagnostics={"target_packet_ids": ["pkt_000"]},
+    )
+    answer = AnswerEvent(answer="Jan 2000", citations=["pkt_000"], confidence=0.8)
+    question = QuestionEvent(
+        example_id="ex",
+        question="During which period did the Consumer Sentiment Index decline the fastest?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+        domain="finance",
+    )
+
+    hint = _build_reasoner_repair_hint(verdict, answer_event=answer, question_event=question)
+
+    assert "period/range" in hint
+    assert "<start> to <end>" in hint
+
+
+def test_reasoner_repair_hint_includes_period_candidates_without_shape_diagnostic():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="Need chart context.",
+        next_action="expand_context",
+        confidence=0.7,
+        diagnostics={"missing_context": ["caption", "legend"]},
+    )
+    answer = AnswerEvent(answer="Jan 2000", citations=["pkt_000"], confidence=0.8)
+    question = QuestionEvent(
+        example_id="ex",
+        question="During which period did the Consumer Sentiment Index decline the fastest?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+        domain="finance",
+    )
+    evidence = EvidenceEvent(
+        packets=[
+            EvidencePacket(
+                packet_id="pkt_000",
+                page=29,
+                bbox_norm=(0.1, 0.2, 0.9, 0.8),
+                region_type="Picture",
+                page_thumbnail_ref="/cache/page.png",
+                local_crop_ref="/cache/crop.png",
+                ocr_snippet=(
+                    "Jan 2000: -2.0% Mar 2003: +32.8% "
+                    "Feb 2020: +29.0% Apr 2020: +43.6% Jun 2022: +17.6%"
+                ),
+                provenance=PacketProvenance(tool="deterministic_inspector", args_hash=""),
+            )
+        ]
+    )
+
+    hint = _build_reasoner_repair_hint(
+        verdict,
+        answer_event=answer,
+        question_event=question,
+        evidence=evidence,
+    )
+
+    assert "Chart period candidates" in hint
+    assert "Feb 2020 to Apr 2020 (2 months)" in hint
+
+
+def test_supported_retry_preserves_concise_answer_over_verbose_rationale():
+    initial = AnswerEvent(answer="[31:16]", citations=["pkt_000"], confidence=0.98)
+    candidate = AnswerEvent(
+        answer="[31:16] - Reserved. RAZ.",
+        citations=["pkt_000"],
+        confidence=0.98,
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="Which bit fields are guaranteed to always read as zero?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+        domain="datasheet",
+    )
+
+    assert _should_preserve_initial_answer_on_supported_retry(
+        initial,
+        candidate,
+        question_event=question,
+        retries_used=1,
+    )
+
+
+def test_supported_retry_preserves_code_identifier_with_spacing_variant():
+    initial = AnswerEvent(answer="DPD_MODE1", citations=["pkt_004", "pkt_006"], confidence=0.94)
+    candidate = AnswerEvent(
+        answer="DPD MODE1, NO M-TABLE UPDATE SINCE Tx RMS POWER < MAX POWER",
+        citations=["pkt_006"],
+        confidence=0.95,
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="Which DPD mode results in fewer M-table updates?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+        domain="datasheet",
+    )
+
+    assert _should_preserve_initial_answer_on_supported_retry(
+        initial,
+        candidate,
+        question_event=question,
+        retries_used=1,
+    )
+
+
+def test_supported_retry_preserves_high_confidence_chart_scalar_estimate():
+    initial = AnswerEvent(answer="0.9 W", citations=["pkt_000"], confidence=0.93)
+    candidate = AnswerEvent(answer="1.5 W", citations=["pkt_000"], confidence=0.95)
+    question = QuestionEvent(
+        example_id="ex",
+        question=(
+            "According to Figure 11 and its caption, what is the maximum power "
+            "dissipation allowed at an ambient temperature of 100C for a four-layer PCB?"
+        ),
+        doc_id="doc",
+        pages_available=1,
+        answer_type="numeric",
+        domain="datasheet",
+    )
+
+    assert _should_preserve_initial_answer_on_supported_retry(
+        initial,
+        candidate,
+        question_event=question,
+        retries_used=1,
+    )
+
+
+def test_supported_retry_does_not_preserve_scalar_when_retry_is_same_shape():
+    initial = AnswerEvent(answer="0.90 V", citations=["pkt_003"], confidence=0.95)
+    candidate = AnswerEvent(answer="0.56 V", citations=["pkt_003"], confidence=0.91)
+    question = QuestionEvent(
+        example_id="ex",
+        question="What voltage is calculated from the resistor divider equation?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="numeric",
+        domain="datasheet",
+    )
+
+    assert not _should_preserve_initial_answer_on_supported_retry(
+        initial,
+        candidate,
+        question_event=question,
+        retries_used=1,
+    )
+
+
+def test_supported_retry_preserves_parenthetical_extension():
+    initial = AnswerEvent(answer="12", citations=["pkt_004"], confidence=0.97)
+    candidate = AnswerEvent(answer="12 (not 14)", citations=["pkt_004"], confidence=0.98)
+    question = QuestionEvent(
+        example_id="ex",
+        question="If LENPRE is programmed to 14, what prescaler value is used?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="numeric",
+        domain="datasheet",
+    )
+
+    assert _should_preserve_initial_answer_on_supported_retry(
+        initial,
+        candidate,
+        question_event=question,
+        retries_used=1,
+    )
+
+
+def test_chart_period_single_date_allows_reasoner_retry():
+    answer = AnswerEvent(answer="Jan 2000", citations=["pkt_000"], confidence=0.58)
+    verdict = VerdictEvent(
+        supported=False,
+        reason="Single date does not answer the period question.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+        diagnostics={"answer_shape_failure": ["wrong_row_risk", "legend_binding_risk"]},
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="During which period did the Consumer Sentiment Index decline the fastest?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+        domain="finance",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
+def test_chart_period_single_date_allows_reasoner_retry_without_shape_diagnostic():
+    answer = AnswerEvent(answer="Jun, 2022", citations=["pkt_000"], confidence=0.75)
+    verdict = VerdictEvent(
+        supported=False,
+        reason=(
+            "The chart shows Consumer Sentiment Index values, but does not "
+            "identify which period had the fastest decline."
+        ),
+        next_action="escalate_reasoner",
+        confidence=0.75,
+    )
+    question = QuestionEvent(
+        example_id="ex",
+        question="During which period did the Consumer Sentiment Index decline the fastest?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+        domain="finance",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
+def test_supported_retry_does_not_preserve_when_retry_fixes_contract_failure():
+    initial = AnswerEvent(answer="0.697", citations=["pkt_000"], confidence=0.90)
+    candidate = AnswerEvent(answer="min: 0.697 V", citations=["pkt_000"], confidence=0.88)
+    question = QuestionEvent(
+        example_id="ex",
+        question="Which value (min, typ, or max) should be used, and what voltage?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+        domain="datasheet",
+    )
+
+    assert not _should_preserve_initial_answer_on_supported_retry(
+        initial,
+        candidate,
+        question_event=question,
+        retries_used=1,
+    )
+
+
 def test_variable_question_allows_reasoner_shape_retry():
     verdict = VerdictEvent(
         supported=False,
@@ -415,6 +874,195 @@ def test_verbose_numeric_answer_allows_reasoner_shape_retry():
     )
 
 
+def test_contract_diagnostic_allows_reasoner_shape_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The proposed answer violates the question answer contract.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+        diagnostics={"answer_shape_failure": ["missing_field"]},
+    )
+    answer = AnswerEvent(answer="0.697", citations=["pkt_003"], confidence=0.72)
+    question = QuestionEvent(
+        example_id="ex",
+        question=(
+            "Which value (min, typ, or max) should be used, and what is the corresponding voltage?"
+        ),
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
+def test_wrong_row_only_diagnostic_blocks_concise_scalar_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The cited table row may be a nearby confusable row.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+        diagnostics={"answer_shape_failure": ["wrong_row_risk"]},
+    )
+    answer = AnswerEvent(answer="5", citations=["pkt_003"], confidence=0.98)
+    question = QuestionEvent(
+        example_id="ex",
+        question="How many entries in the table are page shareable?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="numeric",
+    )
+
+    assert not _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
+def test_checkbox_diagnostic_allows_reasoner_shape_retry():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The checkbox mark is bound to the wrong adjacent label.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+        diagnostics={"answer_shape_failure": ["checkbox_binding_risk"]},
+    )
+    answer = AnswerEvent(answer="no", citations=["pkt_003"], confidence=0.72)
+    question = QuestionEvent(
+        example_id="ex",
+        question="Based on the check marks, did the registrant file all required reports?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="boolean",
+    )
+
+    assert _should_allow_reasoner_shape_retry(
+        action="escalate_reasoner",
+        answer=answer,
+        verdict=verdict,
+        question_event=question,
+        max_evidence_retries=1,
+    )
+
+
+def test_reasoner_repair_hint_targets_corresponding_row_adjudication():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The answer chose the output-field minimum instead of the corresponding row.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+        diagnostics={
+            "answer_shape_failure": ["wrong_row_risk"],
+            "corresponding_row_binding_cues": ["source_row", "output_field"],
+        },
+    )
+    answer = AnswerEvent(answer="169,148; minimum", citations=["pkt_003"], confidence=0.72)
+    question = QuestionEvent(
+        example_id="ex",
+        question=(
+            "For the year in which Products net sales reached their minimum among the "
+            "three years shown, what was the corresponding Gross margin value?"
+        ),
+        doc_id="doc",
+        pages_available=1,
+        answer_type="exact_match",
+    )
+    evidence = EvidenceEvent(
+        packets=[
+            EvidencePacket(
+                packet_id="pkt_003",
+                page=1,
+                bbox_norm=(0.1, 0.1, 0.8, 0.8),
+                page_thumbnail_ref="/tmp/page.png",
+                local_crop_ref="/tmp/crop.png",
+                text_layer_snippet=(
+                    "Products net sales 297,392 220,747 198,270\n"
+                    "Services net sales 96,169 85,200 78,129\n"
+                    "Gross margin 169,148 180,683 170,782"
+                ),
+                provenance=PacketProvenance(tool="test", args_hash=""),
+            )
+        ]
+    )
+
+    hint = _build_reasoner_repair_hint(
+        verdict,
+        answer_event=answer,
+        question_event=question,
+        evidence=evidence,
+    )
+
+    assert "Previous answer: 169,148; minimum" in hint
+    assert "Previous cited packet_ids: pkt_003" in hint
+    assert "Targeted corresponding-row repair" in hint
+    assert "Same-evidence repair context" in hint
+    assert "Products net sales" in hint
+    assert "Gross margin" in hint
+    assert "Services net sales" not in hint
+    assert "Adjudicate candidates internally" in hint
+    assert "Same-evidence repair worksheet" in hint
+    assert "Candidate A = previous answer" in hint
+    assert "nearby confusable row/entity" in hint
+
+
+def test_reasoner_repair_hint_targets_checkbox_binding():
+    verdict = VerdictEvent(
+        supported=False,
+        reason="The checkbox mark is bound to the wrong adjacent label.",
+        next_action="escalate_reasoner",
+        confidence=0.75,
+        diagnostics={"answer_shape_failure": ["checkbox_binding_risk"]},
+    )
+    answer = AnswerEvent(answer="no", citations=["pkt_003"], confidence=0.72)
+    question = QuestionEvent(
+        example_id="ex",
+        question="Based on the check marks, did the registrant file all required reports?",
+        doc_id="doc",
+        pages_available=1,
+        answer_type="boolean",
+    )
+    evidence = EvidenceEvent(
+        packets=[
+            EvidencePacket(
+                packet_id="pkt_003",
+                page=1,
+                bbox_norm=(0.1, 0.1, 0.8, 0.8),
+                page_thumbnail_ref="/tmp/page.png",
+                local_crop_ref="/tmp/crop.png",
+                text_layer_snippet=(
+                    "Large accelerated filer Yes [X] No [ ]\n"
+                    "Filed all required reports Yes [X] No [ ]"
+                ),
+                provenance=PacketProvenance(tool="test", args_hash=""),
+            )
+        ]
+    )
+
+    hint = _build_reasoner_repair_hint(
+        verdict,
+        answer_event=answer,
+        question_event=question,
+        evidence=evidence,
+    )
+
+    assert "Previous answer: no" in hint
+    assert "Targeted checkbox repair" in hint
+    assert "Same-evidence repair context" in hint
+    assert "Filed all required reports Yes [X] No [ ]" in hint
+    assert "nearest Yes/No" in hint
+    assert "Candidate B = checkbox marks bound to nearest labels" in hint
+    assert "alternate Yes/No binding" in hint
+
+
 def test_concise_exact_answer_blocks_reasoner_shape_retry():
     verdict = VerdictEvent(
         supported=False,
@@ -466,6 +1114,169 @@ def test_boolean_answer_blocks_verbose_reasoner_shape_retry():
         verdict=verdict,
         question_event=question,
         max_evidence_retries=1,
+    )
+
+
+def test_deterministic_finance_adjudication_accepts_false_rejected_answer():
+    question = QuestionEvent(
+        example_id="fin-aapl-20250927-0002",
+        question=(
+            "For the year in which 'Products' net sales reached their minimum among "
+            "the three years shown, what was the corresponding 'Gross margin' value, "
+            "and is this value also the minimum, typical, or maximum among the three "
+            "years' gross margins?"
+        ),
+        doc_id="aapl-20250927",
+        pages_available=1,
+        domain="finance",
+        answer_type="exact_match",
+    )
+    evidence = EvidenceEvent(
+        packets=[
+            _make_packet(packet_id="pkt_000", page=40, bbox=(0.0, 0.0, 1.0, 1.0)).model_copy(
+                update={
+                    "ocr_snippet": (
+                        "Gemini structured extraction: kind=table\n"
+                        "headers: Years ended | September 27, 2025 | September 28, 2024 | "
+                        "September 30, 2023\n"
+                        "candidate_rows: Products | $ 307,003 | $ 294,866 | $ 298,085 | "
+                        "Gross margin | 195,201 | 180,683 | 169,148\n"
+                        "confidence=0.95"
+                    )
+                }
+            )
+        ]
+    )
+    answer = AnswerEvent(answer="180,683; typical", citations=["pkt_000"], confidence=0.96)
+    verdict = VerdictEvent(
+        supported=False,
+        reason="Verifier selected the wrong year.",
+        next_action="escalate_reasoner",
+        confidence=0.7,
+    )
+
+    adjudicated = _maybe_accept_deterministic_finance_answer(
+        question_event=question,
+        evidence=evidence,
+        answer=answer,
+        verdict=verdict,
+    )
+
+    assert adjudicated.supported
+    assert adjudicated.next_action == "accept"
+    assert adjudicated.diagnostics["finance_adjudication"]["mechanism"] == (
+        "corresponding_value_status"
+    )
+
+
+def test_deterministic_finance_adjudication_does_not_accept_mismatch():
+    question = QuestionEvent(
+        example_id="fin-aapl-20250927-0002",
+        question=(
+            "For the year in which 'Products' net sales reached their minimum among "
+            "the three years shown, what was the corresponding 'Gross margin' value, "
+            "and is this value also the minimum, typical, or maximum among the three "
+            "years' gross margins?"
+        ),
+        doc_id="aapl-20250927",
+        pages_available=1,
+        domain="finance",
+        answer_type="exact_match",
+    )
+    evidence = EvidenceEvent(
+        packets=[
+            _make_packet(packet_id="pkt_000", page=40, bbox=(0.0, 0.0, 1.0, 1.0)).model_copy(
+                update={
+                    "ocr_snippet": (
+                        "headers: Years ended | September 27, 2025 | September 28, 2024 | "
+                        "September 30, 2023\n"
+                        "candidate_rows: Products | $ 307,003 | $ 294,866 | $ 298,085 | "
+                        "Gross margin | 195,201 | 180,683 | 169,148"
+                    )
+                }
+            )
+        ]
+    )
+    answer = AnswerEvent(answer="169,148; minimum", citations=["pkt_000"], confidence=0.99)
+    verdict = VerdictEvent(
+        supported=False,
+        reason="Still unsupported.",
+        next_action="escalate_reasoner",
+        confidence=0.7,
+    )
+
+    assert (
+        _maybe_accept_deterministic_finance_answer(
+            question_event=question,
+            evidence=evidence,
+            answer=answer,
+            verdict=verdict,
+        )
+        is verdict
+    )
+
+
+def test_deterministic_finance_adjudication_accepts_purchase_price_percent():
+    question = QuestionEvent(
+        example_id="fin-segment-percent",
+        question=(
+            "Using the information from the purchase price allocation and the "
+            "segment table showing the impact of acquisitions, determine which "
+            "business segment was primarily affected by the acquisition and "
+            "calculate what percentage of the total purchase price is represented "
+            "by the increase in net assets for that segment. Show your answer as "
+            "a percentage to the nearest whole number."
+        ),
+        doc_id="10-K",
+        pages_available=2,
+        domain="finance",
+        answer_type="numeric",
+    )
+    evidence = EvidenceEvent(
+        packets=[
+            _make_packet(packet_id="pkt_000", page=98, bbox=(0.0, 0.0, 1.0, 1.0)).model_copy(
+                update={
+                    "ocr_snippet": (
+                        "headers: (In millions) | June 30, 2023 | Acquisitions | Other | "
+                        "June 30, 2024\n"
+                        "candidate_rows: Productivity and Business Processes | $ 31,359 | "
+                        "$ 0 | $ 2 | $ 31,361 | Intelligent Cloud | 25,676 | 0 | "
+                        "(28) | 25,648 | More Personal Computing | 10,851 | 51,235 | "
+                        "125 | 62,211 | Total | $ 67,886 | $ 51,235 | $ 99 | $ 119,220"
+                    )
+                }
+            ),
+            _make_packet(packet_id="pkt_001", page=97, bbox=(0.0, 0.0, 1.0, 1.0)).model_copy(
+                update={
+                    "ocr_snippet": (
+                        "headers: (In millions)\n"
+                        "candidate_rows: Goodwill | 51,001 | Intangible assets | 21,969 | "
+                        "Total purchase price | $ 75,408\n"
+                        "notes: Goodwill was assigned to our More Personal Computing segment."
+                    )
+                }
+            ),
+        ]
+    )
+    answer = AnswerEvent(answer="68%", citations=["pkt_000", "pkt_001"], confidence=0.87)
+    verdict = VerdictEvent(
+        supported=False,
+        reason="Verifier agrees with the facts but asks for another reasoner pass.",
+        next_action="escalate_reasoner",
+        confidence=0.72,
+    )
+
+    adjudicated = _maybe_accept_deterministic_finance_answer(
+        question_event=question,
+        evidence=evidence,
+        answer=answer,
+        verdict=verdict,
+    )
+
+    assert adjudicated.supported
+    assert adjudicated.next_action == "accept"
+    assert adjudicated.diagnostics["finance_adjudication"]["mechanism"] == (
+        "segment_purchase_price_percent"
     )
 
 
@@ -737,15 +1548,15 @@ async def test_focus_workflow_routes_planner_through_tier_router(
     # Router was consulted for every role-scoped stage:
     #   - planner (item 1)
     #   - localizer_rerank (item 4 rerank stage)
-    #   - localizer_rerank again (Phase 7 chart_to_table_backend — even
-    #     when chart extraction doesn't actually fire, the client_for
-    #     resolution happens before the inspector check)
+    #   - schema_extractor (Gemini table/chart extraction role)
+    #   - localizer_rerank fallback when the fake router has no schema client
     #   - verifier
     # Verifier client + rerank client both return None here → those stages
     # stay deterministic; only the planner routes through to a real client.
     assert tier_router.calls == [
         "planner",
         "localizer_rerank",
+        "schema_extractor",
         "localizer_rerank",
         "verifier",
     ]
@@ -1327,6 +2138,61 @@ async def test_loop_exhausted_keeps_best_unsupported_answer(
     assert selection_events[-1].payload["selected"] == "best_unsupported"
 
 
+async def test_supported_retry_can_preserve_initial_concise_answer(
+    tmp_path, parser_bench_submodule_present
+):
+    """A verifier-accepted retry should not overwrite a concise answer with
+    row-shifted rationale when the initial answer already satisfies contract.
+    """
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            (
+                '{"answer": "Non-Shared Normal, Write-Through Cacheable", '
+                '"citations": ["pkt_000"], "confidence": 0.95}'
+            ),
+            (
+                '{"answer": "Outer Write-Through; Non-Shared Normal, Write-Back Cacheable", '
+                '"citations": ["pkt_000"], "confidence": 0.84}'
+            ),
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(supported=False, next_action="escalate_reasoner"),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        max_retries=1,
+    )
+    example = _make_example()
+    example.question = (
+        "If a memory system based on these tables does NOT support the "
+        "'Outer Write-Back' cache policy, how would the ARMv6 attribute change?"
+    )
+    example.answer_type = "exact_match"
+    example.answer = "Non-Shared Normal, Write-Through Cacheable"
+    example.question_family = "table_note_fusion"
+
+    result = await workflow.run(
+        example, [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "Non-Shared Normal, Write-Through Cacheable"
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["loop_terminated"] == "accepted_preserved_initial"
+    assert result.telemetry["loop_retry_helped"] is False
+    assert result.telemetry["accepted_retry_preserved_initial"] is True
+    selection_events = [
+        e for e in result.trace.debug_events if e.stage == "answer" and e.event_type == "selection"
+    ]
+    assert selection_events[-1].payload["selected"] == "initial_answer"
+
+
 async def test_retry_abstain_keeps_cited_unsupported_answer(
     tmp_path, parser_bench_submodule_present
 ):
@@ -1570,6 +2436,62 @@ async def test_loop_allows_verbose_numeric_shape_retry(tmp_path, parser_bench_su
     assert stage_counts["verify"] == 2
     assert stage_counts["expand_context"] == 1
     assert "Keep the answer field concise" in reasoner.calls[1]["prompt"]
+
+
+async def test_loop_allows_contract_guard_retry(tmp_path, parser_bench_submodule_present):
+    """A verifier false-accept overridden by the contract gets one retry."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            '{"answer": "0.697", "citations": ["pkt_000"], "confidence": 0.9}',
+            '{"answer": "min: 0.697 V", "citations": ["pkt_000"], "confidence": 0.86}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=True,
+                next_action="accept",
+                reason="The value appears in the cited table row.",
+            ),
+            _verdict_json(supported=True, next_action="accept"),
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+    )
+    example = _make_example().model_copy(
+        update={
+            "question": (
+                "Which value (min, typ, or max) should be used, and what is "
+                "the corresponding voltage?"
+            ),
+            "answer_type": "exact_match",
+            "question_family": "spec_table_cell_retrieval",
+        }
+    )
+
+    result = await workflow.run(
+        example, [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "min: 0.697 V"
+    assert result.telemetry["retries_used"] == 1
+    assert result.telemetry["evidence_retries_used"] == 0
+    stage_counts = _stage_counts(result)
+    assert stage_counts["answer"] == 2
+    assert stage_counts["verify"] == 2
+    assert "Question answer contract" in reasoner.calls[1]["prompt"]
+    assert "Previous answer: 0.697" in reasoner.calls[1]["prompt"]
+    assert "Targeted multi-field repair" in reasoner.calls[1]["prompt"]
+    assert "Adjudicate candidates internally" in reasoner.calls[1]["prompt"]
+    assert "Same-evidence repair worksheet" in reasoner.calls[1]["prompt"]
+    assert (
+        "Candidate B = same answer completed with all requested fields"
+        in reasoner.calls[1]["prompt"]
+    )
 
 
 async def test_loop_allows_single_entity_shape_retry(tmp_path, parser_bench_submodule_present):
@@ -1892,6 +2814,45 @@ async def test_loop_abstain_terminates_with_unanswerable(tmp_path, parser_bench_
     # Abstention was decided on the first verdict — no retries fired.
     assert result.telemetry["retries_used"] == 0
     assert result.citations == []  # abstention drops citations
+
+
+async def test_initial_visual_estimate_abstain_keeps_cited_scalar(
+    tmp_path, parser_bench_submodule_present
+):
+    """A first-pass abstain should not erase a cited approximate visual estimate."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _FakeClient('{"answer": "1.0", "citations": ["pkt_000"], "confidence": 0.76}')
+    verifier = _FakeClient(
+        _verdict_json(
+            supported=False,
+            next_action="abstain",
+            reason="visual crop is hard to read",
+        )
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        max_retries=2,
+    )
+    example = _make_example()
+    example.question = (
+        "Estimate the aspect ratio (width to height) of the visible square, "
+        "rounded to the nearest 0.1."
+    )
+    example.answer_type = "numeric"
+
+    result = await workflow.run(
+        example, [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer == "1.0"
+    assert result.telemetry["loop_terminated"] == "exhausted"
+    assert result.telemetry["retries_used"] == 0
+    selection_events = [
+        e for e in result.trace.debug_events if e.stage == "answer" and e.event_type == "selection"
+    ]
+    assert selection_events[-1].payload["reason"] == "initial_visual_estimate_abstain_guard"
 
 
 async def test_loop_exhausted_when_max_retries_hit(tmp_path, parser_bench_submodule_present):

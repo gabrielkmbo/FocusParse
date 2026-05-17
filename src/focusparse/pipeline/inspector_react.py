@@ -43,7 +43,12 @@ from focusparse.pipeline.events import (
     RegionCandidate,
     RegionsEvent,
 )
-from focusparse.pipeline.inspector import _CHART_QUESTION_FAMILIES, _inspect_one_region
+from focusparse.pipeline.inspector import (
+    _CHART_QUESTION_FAMILIES,
+    _STRUCTURED_EXTRACTION_MAX_PACKETS,
+    _inspect_one_region,
+    _wants_structured_region_extraction,
+)
 
 if TYPE_CHECKING:
     pass
@@ -124,6 +129,7 @@ async def react_inspect(
     multi_scale: bool = False,
     chart_to_table_enabled: bool = False,
     chart_to_table_backend: ModelClient | None = None,
+    schema_extractor_backend: ModelClient | None = None,
 ) -> ReActInspectorResult:
     """LLM-driven inspector dispatch.
 
@@ -167,6 +173,12 @@ async def react_inspect(
 
     # Cap to budget regardless of what the LLM returned.
     plan_items = plan_items[:max_crops]
+    evidence_keys = {(raw or "").strip().lower() for raw in (plan.evidence_types or [])}
+    structured_active = _wants_structured_region_extraction(
+        plan.question_family,
+        evidence_keys=evidence_keys,
+        question_text=question.question,
+    )
 
     # ---- Step 2: dispatch via the existing per-region helper ----
     packets: list[EvidencePacket] = []
@@ -197,7 +209,11 @@ async def react_inspect(
             multi_scale=multi_scale,
             chart_extraction_active=chart_active,
             chart_to_table_backend=chart_to_table_backend,
+            structured_extraction_active=structured_active
+            and idx < _STRUCTURED_EXTRACTION_MAX_PACKETS,
+            schema_extractor_backend=schema_extractor_backend,
             question_family=plan.question_family,
+            question_text=question.question,
         )
         packets.append(packet)
 

@@ -32,8 +32,11 @@ _PRICING: dict[tuple[str, str], tuple[float, float]] = {
     ("anthropic", "claude-opus-4-6"): (15.00, 75.00),
     ("anthropic", "claude-sonnet-4-6"): (3.00, 15.00),
     ("anthropic", "claude-haiku-4-5"): (0.80, 4.00),
-    # Gemini — 2026-04 list prices (Vertex public preview)
-    ("gemini", "gemini-3.1-pro-preview"): (1.25, 10.00),
+    # Gemini — 2026-05 API list prices
+    ("gemini", "gemini-3.1-pro-preview"): (2.00, 12.00),
+    ("gemini", "gemini-3-flash-preview"): (0.50, 3.00),
+    ("gemini", "gemini-3.1-flash-lite"): (0.25, 1.50),
+    ("gemini", "gemini-3.1-flash-lite-preview"): (0.125, 0.75),
     ("gemini", "gemini-2.5-flash"): (0.30, 2.50),
 }
 

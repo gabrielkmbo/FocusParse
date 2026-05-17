@@ -39,11 +39,47 @@ tiers:
     provider: openai
     model: gpt-5.4
     max_completion_tokens: 8192 # GPT-5.x requires this param name, not max_tokens
+  gemini_schema_extractor:
+    # Dedicated CV/schema extraction tier for table, chart, and element
+    # processing. Gemini 3.1 Pro is Google's current strongest Gemini API
+    # model after the Gemini 3 Pro Preview shutdown; keep it scoped to gated
+    # extraction roles so cost and latency remain attributable.
+    provider: gemini
+    model: gemini-3.1-pro-preview
+    max_tokens: 8192
+    thinking_level: high
+    media_resolution: high
+  gemini_schema_fast:
+    # Fast fallback for schema/table extraction A/Bs where the full Pro tier is
+    # too expensive. Use via FOCUSPARSE_TIER_SCHEMA_EXTRACTOR=gemini_schema_fast.
+    provider: gemini
+    model: gemini-3-flash-preview
+    max_tokens: 8192
+    thinking_level: medium
+    media_resolution: high
+  gemini_schema_lite:
+    # Stable low-cost schema/table extraction tier for high-throughput simple
+    # data processing A/Bs. Use via FOCUSPARSE_TIER_SCHEMA_EXTRACTOR=gemini_schema_lite.
+    provider: gemini
+    model: gemini-3.1-flash-lite
+    max_tokens: 8192
+    thinking_level: low
+    media_resolution: high
+  gemini_schema_lite_preview:
+    # Preview low-cost schema/table extraction tier, kept explicit so we do not
+    # silently move stable-ladder experiments onto a preview endpoint.
+    # Use via FOCUSPARSE_TIER_SCHEMA_EXTRACTOR=gemini_schema_lite_preview.
+    provider: gemini
+    model: gemini-3.1-flash-lite-preview
+    max_tokens: 8192
+    thinking_level: low
+    media_resolution: high
 
 roles:
   planner: cheap
   router: cheap
   localizer_rerank: mid
+  schema_extractor: gemini_schema_extractor
   reasoner: frontier
   verifier: mid
   # 2026-05-11 (harness-growth-sprint Phase 2): inspector_dispatch is now

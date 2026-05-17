@@ -31,12 +31,21 @@ from typing import Any
 
 from focusparse.evidence.packet import EvidencePacket
 from focusparse.models.base import ModelClient, ModelResponse
+from focusparse.pipeline.answer_contract import (
+    AnswerContract,
+    answer_contract_diagnostics,
+    answer_contract_failures,
+    answer_contract_risks,
+    build_answer_contract,
+    render_answer_contract,
+)
 from focusparse.pipeline.events import (
     AnswerEvent,
     EvidenceEvent,
     QuestionEvent,
     VerdictEvent,
 )
+from focusparse.pipeline.evidence_groups import build_evidence_groups, render_evidence_groups
 
 _VALID_NEXT_ACTIONS = frozenset(
     {
@@ -73,10 +82,25 @@ _SYSTEM_PROMPT = (
     "AEC-Q100), and superlatives such as lowest/highest/min/max. Reject "
     "answers that satisfy only a subset of the constraints or use a nearby "
     "but different row/entity.\n"
+    "- For `exact_match` and `numeric` answer types, judge whether the final "
+    "answer span/value is supported. Do not reject a concise answer solely "
+    "because it omits explanatory rationale, unless the question answer "
+    "contract explicitly requires multiple output fields or a visual cue.\n"
+    "- For corresponding-row questions, first identify the source row/year/entity "
+    "from the metric named in the setup clause, then verify the requested output "
+    "field from that same row. Reject answers that instead choose the minimum or "
+    "maximum of the output field itself.\n"
+    "- For checkbox/check-mark questions, bind the selected mark to the nearest "
+    "Yes/No or status label; do not treat adjacent unselected labels as selected.\n"
     "- When `next_action` is expand_context, include optional "
     "`diagnostics.missing_context` with any of: caption, legend, footnote, "
     "header, continuation, axis_label, row_header, column_header, unit, "
     "x_axis, y_axis.\n"
+    "- When rejecting because the answer violates the question answer contract "
+    "but the evidence is present, use `next_action=escalate_reasoner` and "
+    "include optional `diagnostics.answer_shape_failure` with any of: "
+    "missing_field, label_value_mismatch, wrong_row_risk, legend_binding_risk, "
+    "checkbox_binding_risk.\n"
     "- If expand_context is for readability rather than missing context, keep "
     "`diagnostics.missing_context` empty and include "
     "`diagnostics.target_packet_ids` when you can name the affected packet.\n"
@@ -125,6 +149,7 @@ async def verify_answer(
     answer: AnswerEvent,
     *,
     backend_client: ModelClient | None = None,
+    question_family: str | None = None,
 ) -> tuple[VerdictEvent, ModelResponse | None]:
     """Verify that `evidence` supports `answer` for `question`.
 
@@ -144,7 +169,13 @@ async def verify_answer(
     if backend_client is None:
         return fallback, None
 
-    prompt = _build_verifier_prompt(question, evidence, answer)
+    contract = build_answer_contract(
+        question.question,
+        answer_type=question.answer_type,
+        domain=question.domain,
+        question_family=question_family,
+    )
+    prompt = _build_verifier_prompt(question, evidence, answer, contract=contract)
     response = await backend_client.predict(
         prompt=prompt,
         images=None,
@@ -161,6 +192,14 @@ async def verify_answer(
         supported=supported,
         next_action=next_action,
         diagnostics=diagnostics,
+    )
+    supported, reason, next_action, diagnostics = _apply_answer_contract_guard(
+        supported=supported,
+        reason=reason,
+        next_action=next_action,
+        diagnostics=diagnostics,
+        answer=answer,
+        contract=contract,
     )
     verdict = VerdictEvent(
         supported=supported,
@@ -190,9 +229,25 @@ def _build_verifier_prompt(
     question: QuestionEvent,
     evidence: EvidenceEvent,
     answer: AnswerEvent,
+    *,
+    contract: AnswerContract | None = None,
 ) -> str:
     cited_packet_ids = set(answer.citations)
     focus_text = f"{question.question}\nProposed answer: {answer.answer}"
+    contract = contract or build_answer_contract(
+        question.question,
+        answer_type=question.answer_type,
+        domain=question.domain,
+    )
+    evidence_group_block = render_evidence_groups(
+        build_evidence_groups(
+            evidence.packets,
+            question_text=focus_text,
+            contract=contract,
+        ),
+        contract=contract,
+        cited_packet_ids=cited_packet_ids,
+    )
     packet_lines = [
         _summarize_packet(
             p,
@@ -209,9 +264,14 @@ def _build_verifier_prompt(
 
     citations = ", ".join(answer.citations) if answer.citations else "(none)"
     domain_line = f"Document domain: {question.domain}\n" if question.domain else ""
+    contract_block = render_answer_contract(contract)
     return (
         f"{domain_line}"
+        f"Expected answer type: {question.answer_type or 'unknown'}\n"
         f"Question: {question.question}\n\n"
+        f"Question answer contract:\n{contract_block}\n\n"
+        "Grouped evidence objects the reasoner had access to:\n"
+        f"{evidence_group_block}\n\n"
         f"Evidence packets the reasoner had access to:\n{packet_block}\n\n"
         f"Reasoner's answer: {answer.answer}\n"
         f"Reasoner's cited packet_ids: {citations}\n"
@@ -437,10 +497,68 @@ def _reconcile_supported_next_action(
     return next_action, diagnostics
 
 
+def _apply_answer_contract_guard(
+    *,
+    supported: bool,
+    reason: str,
+    next_action: str,
+    diagnostics: dict[str, Any],
+    answer: AnswerEvent,
+    contract: AnswerContract,
+) -> tuple[bool, str, str, dict[str, Any]]:
+    """Block verifier false-accepts on severe answer-shape violations."""
+
+    failures = answer_contract_failures(answer.answer, contract)
+    risks = answer_contract_risks(contract)
+    if not failures:
+        if not supported and next_action == "escalate_reasoner" and risks:
+            diagnostics = dict(diagnostics)
+            _merge_diagnostic_list(diagnostics, "answer_shape_failure", risks)
+            for key, values in answer_contract_diagnostics(contract).items():
+                _merge_diagnostic_list(diagnostics, key, values)
+        return supported, reason, next_action, diagnostics
+
+    diagnostics = dict(diagnostics)
+    _merge_diagnostic_list(diagnostics, "answer_shape_failure", [*failures, *risks])
+    for key, values in answer_contract_diagnostics(contract).items():
+        _merge_diagnostic_list(diagnostics, key, values)
+
+    if not supported:
+        return supported, reason, next_action, diagnostics
+
+    reason = _contract_failure_reason(failures)
+    return False, reason, "escalate_reasoner", diagnostics
+
+
+def _contract_failure_reason(failures: list[str]) -> str:
+    joined = ", ".join(failures)
+    return (
+        "The proposed answer violates the question answer contract "
+        f"({joined}); retry the reasoner using the same evidence."
+    )[:240]
+
+
+def _merge_diagnostic_list(diagnostics: dict[str, Any], key: str, values: list[str]) -> None:
+    existing = diagnostics.get(key)
+    if isinstance(existing, str):
+        existing_values = [existing]
+    elif isinstance(existing, list):
+        existing_values = [str(value) for value in existing if isinstance(value, str)]
+    else:
+        existing_values = []
+    merged: list[str] = []
+    for value in [*existing_values, *values]:
+        if value not in merged:
+            merged.append(value)
+    if merged:
+        diagnostics[key] = merged
+
+
 def _parse_diagnostics(raw: Any, *, reason: str | None = None) -> dict[str, Any]:
     diagnostics: dict[str, Any] = {}
     missing_context: list[str] = []
     target_packet_ids: list[str] = []
+    answer_shape_failure: list[str] = []
 
     if isinstance(raw, dict):
         missing_context.extend(_normalize_missing_context_values(raw.get("missing_context")))
@@ -451,16 +569,67 @@ def _parse_diagnostics(raw: Any, *, reason: str | None = None) -> dict[str, Any]
             for packet_id in packet_ids:
                 if isinstance(packet_id, str) and packet_id.strip():
                     target_packet_ids.append(packet_id.strip()[:80])
+        answer_shape_failure.extend(
+            _normalize_answer_shape_failure_values(raw.get("answer_shape_failure"))
+        )
+        answer_shape_failure.extend(
+            _normalize_answer_shape_failure_values(raw.get("answer_shape_failures"))
+        )
 
     missing_context.extend(_missing_context_from_text(reason))
     missing_context = _dedupe_preserve_order(missing_context)
     target_packet_ids = _dedupe_preserve_order(target_packet_ids)
+    answer_shape_failure = _dedupe_preserve_order(answer_shape_failure)
 
     if missing_context:
         diagnostics["missing_context"] = missing_context
     if target_packet_ids:
         diagnostics["target_packet_ids"] = target_packet_ids
+    if answer_shape_failure:
+        diagnostics["answer_shape_failure"] = answer_shape_failure
     return diagnostics
+
+
+def _normalize_answer_shape_failure_values(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    normalized: list[str] = []
+    for value in raw:
+        if not isinstance(value, str):
+            continue
+        failure = _normalize_answer_shape_failure(value)
+        if failure is not None:
+            normalized.append(failure)
+    return normalized
+
+
+def _normalize_answer_shape_failure(value: str) -> str | None:
+    key = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+    aliases = {
+        "missing_field": "missing_field",
+        "missing_fields": "missing_field",
+        "incomplete_answer": "missing_field",
+        "incomplete_fields": "missing_field",
+        "label_value_mismatch": "label_value_mismatch",
+        "label_instead_of_value": "label_value_mismatch",
+        "value_label_mismatch": "label_value_mismatch",
+        "wrong_row": "wrong_row_risk",
+        "wrong_row_risk": "wrong_row_risk",
+        "row_confusion": "wrong_row_risk",
+        "row_disambiguation": "wrong_row_risk",
+        "legend_binding": "legend_binding_risk",
+        "legend_binding_risk": "legend_binding_risk",
+        "series_binding": "legend_binding_risk",
+        "chart_binding": "legend_binding_risk",
+        "chart_legend_binding": "legend_binding_risk",
+        "checkbox_binding": "checkbox_binding_risk",
+        "checkbox_binding_risk": "checkbox_binding_risk",
+        "checkmark_binding": "checkbox_binding_risk",
+        "check_mark_binding": "checkbox_binding_risk",
+    }
+    return aliases.get(key)
 
 
 def _normalize_missing_context_values(raw: Any) -> list[str]:

@@ -33,6 +33,7 @@ from focusparse.eval.scoring import (
     score_evidence_reward,
 )
 from focusparse.eval.stage_metrics import StageMetrics, aggregate_stage_metrics
+from focusparse.models._retry import is_model_throttle_error
 from focusparse.models.base import ModelClient
 from focusparse.pipeline.workflow import FocusWorkflow, SimpleBaselineAgent, WorkflowResult
 from focusparse.tools.layout_detect import LayoutEndpointUnavailable, StubResponseError
@@ -133,6 +134,8 @@ async def run_simple_eval(
                     record["agentic_meta"] = agentic_meta
                 cache_path.write_text(json.dumps(record, default=str))
             except Exception as exc:
+                if _should_abort_eval_on_error(exc):
+                    raise
                 logger.exception("Example %s failed: %s", example.id, exc)
                 record = _error_record(example, protocol=protocol, error=str(exc))
 
@@ -266,6 +269,8 @@ async def run_comparator_eval(
                     record["agentic_meta"] = agentic_meta
                 cache_path.write_text(json.dumps(record, default=str))
             except Exception as exc:
+                if _should_abort_eval_on_error(exc):
+                    raise
                 logger.exception("Example %s failed: %s", example.id, exc)
                 record = _error_record(example, protocol=protocol, error=str(exc))
 
@@ -333,6 +338,8 @@ async def run_focus_eval(
     layout_timeout_s: float | None = None,
     reasoner_self_consistency_k: int = 1,
     planner_tier_by_domain: dict[str, str] | None = None,
+    write_prediction_cache: bool = True,
+    compose_agentic_tiles: bool = True,
 ) -> dict[str, Any]:
     """Run `FocusWorkflow` over an iterable of examples.
 
@@ -365,11 +372,20 @@ async def run_focus_eval(
             abort the eval instead of becoming skeleton-region examples.
         layout_max_retries / layout_timeout_s: optional overrides for the
             layout detector transport. None falls through to config/defaults.
+        write_prediction_cache: when False, skip per-example prediction JSONs
+            and disable resume. Intended for disk-constrained slice runs; the
+            aggregate manifest and per_example.jsonl are still written.
+        compose_agentic_tiles: when False, skip summary tile PNG creation for
+            agentic_multi_page focus runs. Focus still receives the real page
+            images, which is the behavior used by the workflow itself.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    pred_dir = output_dir / "predictions"
-    pred_dir.mkdir(parents=True, exist_ok=True)
+    pred_dir = output_dir / "predictions" if write_prediction_cache else None
+    if pred_dir is not None:
+        pred_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        resume = False
 
     workflow_kwargs: dict[str, Any] = {
         "backend_client": backend_client,
@@ -436,9 +452,9 @@ async def run_focus_eval(
             break
         n += 1
 
-        cache_path = pred_dir / f"{_safe_id(example.id)}.json"
+        cache_path = pred_dir / f"{_safe_id(example.id)}.json" if pred_dir is not None else None
         record: dict[str, Any] | None = None
-        if resume and cache_path.exists():
+        if cache_path is not None and resume and cache_path.exists():
             try:
                 record = json.loads(cache_path.read_text())
                 record["cache_hit"] = True
@@ -456,15 +472,16 @@ async def run_focus_eval(
             # files), so prepending the summary view is harmless.
             agentic_meta: dict[str, object] | None = None
             if protocol == "agentic_multi_page":
-                agentic_images = _prepare_images(
-                    example,
-                    protocol=protocol,
-                    images_root=images_root,
-                    pdfs_root=pdfs_root,
-                    tile_cache_dir=output_dir / "tiles",
-                )
-                if agentic_images:
-                    images = agentic_images
+                if compose_agentic_tiles:
+                    agentic_images = _prepare_images(
+                        example,
+                        protocol=protocol,
+                        images_root=images_root,
+                        pdfs_root=pdfs_root,
+                        tile_cache_dir=output_dir / "tiles",
+                    )
+                    if agentic_images:
+                        images = agentic_images
                 agentic_meta = _agentic_summary_meta(
                     example, images_root, pdfs_root, output_dir / "tiles"
                 )
@@ -482,10 +499,12 @@ async def run_focus_eval(
                 )
                 if agentic_meta is not None:
                     record["agentic_meta"] = agentic_meta
-                cache_path.write_text(json.dumps(record, default=str))
+                if cache_path is not None:
+                    cache_path.write_text(json.dumps(record, default=str))
             except Exception as exc:
-                if strict_layout_detection and isinstance(
-                    exc, (LayoutEndpointUnavailable, StubResponseError)
+                if _should_abort_eval_on_error(
+                    exc,
+                    strict_layout_detection=strict_layout_detection,
                 ):
                     raise
                 logger.exception("Example %s failed: %s", example.id, exc)
@@ -518,6 +537,10 @@ async def run_focus_eval(
         "aggregate": aggregated.model_dump(),
         "aggregate_by_domain": {k: v.model_dump() for k, v in aggregated_by_domain.items()},
         "stage_aggregate": stage_aggregate.model_dump(),
+        "artifact_policy": {
+            "write_prediction_cache": write_prediction_cache,
+            "compose_agentic_tiles": compose_agentic_tiles,
+        },
         "env_snapshot": _env_snapshot(),
     }
     (output_dir / "run.json").write_text(json.dumps(run_manifest, default=str, indent=2))
@@ -1078,6 +1101,26 @@ def _error_record(example: BenchmarkExample, *, protocol: str, error: str) -> di
         "citations": [],
         "cache_hit": False,
     }
+
+
+def _should_abort_eval_on_error(
+    exc: Exception,
+    *,
+    strict_layout_detection: bool = False,
+) -> bool:
+    """Return True for infrastructure failures that invalidate the run.
+
+    Ordinary per-row model exceptions remain error rows so local development
+    can continue. Provider throttling/quota failures are different: once the
+    retry wrapper gives up, counting those rows as benchmark failures creates a
+    misleading accuracy artifact instead of a valid scientific run.
+    """
+
+    if is_model_throttle_error(exc):
+        return True
+    return strict_layout_detection and isinstance(
+        exc, (LayoutEndpointUnavailable, StubResponseError)
+    )
 
 
 def _aggregate_stages(per_example: list[dict[str, Any]]):

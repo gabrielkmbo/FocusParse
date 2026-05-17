@@ -29,6 +29,7 @@ from focusparse.pipeline.inspector import (
     _AUTOZOOM_CODE,
     _AUTOZOOM_MAX_DIM,
     _chart_scale_hint,
+    _wants_structured_region_extraction,
     inspect_regions,
 )
 
@@ -70,6 +71,30 @@ def _region(
         region_type=region_type,
         score=score,
         supporting_signals=supporting_signals or [],
+    )
+
+
+def test_structured_extraction_gate_ignores_plain_table_evidence() -> None:
+    assert not _wants_structured_region_extraction(
+        "single_value_lookup",
+        evidence_keys={"table"},
+        question_text="What is the VCC voltage?",
+    )
+
+
+def test_structured_extraction_gate_keeps_confusable_row_cues() -> None:
+    assert _wants_structured_region_extraction(
+        "single_value_lookup",
+        evidence_keys={"table"},
+        question_text="Among the visually similar part number rows, which package is lowest?",
+    )
+
+
+def test_structured_extraction_gate_keeps_checkbox_evidence() -> None:
+    assert _wants_structured_region_extraction(
+        "single_value_lookup",
+        evidence_keys={"checkbox"},
+        question_text="Which box is checked?",
     )
 
 

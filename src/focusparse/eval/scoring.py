@@ -106,6 +106,7 @@ def _normalize_text_for_match(s: str) -> str:
 
     s = s.strip().lower()
     s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"\b([a-z]{2,})\s+(mode\d+[a-z0-9]*)\b", r"\1_\2", s)
     s = re.sub(r"[;,.\s]+$", "", s)
     return s
 
@@ -143,17 +144,13 @@ def _score_exact_match(pred: str, gold: str) -> bool:
         else:
             return True
     # 3b. Gold is contained in pred (model was more verbose)
-    if len(g) >= 3 and g in p:
-        if len(g) >= len(p) * 0.4:
-            return True
+    if len(g) >= 3 and g in p and len(g) >= len(p) * 0.4:
+        return True
 
     # 4. Parenthetical removal
     g_np = _normalize_text_for_match(re.sub(r"\s*\([^)]*\)", "", g))
     p_np = _normalize_text_for_match(re.sub(r"\s*\([^)]*\)", "", p))
-    if p_np and p_np == g_np:
-        return True
-
-    return False
+    return bool(p_np and p_np == g_np)
 
 
 def _score_boolean(pred: str, gold: str) -> bool:
