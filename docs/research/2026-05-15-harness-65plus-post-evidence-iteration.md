@@ -1,6 +1,6 @@
 # FocusParse 65%+ Post-Evidence Iteration
 
-Date: 2026-05-15  
+Date: 2026-05-15
 Branch/worktree: `codex/harness-65plus-iteration` at `/private/tmp/focusparse-harness-65plus-iteration`
 
 ## Objective
