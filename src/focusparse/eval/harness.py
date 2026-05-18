@@ -180,7 +180,7 @@ async def run_comparator_eval(
     backend_client: ModelClient,
     backend: str,
     model: str,
-    agent_kind: str,  # "react" | "agent_baseline"
+    agent_kind: str,  # "react" | "llamaindex_react" | "agent_baseline"
     protocol: str,
     output_dir: Path,
     images_root: Path,
@@ -201,6 +201,7 @@ async def run_comparator_eval(
     architectural ablation that makes the headline-table claim falsifiable.
     """
     from focusparse.pipeline.agent_baseline import AgentBaselineAgent
+    from focusparse.pipeline.llamaindex_react_agent import LlamaIndexReActAgent
     from focusparse.pipeline.react_agent import ReActAgent
     from focusparse.tools import resolve_tool_set
 
@@ -211,10 +212,24 @@ async def run_comparator_eval(
 
     tools = resolve_tool_set(tool_set)
     available_tools = [tool.name for tool in tools]
+    comparator_impl: dict[str, Any] | None = None
     if agent_kind == "react":
         agent = ReActAgent(backend_client=backend_client, tools=tools)
+        comparator_impl = {
+            "name": "repo_native_react_ablation",
+            "framework": "focusparse",
+            "fallback": None,
+        }
+    elif agent_kind == "llamaindex_react":
+        agent = LlamaIndexReActAgent(backend_client=backend_client, tools=tools)
+        comparator_impl = agent.implementation_metadata
     elif agent_kind == "agent_baseline":
         agent = AgentBaselineAgent(backend_client=backend_client, tools=tools)
+        comparator_impl = {
+            "name": "repo_native_agent_baseline",
+            "framework": "focusparse",
+            "fallback": None,
+        }
     else:
         raise ValueError(f"Unknown comparator agent_kind: {agent_kind!r}")
 
@@ -294,6 +309,7 @@ async def run_comparator_eval(
         "aggregate": aggregated.model_dump(),
         "aggregate_by_domain": {k: v.model_dump() for k, v in aggregated_by_domain.items()},
         "stage_aggregate": stage_aggregate.model_dump(),
+        "comparator_impl": comparator_impl,
         "env_snapshot": _env_snapshot(),
     }
     (output_dir / "run.json").write_text(json.dumps(run_manifest, default=str, indent=2))

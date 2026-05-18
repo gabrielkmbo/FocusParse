@@ -52,11 +52,13 @@ _RUN_EVAL_SCRIPT = Path(__file__).resolve().parent / "run_hf_eval.py"
 
 
 # The seven specs that fill the headline table. Each becomes a separate
-# subprocess call to run_hf_eval.py.
+# subprocess call to run_hf_eval.py. The primary ReAct row uses the official
+# LlamaIndex ReAct API; the repo-native `react` agent is kept as an appendix
+# ablation and is intentionally not part of this headline sweep.
 HEADLINE_SPECS: list[dict[str, str]] = [
     {"agent": "simple", "tool_set": "full", "label": "Base VLM"},
-    {"agent": "react", "tool_set": "minimal", "label": "ReAct +2 tools"},
-    {"agent": "react", "tool_set": "full", "label": "ReAct +4 tools"},
+    {"agent": "llamaindex_react", "tool_set": "minimal", "label": "ReAct +2 tools"},
+    {"agent": "llamaindex_react", "tool_set": "full", "label": "ReAct +4 tools"},
     {"agent": "agent_baseline", "tool_set": "minimal", "label": "Agent baseline +2 tools"},
     {"agent": "agent_baseline", "tool_set": "full", "label": "Agent baseline +4 tools"},
     {"agent": "focus", "tool_set": "minimal", "label": "Our harness +2 tools"},

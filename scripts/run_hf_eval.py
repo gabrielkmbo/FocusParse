@@ -72,7 +72,7 @@ _COMPARATOR_PROTOCOLS = frozenset(
 def _protocol_matches_agent(agent: str, protocol: str) -> bool:
     if agent == "focus":
         return protocol in _FOCUS_PROTOCOLS
-    if agent in ("react", "agent_baseline"):
+    if agent in ("react", "llamaindex_react", "agent_baseline"):
         return protocol in _COMPARATOR_PROTOCOLS
     return protocol in _SIMPLE_PROTOCOLS
 
@@ -116,7 +116,8 @@ def main() -> int:
         print(
             f"error: --agent {args.agent!r} is incompatible with --protocol "
             f"{args.protocol!r}. Simple takes {sorted(_SIMPLE_PROTOCOLS)}; "
-            f"focus takes {sorted(_FOCUS_PROTOCOLS)}.",
+            f"focus takes {sorted(_FOCUS_PROTOCOLS)}; comparators take "
+            f"{sorted(_COMPARATOR_PROTOCOLS)}.",
             file=sys.stderr,
         )
         return 2
@@ -245,7 +246,7 @@ def main() -> int:
                 compose_agentic_tiles=not args.minimal_artifacts,
             )
         )
-    elif args.agent in ("react", "agent_baseline"):
+    elif args.agent in ("react", "llamaindex_react", "agent_baseline"):
         result = asyncio.run(
             run_comparator_eval(
                 examples,
@@ -325,12 +326,13 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--agent",
-        choices=["simple", "focus", "react", "agent_baseline"],
+        choices=["simple", "focus", "react", "llamaindex_react", "agent_baseline"],
         default="simple",
         help=(
             "Method type. simple = Base VLM (no tools); focus = FocusParse "
-            "stage machine; react = ReAct loop comparator; agent_baseline = "
-            "thinner generic-prompt comparator."
+            "stage machine; llamaindex_react = official LlamaIndex ReAct "
+            "comparator; react = repo-native ReAct appendix ablation; "
+            "agent_baseline = thinner generic-prompt comparator."
         ),
     )
     parser.add_argument(
@@ -508,10 +510,10 @@ def _parse_args() -> argparse.Namespace:
         default="full",
         help=(
             "Tool belt available to the agent. minimal = inspect_region + "
-            "get_text_layer (universal see-and-read). full = + expand_context "
-            "+ run_python (FocusParse-specific). The +2-tools / +4-tools axis "
-            "of the headline table. Forwarded to FocusWorkflow which skips "
-            "expand_context and forces auto_zoom off when minimal."
+            "get_text_layer (universal see-and-read). full = + layout_detect "
+            "+ run_python for comparator agents; for FocusParse, full enables "
+            "the corresponding stage-machine expansion/zoom path. The +2-tools "
+            "/ +4-tools axis of the headline table."
         ),
     )
     parser.add_argument(
