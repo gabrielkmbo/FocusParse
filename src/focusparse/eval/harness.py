@@ -20,8 +20,10 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
 from collections.abc import Iterable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -188,6 +190,8 @@ async def run_comparator_eval(
     resume: bool = True,
     pdfs_root: Path | None = None,
     tool_set: str = "full",
+    write_prediction_cache: bool = True,
+    persistent_tool_artifacts: bool = True,
 ) -> dict[str, Any]:
     """Run a comparator agent (ReAct loop or generic Agent baseline) over examples.
 
@@ -199,6 +203,15 @@ async def run_comparator_eval(
     Distinguishes from the focus path by *not* having any FocusParse
     stage machine — just a think→act→observe loop. This is the
     architectural ablation that makes the headline-table claim falsifiable.
+
+    Args:
+        write_prediction_cache: when False, skip per-example prediction JSONs
+            and disable resume. The aggregate manifest and per_example.jsonl
+            are still written.
+        persistent_tool_artifacts: when False, use per-example temporary dirs
+            for summary tiles, crops, and native text cache files. This keeps
+            `agentic_multi_page` protocol inputs intact without retaining the
+            generated artifacts after each example finishes.
     """
     from focusparse.pipeline.agent_baseline import AgentBaselineAgent
     from focusparse.pipeline.llamaindex_react_agent import LlamaIndexReActAgent
@@ -207,8 +220,11 @@ async def run_comparator_eval(
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    pred_dir = output_dir / "predictions"
-    pred_dir.mkdir(parents=True, exist_ok=True)
+    pred_dir = output_dir / "predictions" if write_prediction_cache else None
+    if pred_dir is not None:
+        pred_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        resume = False
 
     tools = resolve_tool_set(tool_set)
     available_tools = [tool.name for tool in tools]
@@ -241,9 +257,9 @@ async def run_comparator_eval(
             break
         n += 1
 
-        cache_path = pred_dir / f"{_safe_id(example.id)}.json"
+        cache_path = pred_dir / f"{_safe_id(example.id)}.json" if pred_dir is not None else None
         record: dict[str, Any] | None = None
-        if resume and cache_path.exists():
+        if cache_path is not None and resume and cache_path.exists():
             try:
                 record = json.loads(cache_path.read_text())
                 record["cache_hit"] = True
@@ -251,43 +267,54 @@ async def run_comparator_eval(
                 record = None
 
         if record is None:
-            images = _prepare_images(
-                example,
-                protocol=protocol,
-                images_root=images_root,
-                pdfs_root=pdfs_root,
-                tile_cache_dir=output_dir / "tiles",
+            artifact_context = (
+                nullcontext(output_dir)
+                if persistent_tool_artifacts
+                else tempfile.TemporaryDirectory(prefix=f"focusparse-{_safe_id(example.id)}-")
             )
-            agentic_meta: dict[str, object] | None = None
-            if protocol == "agentic_multi_page":
-                agentic_meta = _agentic_summary_meta(
-                    example, images_root, pdfs_root, output_dir / "tiles"
-                )
-            pdf_path = _resolve_pdf_path(pdfs_root, example) if pdfs_root else None
-            try:
-                result: WorkflowResult = await agent.run(
+            with artifact_context as artifact_root_raw:
+                artifact_root = Path(artifact_root_raw)
+                tile_cache_dir = artifact_root / "tiles"
+                crop_cache_dir = artifact_root / "crops"
+                text_layer_cache_dir = artifact_root / "text_layer"
+                images = _prepare_images(
                     example,
-                    images,
-                    pdf_path=pdf_path,
-                    crop_cache_dir=output_dir / "crops",
-                    text_layer_cache_dir=output_dir / "text_layer",
-                )
-                image_dims = _image_dims_by_page(example, images)
-                record = _score_and_record(
-                    example,
-                    result,
                     protocol=protocol,
-                    image_dims_by_page=image_dims,
-                    available_tools=available_tools,
+                    images_root=images_root,
+                    pdfs_root=pdfs_root,
+                    tile_cache_dir=tile_cache_dir,
                 )
-                if agentic_meta is not None:
-                    record["agentic_meta"] = agentic_meta
-                cache_path.write_text(json.dumps(record, default=str))
-            except Exception as exc:
-                if _should_abort_eval_on_error(exc):
-                    raise
-                logger.exception("Example %s failed: %s", example.id, exc)
-                record = _error_record(example, protocol=protocol, error=str(exc))
+                agentic_meta: dict[str, object] | None = None
+                if protocol == "agentic_multi_page":
+                    agentic_meta = _agentic_summary_meta(
+                        example, images_root, pdfs_root, tile_cache_dir
+                    )
+                pdf_path = _resolve_pdf_path(pdfs_root, example) if pdfs_root else None
+                try:
+                    result: WorkflowResult = await agent.run(
+                        example,
+                        images,
+                        pdf_path=pdf_path,
+                        crop_cache_dir=crop_cache_dir,
+                        text_layer_cache_dir=text_layer_cache_dir,
+                    )
+                    image_dims = _image_dims_by_page(example, images)
+                    record = _score_and_record(
+                        example,
+                        result,
+                        protocol=protocol,
+                        image_dims_by_page=image_dims,
+                        available_tools=available_tools,
+                    )
+                    if agentic_meta is not None:
+                        record["agentic_meta"] = agentic_meta
+                    if cache_path is not None:
+                        cache_path.write_text(json.dumps(record, default=str))
+                except Exception as exc:
+                    if _should_abort_eval_on_error(exc):
+                        raise
+                    logger.exception("Example %s failed: %s", example.id, exc)
+                    record = _error_record(example, protocol=protocol, error=str(exc))
 
         per_example.append(record)
 
@@ -310,6 +337,10 @@ async def run_comparator_eval(
         "aggregate_by_domain": {k: v.model_dump() for k, v in aggregated_by_domain.items()},
         "stage_aggregate": stage_aggregate.model_dump(),
         "comparator_impl": comparator_impl,
+        "artifact_policy": {
+            "write_prediction_cache": write_prediction_cache,
+            "persistent_tool_artifacts": persistent_tool_artifacts,
+        },
         "env_snapshot": _env_snapshot(),
     }
     (output_dir / "run.json").write_text(json.dumps(run_manifest, default=str, indent=2))

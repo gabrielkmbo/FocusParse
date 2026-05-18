@@ -261,6 +261,8 @@ def main() -> int:
                 resume=args.resume,
                 pdfs_root=args.pdfs_root,
                 tool_set=args.tool_set,
+                write_prediction_cache=not args.minimal_artifacts,
+                persistent_tool_artifacts=not args.minimal_artifacts,
             )
         )
     else:
@@ -412,9 +414,11 @@ def _parse_args() -> argparse.Namespace:
         default=False,
         help=(
             "For disk-constrained slice experiments, skip per-example prediction "
-            "cache JSONs and agentic summary tile PNGs. Still writes the wrapper "
-            "JSON, run.json, and per_example.jsonl. Resume is ignored for focus "
-            "runs in this mode."
+            "cache JSONs. Focus runs also skip persistent agentic summary tile "
+            "PNGs; comparator runs still compose protocol-required summary views "
+            "inside per-example scratch dirs. Still writes the wrapper JSON, "
+            "run.json, and per_example.jsonl. Resume is ignored for focus and "
+            "comparator runs in this mode."
         ),
     )
     parser.add_argument(

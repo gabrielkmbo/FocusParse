@@ -10,10 +10,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from PIL import Image
 
 from focusparse.eval.harness import run_comparator_eval
 from focusparse.models.base import ModelResponse
 from focusparse.pipeline.llamaindex_react_agent import LlamaIndexReActAgent
+from focusparse.pipeline.workflow import WorkflowResult
 from focusparse.tools import (
     GET_TEXT_LAYER_SPEC,
     INSPECT_REGION_SPEC,
@@ -22,6 +24,7 @@ from focusparse.tools import (
     ToolSpec,
     resolve_tool_set,
 )
+from focusparse.traces.recorder import TrajectoryRecorder, TrajectoryStep
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUN_HF_EVAL = REPO_ROOT / "scripts" / "run_hf_eval.py"
@@ -205,6 +208,102 @@ async def test_run_comparator_eval_llamaindex_react_manifest(
     assert manifest["comparator_impl"]["agent_api"].endswith(".ReActAgent")
     assert (tmp_path / "run" / "per_example.jsonl").exists()
     assert (tmp_path / "run" / "predictions" / "ex-llamaindex-react.json").exists()
+
+
+async def test_run_comparator_eval_minimal_artifacts_uses_scratch_dirs(
+    parser_bench_submodule_present, monkeypatch, tmp_path
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    page_1 = tmp_path / "fake_page_0001.png"
+    page_2 = tmp_path / "fake_page_0002.png"
+    Image.new("RGB", (8, 8), "white").save(page_1)
+    Image.new("RGB", (8, 8), "white").save(page_2)
+    example = _example().model_copy(update={"page_images": [page_1.name, page_2.name]})
+    captured: dict[str, Any] = {}
+
+    async def fake_run(
+        self,
+        example,
+        images,
+        *,
+        pdf_path=None,
+        crop_cache_dir=None,
+        text_layer_cache_dir=None,
+        **_kwargs,
+    ):
+        del self, pdf_path
+        summary_paths = [p for p in images if "_tiled_" in p.name]
+        assert summary_paths and summary_paths[0].exists()
+        assert crop_cache_dir is not None
+        assert text_layer_cache_dir is not None
+        crop_cache_dir.mkdir(parents=True, exist_ok=True)
+        text_layer_cache_dir.mkdir(parents=True, exist_ok=True)
+        (crop_cache_dir / "sentinel.png").write_bytes(b"crop")
+        (text_layer_cache_dir / "sentinel.txt").write_text("text")
+        captured.update(
+            {
+                "images": list(images),
+                "summary_path": summary_paths[0],
+                "crop_cache_dir": crop_cache_dir,
+                "text_layer_cache_dir": text_layer_cache_dir,
+                "scratch_root": summary_paths[0].parent.parent,
+            }
+        )
+
+        recorder = TrajectoryRecorder(example_id=example.id, question=example.question)
+        recorder.record(
+            TrajectoryStep(
+                step_index=0,
+                stage="llamaindex_react_tool",
+                tier="comparator",
+                action="tool_call",
+                tool="inspect_region",
+            )
+        )
+        citations = [{"page": 1, "bbox": [0, 0, 1, 1]}]
+        trace = recorder.finalize(answer="42", citations=citations)
+        return WorkflowResult(
+            answer="42",
+            citations=citations,
+            trace=trace,
+            telemetry={"tokens_in": 1, "tokens_out": 1, "usd": 0.0, "latency_ms": 1},
+        )
+
+    monkeypatch.setattr(LlamaIndexReActAgent, "run", fake_run)
+
+    result = await run_comparator_eval(
+        [example],
+        backend_client=_ScriptedClient(["unused"]),
+        backend="fake",
+        model="fake-1",
+        agent_kind="llamaindex_react",
+        protocol="agentic_multi_page",
+        output_dir=tmp_path / "run",
+        images_root=tmp_path,
+        limit=1,
+        tool_set="minimal",
+        resume=True,
+        write_prediction_cache=False,
+        persistent_tool_artifacts=False,
+    )
+
+    manifest = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert result["aggregate"].n == 1
+    assert result["per_example"][0]["agentic_meta"]["summary_view_cached"] is True
+    assert manifest["artifact_policy"] == {
+        "write_prediction_cache": False,
+        "persistent_tool_artifacts": False,
+    }
+    assert not (tmp_path / "run" / "predictions").exists()
+    assert not (tmp_path / "run" / "tiles").exists()
+    assert not (tmp_path / "run" / "crops").exists()
+    assert not (tmp_path / "run" / "text_layer").exists()
+    assert captured["crop_cache_dir"].parent == captured["scratch_root"]
+    assert captured["text_layer_cache_dir"].parent == captured["scratch_root"]
+    assert captured["summary_path"] in captured["images"]
+    assert not captured["scratch_root"].exists()
 
 
 def test_llamaindex_react_tool_sets_match_focusparse_definitions():

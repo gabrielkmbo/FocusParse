@@ -1,5 +1,14 @@
 # Project Changelog
 
+## 2026-05-18
+
+- Added comparator `--minimal-artifacts` support for `llamaindex_react`,
+  `react`, and `agent_baseline` evals. Minimal comparator runs now disable
+  per-example prediction cache/resume and route protocol-required summary
+  tiles plus crop/text tool artifacts through per-example scratch directories,
+  preserving `agentic_multi_page` model input behavior while retaining only
+  `run.json` and `per_example.jsonl` as durable run artifacts.
+
 ## 2026-05-17
 
 - Validated the first full n=148 FocusParse harness result above the 65% target
