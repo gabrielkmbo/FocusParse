@@ -63,19 +63,20 @@ or reproducibility wrapper:
 
 ## Smoke Snapshot
 
-One-example live smokes were run with the pinned HF revision and the main
-checkout's `.env`; the loader confirmed `148` canonical rows before applying
-`--limit 1`. These are wiring checks only, not decision-grade results.
+One-example live smokes and broader `--limit 5` smoke gates were run with the
+pinned HF revision and the main checkout's `.env`; the loader confirmed `148`
+canonical rows before applying the limit. These are wiring checks only, not
+decision-grade results.
 
 | Row | Smoke status | n | Accuracy |
 | --- | --- | --- | --- |
-| Basic VLM | completed | 1 | 0/1 |
-| LlamaIndex ReAct +2 | completed after iteration-cap fix | 1 | 0/1 |
-| LlamaIndex ReAct +4 | completed after iteration-cap fix | 1 | 0/1 |
-| Coding Agent +4 | completed | 1 | 0/1 |
-| DocLens-style | completed | 1 | 0/1 |
-| AgenticOCR-style | completed | 1 | 1/1 |
-| FocusParse +4 | completed | 1 | 0/1 |
+| Basic VLM | limit-5 completed | 5 | 3/5 |
+| LlamaIndex ReAct +2 | limit-5 completed after iteration-cap fix | 5 | 3/5 |
+| LlamaIndex ReAct +4 | limit-5 completed after iteration-cap fix | 5 | 2/5 |
+| Coding Agent +4 | limit-5 completed | 5 | 0/5 |
+| DocLens-style | limit-5 completed | 5 | 2/5 |
+| AgenticOCR-style | limit-5 completed | 5 | 2/5 |
+| FocusParse +4 | limit-5 completed | 5 | 4/5 |
 
 The initial LlamaIndex ReAct +2 smoke surfaced a real failure mode: official
 LlamaIndex hit the max-iteration cap and raised before producing a final
