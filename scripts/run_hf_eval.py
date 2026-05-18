@@ -264,6 +264,7 @@ def main() -> int:
                 limit=eval_limit,
                 resume=args.resume,
                 pdfs_root=args.pdfs_root,
+                minimal_artifacts=args.minimal_artifacts,
             )
         )
     elif args.agent in ("react", "agent_baseline"):
@@ -431,10 +432,12 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help=(
-            "For disk-constrained slice experiments, skip per-example prediction "
-            "cache JSONs and agentic summary tile PNGs. Still writes the wrapper "
-            "JSON, run.json, and per_example.jsonl. Resume is ignored for focus "
-            "runs in this mode."
+            "For disk-constrained focus/AgenticOCR slice experiments, skip "
+            "per-example prediction cache JSONs. Focus skips agentic summary tile "
+            "PNGs; AgenticOCR keeps the protocol inputs but stores "
+            "tiles/crops/text/layout in per-example scratch dirs. Still writes "
+            "the wrapper JSON, run.json, and per_example.jsonl. Resume is ignored "
+            "for focus and AgenticOCR runs in this mode."
         ),
     )
     parser.add_argument(

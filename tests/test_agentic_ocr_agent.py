@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from focusparse.eval.metrics import AggregateMetrics
 from focusparse.models.base import ModelResponse
-from focusparse.pipeline.agentic_ocr_agent import AgenticOCRStyleAgent
+from focusparse.pipeline.agentic_ocr_agent import AgenticOCRStyleAgent, run_agentic_ocr_eval
+from focusparse.pipeline.workflow import WorkflowResult
 from focusparse.tools.get_text_layer import GetTextLayerInput, GetTextLayerOutput
 from focusparse.tools.inspect_region import InspectRegionInput, InspectRegionOutput
+from focusparse.traces.recorder import RunTrace, TrajectoryStep
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / "scripts" / "run_hf_eval.py"
@@ -55,6 +60,36 @@ def _example():
         supporting_bboxes=[SimpleNamespace(page=2, x0=0.10, y0=0.10, x1=0.30, y1=0.30)],
         difficulty=SimpleNamespace(visual=1, reasoning=1, localization=1),
         question_family="single_value_lookup",
+    )
+
+
+def _benchmark_example(example_id: str = "ex-agentic-ocr-eval"):
+    from focusparse._parser_bench import BBox, BenchmarkExample
+
+    return BenchmarkExample(
+        id=example_id,
+        domain="datasheet",
+        source_pdf="fake.pdf",
+        page_images=[f"images/{example_id}_page_0002_300dpi.png"],
+        question="What is the output voltage?",
+        answer="42 V",
+        answer_type="exact_match",
+        answer_unit=None,
+        tolerance=None,
+        supporting_pages=[2],
+        supporting_bboxes=[BBox(page=2, x0=0.10, y0=0.10, x1=0.30, y1=0.30)],
+        alternate_bboxes=[],
+        evidence_relations=[],
+        multi_region_required=False,
+        requires_visual=True,
+        difficulty={"visual": 1, "reasoning": 1, "localization": 1},
+        question_family="single_value_lookup",
+        stress_type="none",
+        reasoning_chain=None,
+        evidence_page_spread=0,
+        adversarial_type=None,
+        split="dev",
+        original_bboxes=[],
     )
 
 
@@ -256,3 +291,139 @@ def test_run_hf_eval_accepts_agentic_ocr_and_exposes_tool_metrics(monkeypatch):
     assert wrapped.overall.evidence_reward_mean == 0.4
     assert wrapped.overall.lazy_answer_rate == 0.0
     assert wrapped.overall.tool_calls_mean == 2.0
+
+
+async def test_run_agentic_ocr_eval_minimal_artifacts_uses_scratch_dirs(
+    tmp_path, monkeypatch, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    from focusparse.eval.tile import sample_agentic_tile_size
+
+    example = _benchmark_example()
+    (tmp_path / "fake.pdf").write_bytes(b"%PDF-1.4\n% fake test pdf\n")
+    seen: dict[str, Any] = {"agent_runs": 0}
+
+    def fake_prepare_images(
+        example,
+        *,
+        protocol,
+        images_root,
+        pdfs_root,
+        tile_cache_dir,
+    ):
+        tile_dir = Path(tile_cache_dir)
+        tile_dir.mkdir(parents=True, exist_ok=True)
+        tile_size = sample_agentic_tile_size(example.id)
+        summary = tile_dir / f"{example.id}_tiled_{tile_size}up.png"
+        summary.write_bytes(b"not a real png")
+        page = Path(images_root) / example.page_images[0]
+        seen["tile_cache_dir"] = tile_dir
+        seen["protocol"] = protocol
+        seen["pdfs_root"] = pdfs_root
+        return [summary, page]
+
+    class FakeAgent:
+        def __init__(self, *, backend_client):
+            self.backend_client = backend_client
+
+        async def run(
+            self,
+            example,
+            images,
+            *,
+            pdf_path,
+            crop_cache_dir,
+            text_layer_cache_dir,
+            layout_cache_dir,
+            **_kwargs,
+        ):
+            seen["agent_runs"] += 1
+            seen["images_existed_during_run"] = [Path(p).exists() for p in images]
+            seen["pdf_path"] = pdf_path
+            seen["crop_cache_dir"] = Path(crop_cache_dir)
+            seen["text_layer_cache_dir"] = Path(text_layer_cache_dir)
+            seen["layout_cache_dir"] = Path(layout_cache_dir)
+            for path in (
+                seen["crop_cache_dir"],
+                seen["text_layer_cache_dir"],
+                seen["layout_cache_dir"],
+            ):
+                path.mkdir(parents=True, exist_ok=True)
+                (path / "sentinel.txt").write_text("scratch")
+            trace = RunTrace(
+                example_id=example.id,
+                question=example.question,
+                steps=[
+                    TrajectoryStep(
+                        step_index=0,
+                        stage="agentic_ocr_inspect",
+                        tier="comparator",
+                        action="tool_call",
+                        tool="inspect_region",
+                    )
+                ],
+            )
+            return WorkflowResult(
+                answer="42 V",
+                citations=[
+                    {
+                        "page": 2,
+                        "bbox": [0.10, 0.10, 0.30, 0.30],
+                        "evidence_ref": "agenticocr_pkt_000",
+                    }
+                ],
+                trace=trace,
+                telemetry={
+                    "tokens_in": 10,
+                    "tokens_out": 2,
+                    "usd": 0.001,
+                    "latency_ms": 5,
+                    "agentic_ocr": {"inspected_crop_count": 1},
+                },
+            )
+
+    monkeypatch.setattr("focusparse.eval.harness._prepare_images", fake_prepare_images)
+    monkeypatch.setattr("focusparse.pipeline.agentic_ocr_agent.AgenticOCRStyleAgent", FakeAgent)
+
+    result = await run_agentic_ocr_eval(
+        [example],
+        backend_client=SimpleNamespace(),
+        backend="fake",
+        model="fake-1",
+        protocol="agentic_multi_page",
+        output_dir=tmp_path / "run",
+        images_root=tmp_path,
+        resume=True,
+        pdfs_root=tmp_path,
+        minimal_artifacts=True,
+    )
+
+    assert result["aggregate"].n == 1
+    assert seen["agent_runs"] == 1
+    assert seen["images_existed_during_run"][0] is True
+    assert seen["pdf_path"] == tmp_path / "fake.pdf"
+    scratch_dirs = [
+        seen["tile_cache_dir"],
+        seen["crop_cache_dir"],
+        seen["text_layer_cache_dir"],
+        seen["layout_cache_dir"],
+    ]
+    assert all(tmp_path / "run" not in path.parents for path in scratch_dirs)
+    assert all(not path.exists() for path in scratch_dirs)
+    assert not (tmp_path / "run" / "predictions").exists()
+    assert not (tmp_path / "run" / "tiles").exists()
+    assert not (tmp_path / "run" / "crops").exists()
+    assert not (tmp_path / "run" / "text_layer").exists()
+    assert not (tmp_path / "run" / "layout").exists()
+
+    manifest = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert manifest["artifact_policy"] == {
+        "minimal_artifacts": True,
+        "write_prediction_cache": False,
+        "resume": False,
+        "intermediate_artifacts": "per_example_scratch",
+    }
+    assert (tmp_path / "run" / "per_example.jsonl").exists()
+    assert result["per_example"][0]["agentic_meta"]["summary_view_cached"] is True

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import tempfile
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
@@ -567,6 +568,7 @@ async def run_agentic_ocr_eval(
     limit: int | None = None,
     resume: bool = True,
     pdfs_root: Path | None = None,
+    minimal_artifacts: bool = False,
 ) -> dict[str, Any]:
     """Run the AgenticOCR-style faithful-lite proxy over a benchmark slice.
 
@@ -590,8 +592,11 @@ async def run_agentic_ocr_eval(
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    pred_dir = output_dir / "predictions"
-    pred_dir.mkdir(parents=True, exist_ok=True)
+    pred_dir = output_dir / "predictions" if not minimal_artifacts else None
+    if pred_dir is not None:
+        pred_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        resume = False
 
     agent = AgenticOCRStyleAgent(backend_client=backend_client)
     available_tools = [
@@ -609,9 +614,9 @@ async def run_agentic_ocr_eval(
             break
         n += 1
 
-        cache_path = pred_dir / f"{_safe_id(example.id)}.json"
+        cache_path = pred_dir / f"{_safe_id(example.id)}.json" if pred_dir is not None else None
         record: dict[str, Any] | None = None
-        if resume and cache_path.exists():
+        if cache_path is not None and resume and cache_path.exists():
             try:
                 record = json.loads(cache_path.read_text())
                 record["cache_hit"] = True
@@ -619,51 +624,67 @@ async def run_agentic_ocr_eval(
                 record = None
 
         if record is None:
-            images = _prepare_images(
-                example,
-                protocol=protocol,
-                images_root=images_root,
-                pdfs_root=pdfs_root,
-                tile_cache_dir=output_dir / "tiles",
+            scratch = (
+                tempfile.TemporaryDirectory(prefix=f"focusparse-agenticocr-{_safe_id(example.id)}-")
+                if minimal_artifacts
+                else None
             )
-            agentic_meta: dict[str, object] | None = None
-            if protocol == "agentic_multi_page":
-                agentic_meta = _agentic_summary_meta(
-                    example,
-                    images_root,
-                    pdfs_root,
-                    output_dir / "tiles",
-                )
-            pdf_path = _resolve_pdf_path(pdfs_root, example) if pdfs_root else None
             try:
-                result = await agent.run(
+                artifact_root = Path(scratch.name) if scratch is not None else output_dir
+                tile_cache_dir = artifact_root / "tiles"
+                crop_cache_dir = artifact_root / "crops"
+                text_layer_cache_dir = artifact_root / "text_layer"
+                layout_cache_dir = artifact_root / "layout"
+                images = _prepare_images(
                     example,
-                    images,
-                    pdf_path=pdf_path,
-                    crop_cache_dir=output_dir / "crops",
-                    text_layer_cache_dir=output_dir / "text_layer",
-                )
-                image_dims = _image_dims_by_page(example, images)
-                record = _score_and_record(
-                    example,
-                    result,
                     protocol=protocol,
-                    image_dims_by_page=image_dims,
-                    available_tools=available_tools,
+                    images_root=images_root,
+                    pdfs_root=pdfs_root,
+                    tile_cache_dir=tile_cache_dir,
                 )
-                record["method_label"] = METHOD_LABEL
-                record["official_agentic_ocr"] = False
-                record["agentic_ocr_meta"] = result.telemetry.get("agentic_ocr", {})
-                if agentic_meta is not None:
-                    record["agentic_meta"] = agentic_meta
-                cache_path.write_text(json.dumps(record, default=str))
-            except Exception as exc:
-                if _should_abort_eval_on_error(exc):
-                    raise
-                logger.exception("Example %s failed: %s", example.id, exc)
-                record = _error_record(example, protocol=protocol, error=str(exc))
-                record["method_label"] = METHOD_LABEL
-                record["official_agentic_ocr"] = False
+                agentic_meta: dict[str, object] | None = None
+                if protocol == "agentic_multi_page":
+                    agentic_meta = _agentic_summary_meta(
+                        example,
+                        images_root,
+                        pdfs_root,
+                        tile_cache_dir,
+                    )
+                pdf_path = _resolve_pdf_path(pdfs_root, example) if pdfs_root else None
+                try:
+                    result = await agent.run(
+                        example,
+                        images,
+                        pdf_path=pdf_path,
+                        crop_cache_dir=crop_cache_dir,
+                        text_layer_cache_dir=text_layer_cache_dir,
+                        layout_cache_dir=layout_cache_dir,
+                    )
+                    image_dims = _image_dims_by_page(example, images)
+                    record = _score_and_record(
+                        example,
+                        result,
+                        protocol=protocol,
+                        image_dims_by_page=image_dims,
+                        available_tools=available_tools,
+                    )
+                    record["method_label"] = METHOD_LABEL
+                    record["official_agentic_ocr"] = False
+                    record["agentic_ocr_meta"] = result.telemetry.get("agentic_ocr", {})
+                    if agentic_meta is not None:
+                        record["agentic_meta"] = agentic_meta
+                    if cache_path is not None:
+                        cache_path.write_text(json.dumps(record, default=str))
+                except Exception as exc:
+                    if _should_abort_eval_on_error(exc):
+                        raise
+                    logger.exception("Example %s failed: %s", example.id, exc)
+                    record = _error_record(example, protocol=protocol, error=str(exc))
+                    record["method_label"] = METHOD_LABEL
+                    record["official_agentic_ocr"] = False
+            finally:
+                if scratch is not None:
+                    scratch.cleanup()
 
         per_example.append(record)
 
@@ -687,6 +708,14 @@ async def run_agentic_ocr_eval(
         "aggregate": aggregated.model_dump(),
         "aggregate_by_domain": {k: v.model_dump() for k, v in aggregated_by_domain.items()},
         "stage_aggregate": stage_aggregate.model_dump(),
+        "artifact_policy": {
+            "minimal_artifacts": minimal_artifacts,
+            "write_prediction_cache": pred_dir is not None,
+            "resume": resume,
+            "intermediate_artifacts": (
+                "per_example_scratch" if minimal_artifacts else "output_dir"
+            ),
+        },
         "env_snapshot": _env_snapshot(),
     }
     (output_dir / "run.json").write_text(json.dumps(run_manifest, default=str, indent=2))

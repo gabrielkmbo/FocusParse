@@ -1,5 +1,14 @@
 # Project Changelog
 
+## 2026-05-18
+
+- Added `--minimal-artifacts` support to the AgenticOCR-style comparator. The
+  HF runner now forwards the flag to `run_agentic_ocr_eval`; minimal mode
+  disables prediction-cache resume/write while preserving the
+  `agentic_multi_page` protocol path by placing tiles, crops, text-layer cache,
+  and layout cache in per-example scratch directories. `run.json` records the
+  AgenticOCR artifact policy.
+
 ## 2026-05-17
 
 - Validated the first full n=148 FocusParse harness result above the 65% target
