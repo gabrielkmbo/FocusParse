@@ -90,3 +90,28 @@ answer. The ReAct branch was patched to use `10` max iterations and
 LlamaIndex's `early_stopping_method="generate"`, then both +2 and +4 smokes
 completed and wrote standard artifacts. This keeps the main ReAct row a
 credible comparator rather than another weak prompt-loop artifact.
+
+## Full-Run Checkpoints
+
+These are live decision-grade rows unless marked otherwise. Each completed row
+used HF revision `3774c67f8b814392b6d04c939e904f749a3f52eb`, the canonical
+post-filter `n=148` example IDs, isolated staging, and `--minimal-artifacts` so
+the tracked state stays reproducible while large transient crops stay out of
+git.
+
+| Row | Status | Accuracy | Cost | Cost/correct | Artifact |
+| --- | --- | ---: | ---: | ---: | --- |
+| Basic VLM | full complete | 47.3% | $0.67 | $0.010 | `/private/tmp/focusparse-exp-basic-vlm-protocols/results/hf/related-work/basic_vlm/focusparse_simple_agentic_multi_page_0b139a04/` |
+| FocusParse +4 | full complete | 62.2% | $2.18 | $0.024 | `/private/tmp/focusparse-exp-related-work-monitor/results/hf/related-work/focusparse_reference/focusparse_focus_agentic_multi_page_0b139a04/` |
+| Coding Agent +4 | full complete | 0.7% | $2.22 | $2.223 | `/private/tmp/focusparse-exp-coding-agent/results/hf/related-work/coding_agent/focusparse_coding_agent_agentic_multi_page_0b139a04/` |
+| AgenticOCR-style | full complete | 18.2% | $2.13 | $0.079 | `/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work/agentic_ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04/` |
+| DocLens-style | running | pending | pending | pending | `/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work/doclens/` |
+| LlamaIndex ReAct +2 | queued | pending | pending | pending | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_minimal/` |
+| LlamaIndex ReAct +4 | queued | pending | pending | pending | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_full/` |
+
+Disk note: early parallel full runs filled the local filesystem because every
+row materialized contact sheets and crops simultaneously. The monitor runbook
+now treats full rows as sequential by default, deletes completed HF staging
+directories under `~/.cache/focusparse/hf_staging_related_work_full_*`, and
+keeps only `run.json`, `per_example.jsonl`, and wrapper JSON for completed
+decision-grade runs unless a qualitative audit requires richer artifacts.

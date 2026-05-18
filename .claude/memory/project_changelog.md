@@ -1,5 +1,18 @@
 # Project Changelog
 
+## 2026-05-18
+
+- Checkpointed the related-work full-run campaign on
+  `codex/exp-related-work-monitor`. Completed decision-grade
+  `agentic_multi_page` rows on the pinned parser-bench revision
+  `3774c67f8b814392b6d04c939e904f749a3f52eb`: Basic VLM 70/148 = 47.3%
+  ($0.67, $0.010/correct), FocusParse 92/148 = 62.2% ($2.18,
+  $0.024/correct), Coding Agent 1/148 = 0.7% ($2.22, $2.223/correct), and
+  AgenticOCR-style 27/148 = 18.2% ($2.13, $0.079/correct). Full rows now run
+  sequentially with `--minimal-artifacts`; completed HF staging directories are
+  deleted after artifact capture to avoid repeating the earlier disk-fill
+  failure from concurrent full runs.
+
 ## 2026-05-17
 
 - Validated the first full n=148 FocusParse harness result above the 65% target
