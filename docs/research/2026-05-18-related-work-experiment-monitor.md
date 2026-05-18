@@ -30,10 +30,11 @@ writes:
 - `results/hf/related-work-monitor/headline_table.{json,md,csv,html,jsonl}`
 - `results/hf/related-work-monitor/related_work_thesis_note.md`
 
-Generated decision-grade commands use the dedicated staging directory
-`~/.cache/focusparse/hf_staging_related_work_full` so smoke runs with
-`--limit` cannot poison the full-run denominator by leaving
-`benchmark.jsonl` at a smaller row count.
+Generated decision-grade commands use method-specific staging directories under
+`~/.cache/focusparse/hf_staging_related_work_full_*` so smoke runs with
+`--limit` cannot poison the full-run denominator by leaving `benchmark.jsonl`
+at a smaller row count, and parallel full runs cannot race on the same staged
+dataset files.
 
 ## Decision Gates
 

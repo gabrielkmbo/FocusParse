@@ -24,13 +24,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-
 PINNED_HF_REPO = "gabrielbo/parser-bench"
 PINNED_HF_SPLIT = "validation"
 PINNED_HF_REVISION = "3774c67f8b814392b6d04c939e904f749a3f52eb"
 EXPECTED_CANONICAL_N = 148
 DEFAULT_PDFS_ROOT = "~/.cache/focusparse/pdfs"
-DEFAULT_FULL_STAGING_DIR = "~/.cache/focusparse/hf_staging_related_work_full"
+DEFAULT_FULL_STAGING_ROOT = "~/.cache/focusparse/hf_staging_related_work_full"
 
 WORKTREES = {
     "basic_vlm": Path("/private/tmp/focusparse-exp-basic-vlm-protocols"),
@@ -71,6 +70,10 @@ class ExpectedRun:
         return f"results/hf/related-work/{self.method_id}"
 
     @property
+    def staging_dir(self) -> str:
+        return f"{DEFAULT_FULL_STAGING_ROOT}_{self.method_id}_{self.protocol}_{self.tool_set}"
+
+    @property
     def command(self) -> str:
         parts = [
             "uv",
@@ -86,7 +89,7 @@ class ExpectedRun:
             "--hf-revision",
             PINNED_HF_REVISION,
             "--staging-dir",
-            DEFAULT_FULL_STAGING_DIR,
+            self.staging_dir,
             "--pdfs-root",
             DEFAULT_PDFS_ROOT,
             "--output-dir",
@@ -383,6 +386,7 @@ def _registry_rows(specs: list[ExpectedRun], runs: list[dict[str, Any]]) -> list
                 **asdict(spec),
                 "command": spec.command,
                 "output_dir": spec.output_dir,
+                "staging_dir": spec.staging_dir,
                 "status": _status(spec, run),
                 "implemented": _implemented(spec),
                 "run": run,
