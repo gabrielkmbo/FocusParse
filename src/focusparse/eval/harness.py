@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -340,6 +341,7 @@ async def run_focus_eval(
     planner_tier_by_domain: dict[str, str] | None = None,
     write_prediction_cache: bool = True,
     compose_agentic_tiles: bool = True,
+    persist_intermediate_artifacts: bool = True,
 ) -> dict[str, Any]:
     """Run `FocusWorkflow` over an iterable of examples.
 
@@ -378,6 +380,10 @@ async def run_focus_eval(
         compose_agentic_tiles: when False, skip summary tile PNG creation for
             agentic_multi_page focus runs. Focus still receives the real page
             images, which is the behavior used by the workflow itself.
+        persist_intermediate_artifacts: when False, use a per-example scratch
+            cache root for crops, layout, text layers, and FTS indexes. This
+            preserves model-visible behavior but removes large intermediates
+            after each row.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -462,31 +468,51 @@ async def run_focus_eval(
                 record = None
 
         if record is None:
-            # Focus agent always sees all pages — routing is its job.
-            images = [_resolve(images_root, p) for p in (example.page_images or [])]
-            pdf_path = _resolve_pdf_path(pdfs_root, example)
-            # For `agentic_multi_page` we also compose the summary view so
-            # the per-example record carries `summary_tile_size` for
-            # appendix breakdowns. The focus pipeline itself only consumes
-            # real pages (its `_images_by_page` ignores non-page-named
-            # files), so prepending the summary view is harmless.
-            agentic_meta: dict[str, object] | None = None
-            if protocol == "agentic_multi_page":
-                if compose_agentic_tiles:
-                    agentic_images = _prepare_images(
-                        example,
-                        protocol=protocol,
-                        images_root=images_root,
-                        pdfs_root=pdfs_root,
-                        tile_cache_dir=output_dir / "tiles",
-                    )
-                    if agentic_images:
-                        images = agentic_images
-                agentic_meta = _agentic_summary_meta(
-                    example, images_root, pdfs_root, output_dir / "tiles"
+            if persist_intermediate_artifacts:
+                result_workflow = workflow
+                artifact_root_context = None
+            else:
+                artifact_root_context = tempfile.TemporaryDirectory(
+                    prefix=f"focusparse-focus-{_safe_id(example.id)}-"
                 )
+
+            if artifact_root_context is None:
+                artifact_root = output_dir
+            else:
+                artifact_root = Path(artifact_root_context.name)
+                scratch_config = config.model_copy(deep=True) if config is not None else None
+                if scratch_config is not None:
+                    scratch_config.cache.root = str(artifact_root / "cache")
+                scratch_kwargs = dict(workflow_kwargs)
+                scratch_kwargs["config"] = scratch_config
+                result_workflow = FocusWorkflow(**scratch_kwargs)
+
             try:
-                result: WorkflowResult = await workflow.run(
+                # Focus agent always sees all pages — routing is its job.
+                images = [_resolve(images_root, p) for p in (example.page_images or [])]
+                pdf_path = _resolve_pdf_path(pdfs_root, example)
+                # For `agentic_multi_page` we also compose the summary view so
+                # the per-example record carries `summary_tile_size` for
+                # appendix breakdowns. The focus pipeline itself only consumes
+                # real pages (its `_images_by_page` ignores non-page-named
+                # files), so prepending the summary view is harmless.
+                agentic_meta: dict[str, object] | None = None
+                tile_dir = artifact_root / "tiles"
+                if protocol == "agentic_multi_page":
+                    if compose_agentic_tiles:
+                        agentic_images = _prepare_images(
+                            example,
+                            protocol=protocol,
+                            images_root=images_root,
+                            pdfs_root=pdfs_root,
+                            tile_cache_dir=tile_dir,
+                        )
+                        if agentic_images:
+                            images = agentic_images
+                    agentic_meta = _agentic_summary_meta(
+                        example, images_root, pdfs_root, tile_dir
+                    )
+                result: WorkflowResult = await result_workflow.run(
                     example, images, protocol=protocol, pdf_path=pdf_path
                 )
                 image_dims = _image_dims_by_page(example, images)
@@ -509,6 +535,9 @@ async def run_focus_eval(
                     raise
                 logger.exception("Example %s failed: %s", example.id, exc)
                 record = _error_record(example, protocol=protocol, error=str(exc))
+            finally:
+                if artifact_root_context is not None:
+                    artifact_root_context.cleanup()
 
         per_example.append(record)
 
@@ -540,6 +569,7 @@ async def run_focus_eval(
         "artifact_policy": {
             "write_prediction_cache": write_prediction_cache,
             "compose_agentic_tiles": compose_agentic_tiles,
+            "persist_intermediate_artifacts": persist_intermediate_artifacts,
         },
         "env_snapshot": _env_snapshot(),
     }

@@ -243,6 +243,7 @@ def main() -> int:
                 planner_tier_by_domain=_parse_planner_tier_by_domain(args.planner_tier_by_domain),
                 write_prediction_cache=not args.minimal_artifacts,
                 compose_agentic_tiles=not args.minimal_artifacts,
+                persist_intermediate_artifacts=not args.minimal_artifacts,
             )
         )
     elif args.agent in ("react", "agent_baseline"):
