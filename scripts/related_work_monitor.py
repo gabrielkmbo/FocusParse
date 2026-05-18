@@ -62,6 +62,7 @@ class ExpectedRun:
     tool_set: str = "full"
     headline: bool = False
     appendix: bool = True
+    minimal_artifacts: bool = True
     expected_n: int = EXPECTED_CANONICAL_N
     notes: str = ""
 
@@ -95,6 +96,8 @@ class ExpectedRun:
             "--output-dir",
             self.output_dir,
         ]
+        if self.minimal_artifacts:
+            parts.append("--minimal-artifacts")
         return " ".join(parts)
 
 

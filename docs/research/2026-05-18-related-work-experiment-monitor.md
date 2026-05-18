@@ -36,6 +36,11 @@ Generated decision-grade commands use method-specific staging directories under
 at a smaller row count, and parallel full runs cannot race on the same staged
 dataset files.
 
+The generated commands default to `--minimal-artifacts` for full reruns. This
+keeps `run.json`, `per_example.jsonl`, and wrapped aggregate JSON outputs while
+routing large transient crops/contact sheets through scratch directories that
+are cleaned after each example.
+
 ## Decision Gates
 
 - All decision-grade rows must use HF revision
