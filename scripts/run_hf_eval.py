@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ _FOCUS_PROTOCOLS = frozenset(
 
 _COMPARATOR_PROTOCOLS = frozenset(
     {
-        # Comparator agents (react / agent_baseline) consume the same
+        # Comparator agents (react / agent_baseline / doclens) consume the same
         # protocols as the simple agent, but the recommended one for the
         # headline table is `agentic_multi_page`.
         "full_doc",
@@ -72,7 +73,7 @@ _COMPARATOR_PROTOCOLS = frozenset(
 def _protocol_matches_agent(agent: str, protocol: str) -> bool:
     if agent == "focus":
         return protocol in _FOCUS_PROTOCOLS
-    if agent in ("react", "agent_baseline"):
+    if agent in ("react", "agent_baseline", "doclens"):
         return protocol in _COMPARATOR_PROTOCOLS
     return protocol in _SIMPLE_PROTOCOLS
 
@@ -262,6 +263,21 @@ def main() -> int:
                 tool_set=args.tool_set,
             )
         )
+    elif args.agent == "doclens":
+        result = asyncio.run(
+            _run_doclens_eval(
+                examples,
+                backend_client=backend_client,
+                backend=reasoner.provider,
+                model=reasoner.model,
+                protocol=args.protocol,
+                output_dir=run_dir,
+                images_root=args.staging_dir,
+                limit=eval_limit,
+                resume=args.resume,
+                pdfs_root=args.pdfs_root,
+            )
+        )
     else:
         result = asyncio.run(
             run_simple_eval(
@@ -321,16 +337,151 @@ def main() -> int:
     return 0
 
 
+async def _run_doclens_eval(
+    examples,
+    *,
+    backend_client,
+    backend: str,
+    model: str,
+    protocol: str,
+    output_dir: Path,
+    images_root: Path,
+    limit: int | None = None,
+    resume: bool = True,
+    pdfs_root: Path | None = None,
+) -> dict:
+    """Run the faithful DocLens-style proxy without changing shared harness code."""
+    from focusparse.eval.harness import (
+        _agentic_summary_meta,
+        _aggregate_stages,
+        _env_snapshot,
+        _error_record,
+        _image_dims_by_page,
+        _prepare_images,
+        _resolve_pdf_path,
+        _safe_id,
+        _score_and_record,
+        _should_abort_eval_on_error,
+    )
+    from focusparse.eval.metrics import aggregate, aggregate_by_domain
+    from focusparse.pipeline.doclens_agent import DocLensAgent
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pred_dir = output_dir / "predictions"
+    pred_dir.mkdir(parents=True, exist_ok=True)
+
+    agent = DocLensAgent(backend_client=backend_client)
+    available_tools = ["layout_detect", "get_text_layer", "inspect_region"]
+
+    per_example: list[dict] = []
+    started_at = time.time()
+    n = 0
+    for example in examples:
+        if limit is not None and n >= limit:
+            break
+        n += 1
+
+        cache_path = pred_dir / f"{_safe_id(example.id)}.json"
+        record: dict | None = None
+        if resume and cache_path.exists():
+            try:
+                record = json.loads(cache_path.read_text())
+                record["cache_hit"] = True
+            except (json.JSONDecodeError, OSError):
+                record = None
+
+        if record is None:
+            images = _prepare_images(
+                example,
+                protocol=protocol,
+                images_root=images_root,
+                pdfs_root=pdfs_root,
+                tile_cache_dir=output_dir / "tiles",
+            )
+            agentic_meta: dict[str, object] | None = None
+            if protocol == "agentic_multi_page":
+                agentic_meta = _agentic_summary_meta(
+                    example,
+                    images_root,
+                    pdfs_root,
+                    output_dir / "tiles",
+                )
+            pdf_path = _resolve_pdf_path(pdfs_root, example) if pdfs_root else None
+            try:
+                result = await agent.run(
+                    example,
+                    images,
+                    pdf_path=pdf_path,
+                    crop_cache_dir=output_dir / "crops",
+                    text_layer_cache_dir=output_dir / "text_layer",
+                    layout_cache_dir=output_dir / "layout",
+                )
+                image_dims = _image_dims_by_page(example, images)
+                record = _score_and_record(
+                    example,
+                    result,
+                    protocol=protocol,
+                    image_dims_by_page=image_dims,
+                    available_tools=available_tools,
+                )
+                if agentic_meta is not None:
+                    record["agentic_meta"] = agentic_meta
+                cache_path.write_text(json.dumps(record, default=str))
+            except Exception as exc:
+                if _should_abort_eval_on_error(exc):
+                    raise
+                logger.exception("Example %s failed: %s", example.id, exc)
+                record = _error_record(example, protocol=protocol, error=str(exc))
+
+        per_example.append(record)
+
+    aggregated = aggregate(per_example)
+    aggregated_by_domain = aggregate_by_domain(per_example)
+    stage_aggregate = _aggregate_stages(per_example)
+
+    run_manifest: dict = {
+        "agent": "doclens",
+        "implementation_label": "faithful_doclens_style_proxy",
+        "available_tools": available_tools,
+        "backend": backend,
+        "model": model,
+        "protocol": protocol,
+        "n_examples": n,
+        "limit": limit,
+        "started_at": started_at,
+        "ended_at": time.time(),
+        "aggregate": aggregated.model_dump(),
+        "aggregate_by_domain": {k: v.model_dump() for k, v in aggregated_by_domain.items()},
+        "stage_aggregate": stage_aggregate.model_dump(),
+        "env_snapshot": _env_snapshot(),
+    }
+    (output_dir / "run.json").write_text(json.dumps(run_manifest, default=str, indent=2))
+    (output_dir / "per_example.jsonl").write_text(
+        "\n".join(json.dumps(r, default=str) for r in per_example) + ("\n" if per_example else "")
+    )
+
+    return {
+        "manifest": run_manifest,
+        "aggregate": aggregated,
+        "aggregate_by_domain": aggregated_by_domain,
+        "stage_aggregate": stage_aggregate,
+        "per_example": per_example,
+        "output_dir": str(output_dir),
+    }
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--agent",
-        choices=["simple", "focus", "react", "agent_baseline"],
+        choices=["simple", "focus", "react", "agent_baseline", "doclens"],
         default="simple",
         help=(
             "Method type. simple = Base VLM (no tools); focus = FocusParse "
             "stage machine; react = ReAct loop comparator; agent_baseline = "
-            "thinner generic-prompt comparator."
+            "thinner generic-prompt comparator; doclens = faithful "
+            "DocLens-style proxy comparator."
         ),
     )
     parser.add_argument(
