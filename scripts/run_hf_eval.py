@@ -72,7 +72,7 @@ _COMPARATOR_PROTOCOLS = frozenset(
 def _protocol_matches_agent(agent: str, protocol: str) -> bool:
     if agent == "focus":
         return protocol in _FOCUS_PROTOCOLS
-    if agent in ("react", "agent_baseline"):
+    if agent in ("react", "agent_baseline", "coding_agent"):
         return protocol in _COMPARATOR_PROTOCOLS
     return protocol in _SIMPLE_PROTOCOLS
 
@@ -116,7 +116,15 @@ def main() -> int:
         print(
             f"error: --agent {args.agent!r} is incompatible with --protocol "
             f"{args.protocol!r}. Simple takes {sorted(_SIMPLE_PROTOCOLS)}; "
-            f"focus takes {sorted(_FOCUS_PROTOCOLS)}.",
+            f"focus takes {sorted(_FOCUS_PROTOCOLS)}; comparators take "
+            f"{sorted(_COMPARATOR_PROTOCOLS)}.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.agent == "coding_agent" and args.tool_set != "full":
+        print(
+            "error: --agent 'coding_agent' is fixed to the full +4 tool belt; "
+            "omit --tool-set or pass --tool-set full.",
             file=sys.stderr,
         )
         return 2
@@ -245,6 +253,23 @@ def main() -> int:
                 compose_agentic_tiles=not args.minimal_artifacts,
             )
         )
+    elif args.agent == "coding_agent":
+        from focusparse.pipeline.coding_agent import run_coding_agent_eval
+
+        result = asyncio.run(
+            run_coding_agent_eval(
+                examples,
+                backend_client=backend_client,
+                backend=reasoner.provider,
+                model=reasoner.model,
+                protocol=args.protocol,
+                output_dir=run_dir,
+                images_root=args.staging_dir,
+                limit=eval_limit,
+                resume=args.resume,
+                pdfs_root=args.pdfs_root,
+            )
+        )
     elif args.agent in ("react", "agent_baseline"):
         result = asyncio.run(
             run_comparator_eval(
@@ -325,12 +350,13 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--agent",
-        choices=["simple", "focus", "react", "agent_baseline"],
+        choices=["simple", "focus", "react", "agent_baseline", "coding_agent"],
         default="simple",
         help=(
             "Method type. simple = Base VLM (no tools); focus = FocusParse "
             "stage machine; react = ReAct loop comparator; agent_baseline = "
-            "thinner generic-prompt comparator."
+            "thinner generic-prompt comparator; coding_agent = full +4 "
+            "think-act-observe comparator with run_python."
         ),
     )
     parser.add_argument(
