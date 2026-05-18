@@ -268,6 +268,8 @@ def main() -> int:
                 limit=eval_limit,
                 resume=args.resume,
                 pdfs_root=args.pdfs_root,
+                write_prediction_cache=not args.minimal_artifacts,
+                persist_intermediate_artifacts=not args.minimal_artifacts,
             )
         )
     elif args.agent in ("react", "agent_baseline"):

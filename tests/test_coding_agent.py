@@ -222,3 +222,45 @@ async def test_run_coding_agent_eval_writes_standard_artifacts(
     rows = (run_dir / "per_example.jsonl").read_text().strip().splitlines()
     assert len(rows) == 1
     assert (run_dir / "predictions" / "ex-eval.json").is_file()
+
+
+async def test_run_coding_agent_eval_minimal_artifacts_skip_prediction_cache(
+    tmp_path,
+    parser_bench_submodule_present,
+) -> None:
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    example = _example("ex-minimal")
+    image_path = tmp_path / "images" / "ex-minimal_page_0003_300dpi.png"
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (800, 600), color=(255, 255, 255)).save(image_path)
+
+    client = _ScriptedClient(
+        [
+            '{"thought": "observed", "final_answer": "5.5", '
+            '"citations": [{"page": 3, "bbox": [0.1, 0.2, 0.3, 0.4]}]}'
+        ]
+    )
+    run_dir = tmp_path / "minimal-run"
+    result = await run_coding_agent_eval(
+        [example],
+        backend_client=client,
+        backend="fake",
+        model="fake-1",
+        protocol="full_doc",
+        output_dir=run_dir,
+        images_root=tmp_path,
+        limit=1,
+        write_prediction_cache=False,
+        persist_intermediate_artifacts=False,
+    )
+
+    assert result["aggregate"].n == 1
+    manifest = json.loads((run_dir / "run.json").read_text())
+    assert manifest["artifact_policy"] == {
+        "write_prediction_cache": False,
+        "persist_intermediate_artifacts": False,
+    }
+    assert (run_dir / "per_example.jsonl").is_file()
+    assert not (run_dir / "predictions").exists()
