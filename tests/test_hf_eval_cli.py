@@ -10,6 +10,7 @@ backends and is covered by the end-to-end smoke in `tests/test_harness.py`.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -381,6 +382,165 @@ def test_argparse_minimal_artifacts(script_mod, monkeypatch):
 
     args = script_mod._parse_args()
     assert args.minimal_artifacts is True
+
+
+async def test_doclens_minimal_artifacts_uses_scratch_and_ignores_cache(
+    script_mod, monkeypatch, tmp_path, parser_bench_submodule_present
+):
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+
+    import focusparse.eval.harness as harness_mod
+    import focusparse.pipeline.doclens_agent as doclens_mod
+    from focusparse._parser_bench import BBox, BenchmarkExample
+    from focusparse.pipeline.workflow import WorkflowResult
+    from focusparse.traces.recorder import RunTrace, TrajectoryStep
+
+    example = BenchmarkExample(
+        id="ex-doclens-minimal",
+        domain="datasheet",
+        source_pdf="fake.pdf",
+        page_images=["fake_page_0001_300dpi.png"],
+        question="What is the max supply voltage?",
+        answer="5.5",
+        answer_type="numeric",
+        answer_unit="V",
+        tolerance=0.01,
+        supporting_pages=[1],
+        supporting_bboxes=[BBox(page=1, x0=0.0, y0=0.0, x1=1.0, y1=1.0)],
+        alternate_bboxes=[],
+        evidence_relations=[],
+        multi_region_required=False,
+        requires_visual=True,
+        difficulty={"visual": 1, "reasoning": 1, "localization": 1},
+        question_family="single_value_lookup",
+        stress_type="none",
+        reasoning_chain=None,
+        evidence_page_spread=0,
+        adversarial_type=None,
+        split="dev",
+        original_bboxes=[],
+    )
+
+    prepare_tile_dirs: list[Path] = []
+    meta_tile_dirs: list[Path] = []
+
+    def fake_prepare_images(
+        example_arg,
+        *,
+        protocol,
+        images_root,
+        pdfs_root=None,
+        tile_cache_dir=None,
+    ):
+        assert protocol == "agentic_multi_page"
+        assert tile_cache_dir is not None
+        tile_dir = Path(tile_cache_dir)
+        prepare_tile_dirs.append(tile_dir)
+        tile_dir.mkdir(parents=True, exist_ok=True)
+
+        from PIL import Image
+
+        summary = tile_dir / "summary.png"
+        Image.new("RGB", (8, 8), "white").save(summary)
+        page = Path(images_root) / example_arg.page_images[0]
+        page.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (8, 8), "white").save(page)
+        return [summary, page]
+
+    def fake_agentic_summary_meta(example_arg, images_root, pdfs_root, tile_cache_dir):
+        del example_arg, images_root, pdfs_root
+        meta_tile_dirs.append(Path(tile_cache_dir))
+        return {"summary_tile_size": 2, "summary_view_cached": True}
+
+    class FakeDocLensAgent:
+        calls: list[dict[str, Path | None]] = []
+
+        def __init__(self, *, backend_client) -> None:
+            self.backend_client = backend_client
+
+        async def run(
+            self,
+            example_arg,
+            images,
+            *,
+            pdf_path=None,
+            crop_cache_dir=None,
+            text_layer_cache_dir=None,
+            layout_cache_dir=None,
+        ):
+            del images, pdf_path
+            dirs = {
+                "crop": Path(crop_cache_dir) if crop_cache_dir is not None else None,
+                "text": Path(text_layer_cache_dir) if text_layer_cache_dir is not None else None,
+                "layout": Path(layout_cache_dir) if layout_cache_dir is not None else None,
+            }
+            FakeDocLensAgent.calls.append(dirs)
+            for path in dirs.values():
+                assert path is not None
+                path.mkdir(parents=True, exist_ok=True)
+                (path / "marker.txt").write_text("scratch")
+
+            trace = RunTrace(
+                example_id=example_arg.id,
+                question=example_arg.question,
+                steps=[
+                    TrajectoryStep(
+                        step_index=0,
+                        stage="localize",
+                        tier="comparator",
+                        action="tool_call",
+                        tool="inspect_region",
+                    )
+                ],
+            )
+            return WorkflowResult(
+                answer="5.5",
+                citations=[{"page": 1, "bbox": [0.0, 0.0, 1.0, 1.0]}],
+                trace=trace,
+                telemetry={"tokens_in": 1, "tokens_out": 1, "usd": 0.0, "latency_ms": 1},
+            )
+
+    monkeypatch.setattr(harness_mod, "_prepare_images", fake_prepare_images)
+    monkeypatch.setattr(harness_mod, "_agentic_summary_meta", fake_agentic_summary_meta)
+    monkeypatch.setattr(doclens_mod, "DocLensAgent", FakeDocLensAgent)
+
+    output_dir = tmp_path / "run"
+    pred_dir = output_dir / "predictions"
+    pred_dir.mkdir(parents=True)
+    stale_cache = pred_dir / "ex-doclens-minimal.json"
+    stale_cache.write_text(json.dumps({"answer_pred": "stale"}))
+
+    result = await script_mod._run_doclens_eval(
+        [example],
+        backend_client=object(),
+        backend="fake",
+        model="fake-1",
+        protocol="agentic_multi_page",
+        output_dir=output_dir,
+        images_root=tmp_path / "staging",
+        resume=True,
+        minimal_artifacts=True,
+    )
+
+    assert result["per_example"][0]["answer_pred"] == "5.5"
+    assert json.loads(stale_cache.read_text())["answer_pred"] == "stale"
+    assert FakeDocLensAgent.calls
+    assert prepare_tile_dirs == meta_tile_dirs
+
+    scratch_root = prepare_tile_dirs[0].parent
+    assert output_dir not in scratch_root.parents
+    assert FakeDocLensAgent.calls[0]["crop"] == scratch_root / "crops"
+    assert FakeDocLensAgent.calls[0]["text"] == scratch_root / "text_layer"
+    assert FakeDocLensAgent.calls[0]["layout"] == scratch_root / "layout"
+    assert not scratch_root.exists()
+
+    manifest = json.loads((output_dir / "run.json").read_text())
+    assert manifest["artifact_policy"] == {
+        "write_prediction_cache": False,
+        "resume_enabled": False,
+        "artifact_cache_scope": "per_example_scratch",
+    }
 
 
 def test_argparse_layout_preflight_flags(script_mod, monkeypatch):

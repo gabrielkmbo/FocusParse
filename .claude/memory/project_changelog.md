@@ -1,5 +1,13 @@
 # Project Changelog
 
+## 2026-05-18
+
+- Extended `scripts/run_hf_eval.py --minimal-artifacts` to the DocLens-style
+  comparator. DocLens now disables prediction-cache resume in minimal mode and
+  routes derived tiles, crops, layout JSON, and text-layer JSON through
+  per-example scratch directories while still preserving the requested protocol
+  behavior and writing `run.json`, `per_example.jsonl`, and the wrapper JSON.
+
 ## 2026-05-17
 
 - Validated the first full n=148 FocusParse harness result above the 65% target

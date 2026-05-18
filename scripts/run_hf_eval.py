@@ -22,7 +22,9 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -276,6 +278,7 @@ def main() -> int:
                 limit=eval_limit,
                 resume=args.resume,
                 pdfs_root=args.pdfs_root,
+                minimal_artifacts=args.minimal_artifacts,
             )
         )
     else:
@@ -349,8 +352,14 @@ async def _run_doclens_eval(
     limit: int | None = None,
     resume: bool = True,
     pdfs_root: Path | None = None,
+    minimal_artifacts: bool = False,
 ) -> dict:
-    """Run the faithful DocLens-style proxy without changing shared harness code."""
+    """Run the faithful DocLens-style proxy without changing shared harness code.
+
+    Minimal-artifacts mode keeps the DocLens protocol path intact, but makes
+    derived tiles/crops/layout/text caches per-example scratch data and disables
+    the prediction cache/resume path.
+    """
     from focusparse.eval.harness import (
         _agentic_summary_meta,
         _aggregate_stages,
@@ -368,8 +377,12 @@ async def _run_doclens_eval(
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    pred_dir = output_dir / "predictions"
-    pred_dir.mkdir(parents=True, exist_ok=True)
+    write_prediction_cache = not minimal_artifacts
+    pred_dir = output_dir / "predictions" if write_prediction_cache else None
+    if pred_dir is not None:
+        pred_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        resume = False
 
     agent = DocLensAgent(backend_client=backend_client)
     available_tools = ["layout_detect", "get_text_layer", "inspect_region"]
@@ -382,9 +395,9 @@ async def _run_doclens_eval(
             break
         n += 1
 
-        cache_path = pred_dir / f"{_safe_id(example.id)}.json"
+        cache_path = pred_dir / f"{_safe_id(example.id)}.json" if pred_dir is not None else None
         record: dict | None = None
-        if resume and cache_path.exists():
+        if cache_path is not None and resume and cache_path.exists():
             try:
                 record = json.loads(cache_path.read_text())
                 record["cache_hit"] = True
@@ -392,47 +405,60 @@ async def _run_doclens_eval(
                 record = None
 
         if record is None:
-            images = _prepare_images(
-                example,
-                protocol=protocol,
-                images_root=images_root,
-                pdfs_root=pdfs_root,
-                tile_cache_dir=output_dir / "tiles",
+            artifact_context = (
+                tempfile.TemporaryDirectory(prefix=f"doclens-{_safe_id(example.id)}-")
+                if minimal_artifacts
+                else nullcontext(str(output_dir))
             )
-            agentic_meta: dict[str, object] | None = None
-            if protocol == "agentic_multi_page":
-                agentic_meta = _agentic_summary_meta(
+            with artifact_context as artifact_root_raw:
+                artifact_root = Path(artifact_root_raw)
+                tile_cache_dir = artifact_root / "tiles"
+                crop_cache_dir = artifact_root / "crops"
+                text_layer_cache_dir = artifact_root / "text_layer"
+                layout_cache_dir = artifact_root / "layout"
+
+                images = _prepare_images(
                     example,
-                    images_root,
-                    pdfs_root,
-                    output_dir / "tiles",
-                )
-            pdf_path = _resolve_pdf_path(pdfs_root, example) if pdfs_root else None
-            try:
-                result = await agent.run(
-                    example,
-                    images,
-                    pdf_path=pdf_path,
-                    crop_cache_dir=output_dir / "crops",
-                    text_layer_cache_dir=output_dir / "text_layer",
-                    layout_cache_dir=output_dir / "layout",
-                )
-                image_dims = _image_dims_by_page(example, images)
-                record = _score_and_record(
-                    example,
-                    result,
                     protocol=protocol,
-                    image_dims_by_page=image_dims,
-                    available_tools=available_tools,
+                    images_root=images_root,
+                    pdfs_root=pdfs_root,
+                    tile_cache_dir=tile_cache_dir,
                 )
-                if agentic_meta is not None:
-                    record["agentic_meta"] = agentic_meta
-                cache_path.write_text(json.dumps(record, default=str))
-            except Exception as exc:
-                if _should_abort_eval_on_error(exc):
-                    raise
-                logger.exception("Example %s failed: %s", example.id, exc)
-                record = _error_record(example, protocol=protocol, error=str(exc))
+                agentic_meta: dict[str, object] | None = None
+                if protocol == "agentic_multi_page":
+                    agentic_meta = _agentic_summary_meta(
+                        example,
+                        images_root,
+                        pdfs_root,
+                        tile_cache_dir,
+                    )
+                pdf_path = _resolve_pdf_path(pdfs_root, example) if pdfs_root else None
+                try:
+                    result = await agent.run(
+                        example,
+                        images,
+                        pdf_path=pdf_path,
+                        crop_cache_dir=crop_cache_dir,
+                        text_layer_cache_dir=text_layer_cache_dir,
+                        layout_cache_dir=layout_cache_dir,
+                    )
+                    image_dims = _image_dims_by_page(example, images)
+                    record = _score_and_record(
+                        example,
+                        result,
+                        protocol=protocol,
+                        image_dims_by_page=image_dims,
+                        available_tools=available_tools,
+                    )
+                    if agentic_meta is not None:
+                        record["agentic_meta"] = agentic_meta
+                    if cache_path is not None:
+                        cache_path.write_text(json.dumps(record, default=str))
+                except Exception as exc:
+                    if _should_abort_eval_on_error(exc):
+                        raise
+                    logger.exception("Example %s failed: %s", example.id, exc)
+                    record = _error_record(example, protocol=protocol, error=str(exc))
 
         per_example.append(record)
 
@@ -454,6 +480,11 @@ async def _run_doclens_eval(
         "aggregate": aggregated.model_dump(),
         "aggregate_by_domain": {k: v.model_dump() for k, v in aggregated_by_domain.items()},
         "stage_aggregate": stage_aggregate.model_dump(),
+        "artifact_policy": {
+            "write_prediction_cache": write_prediction_cache,
+            "resume_enabled": bool(resume and write_prediction_cache),
+            "artifact_cache_scope": "per_example_scratch" if minimal_artifacts else "run_dir",
+        },
         "env_snapshot": _env_snapshot(),
     }
     (output_dir / "run.json").write_text(json.dumps(run_manifest, default=str, indent=2))
@@ -561,9 +592,10 @@ def _parse_args() -> argparse.Namespace:
         default=False,
         help=(
             "For disk-constrained slice experiments, skip per-example prediction "
-            "cache JSONs and agentic summary tile PNGs. Still writes the wrapper "
-            "JSON, run.json, and per_example.jsonl. Resume is ignored for focus "
-            "runs in this mode."
+            "cache JSONs. Focus skips persistent agentic summary tile PNGs; "
+            "DocLens uses per-example scratch dirs for tiles/crops/layout/text. "
+            "Still writes the wrapper JSON, run.json, and per_example.jsonl. "
+            "Resume is ignored for focus and DocLens runs in this mode."
         ),
     )
     parser.add_argument(
