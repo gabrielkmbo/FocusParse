@@ -72,7 +72,7 @@ _COMPARATOR_PROTOCOLS = frozenset(
 def _protocol_matches_agent(agent: str, protocol: str) -> bool:
     if agent == "focus":
         return protocol in _FOCUS_PROTOCOLS
-    if agent in ("react", "agent_baseline"):
+    if agent in ("react", "agent_baseline", "agentic_ocr"):
         return protocol in _COMPARATOR_PROTOCOLS
     return protocol in _SIMPLE_PROTOCOLS
 
@@ -161,8 +161,12 @@ def main() -> int:
     # tool_set in the key so +2 / +4 variants of the same agent don't
     # collide on disk (the headline-table sweep runs both per agent).
     # Suffix is "" for the historical default ("full") so legacy paths
-    # under results/hf/full-eval-v1/ keep matching.
-    tool_suffix = "" if args.tool_set == "full" else f"_t{args.tool_set}"
+    # under results/hf/full-eval-v1/ keep matching. AgenticOCR-style has a
+    # fixed image/element/region action vocabulary, so --tool-set does not
+    # define a separate row for that method.
+    tool_suffix = (
+        "" if args.tool_set == "full" or args.agent == "agentic_ocr" else f"_t{args.tool_set}"
+    )
     config_key = f"focusparse_{args.agent}_{args.protocol}_{tier_sha8}{tool_suffix}"
     run_dir = args.output_dir / config_key
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -245,6 +249,23 @@ def main() -> int:
                 compose_agentic_tiles=not args.minimal_artifacts,
             )
         )
+    elif args.agent == "agentic_ocr":
+        from focusparse.pipeline.agentic_ocr_agent import run_agentic_ocr_eval
+
+        result = asyncio.run(
+            run_agentic_ocr_eval(
+                examples,
+                backend_client=backend_client,
+                backend=reasoner.provider,
+                model=reasoner.model,
+                protocol=args.protocol,
+                output_dir=run_dir,
+                images_root=args.staging_dir,
+                limit=eval_limit,
+                resume=args.resume,
+                pdfs_root=args.pdfs_root,
+            )
+        )
     elif args.agent in ("react", "agent_baseline"):
         result = asyncio.run(
             run_comparator_eval(
@@ -325,12 +346,13 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--agent",
-        choices=["simple", "focus", "react", "agent_baseline"],
+        choices=["simple", "focus", "react", "agent_baseline", "agentic_ocr"],
         default="simple",
         help=(
             "Method type. simple = Base VLM (no tools); focus = FocusParse "
             "stage machine; react = ReAct loop comparator; agent_baseline = "
-            "thinner generic-prompt comparator."
+            "thinner generic-prompt comparator; agentic_ocr = AgenticOCR-style "
+            "faithful-lite proxy (not official trained AgenticOCR)."
         ),
     )
     parser.add_argument(
@@ -790,10 +812,14 @@ def _wrap_results(
         total_input_tokens=int(round(agg.tokens_in_mean * agg.n)) if agg.n else 0,
         total_output_tokens=int(round(agg.tokens_out_mean * agg.n)) if agg.n else 0,
         latency_ms_mean=agg.latency_ms_mean,
-        # focus-agent extras (populated only when agent == 'focus' post-Phase-2)
-        evidence_reward_mean=(agg.evidence_reward_mean if agent == "focus" else None),
-        lazy_answer_rate=(agg.lazy_answer_rate if agent == "focus" else None),
-        tool_calls_mean=(agg.tool_calls_mean if agent == "focus" else None),
+        # Tool/evidence extras are populated for the focus harness and for
+        # the AgenticOCR-style proxy, whose lazy/duplicate crop metadata is
+        # a central evaluation signal.
+        evidence_reward_mean=(
+            agg.evidence_reward_mean if agent in {"focus", "agentic_ocr"} else None
+        ),
+        lazy_answer_rate=(agg.lazy_answer_rate if agent in {"focus", "agentic_ocr"} else None),
+        tool_calls_mean=(agg.tool_calls_mean if agent in {"focus", "agentic_ocr"} else None),
     )
     return EvalRunResults(
         config_key=config_key,
