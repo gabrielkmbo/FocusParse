@@ -89,6 +89,7 @@ async def _inspect_region_runner(
     layout_cache_dir: Path | None = None,
     **_unused: Any,
 ) -> dict[str, Any]:
+    inp = _normalize_page_image_inspect_input(inp)
     out = await _inspect_region(
         inp,
         cache_dir=cache_dir,
@@ -97,6 +98,22 @@ async def _inspect_region_runner(
         layout_cache_dir=layout_cache_dir,
     )
     return out.model_dump()
+
+
+def _normalize_page_image_inspect_input(inp: InspectRegionInput) -> InspectRegionInput:
+    """Let agent tools crop already-rendered page images.
+
+    Comparator agents receive page PNG paths in their initial turn. When they
+    use one as ``doc_path`` they often keep the source document page number
+    (for example page 50). PyMuPDF opens a PNG as a one-page document, so the
+    crop itself must use page 1 while the agent can still cite page 50 in its
+    final answer.
+    """
+
+    suffix = Path(inp.doc_path).suffix.lower()
+    if suffix in {".png", ".jpg", ".jpeg", ".webp"} and inp.page != 1:
+        return inp.model_copy(update={"page": 1})
+    return inp
 
 
 def _summarize_inspect_region(out: dict[str, Any]) -> str:
@@ -121,8 +138,16 @@ async def _get_text_layer_runner(
     **_unused: Any,
 ) -> dict[str, Any]:
     # Caller may supply either `cache_dir` (legacy) or `text_layer_cache_dir`.
+    inp = _normalize_page_image_text_layer_input(inp)
     out = await _get_text_layer(inp, cache_dir=text_layer_cache_dir or cache_dir)
     return out.model_dump()
+
+
+def _normalize_page_image_text_layer_input(inp: GetTextLayerInput) -> GetTextLayerInput:
+    suffix = Path(inp.doc_path).suffix.lower()
+    if suffix in {".png", ".jpg", ".jpeg", ".webp"} and inp.page != 1:
+        return inp.model_copy(update={"page": 1})
+    return inp
 
 
 def _summarize_get_text_layer(out: dict[str, Any]) -> str:
@@ -218,7 +243,39 @@ def _summarize_layout_detect(out: dict[str, Any]) -> str:
     n = out.get("n_regions", 0)
     types = sorted({r.get("label") or "?" for r in out.get("regions") or []})
     page = out.get("page", "?")
-    return f"page={page}, n_regions={n}, types={types}"
+    width = float(out.get("image_width") or 0)
+    height = float(out.get("image_height") or 0)
+    regions: list[str] = []
+    for idx, region in enumerate((out.get("regions") or [])[:6]):
+        bbox = region.get("bbox") or []
+        norm = _norm_bbox_from_layout_bbox(bbox, width=width, height=height)
+        if norm is None:
+            bbox_part = f"bbox_px={bbox}"
+        else:
+            bbox_part = "bbox_norm=[{:.3f},{:.3f},{:.3f},{:.3f}]".format(*norm)
+        label = region.get("label") or "?"
+        score = region.get("score")
+        figure = region.get("figure_class")
+        score_part = f" score={float(score):.2f}" if isinstance(score, int | float) else ""
+        figure_part = f" figure={figure}" if figure else ""
+        regions.append(f"{idx}:{label}{figure_part}{score_part} {bbox_part}")
+    region_part = "; regions=" + " | ".join(regions) if regions else ""
+    return f"page={page}, image_size={int(width)}x{int(height)}, n_regions={n}, types={types}{region_part}"
+
+
+def _norm_bbox_from_layout_bbox(
+    bbox: Any,
+    *,
+    width: float,
+    height: float,
+) -> tuple[float, float, float, float] | None:
+    if not (isinstance(bbox, list | tuple) and len(bbox) == 4 and width > 0 and height > 0):
+        return None
+    try:
+        x0, y0, x1, y1 = (float(v) for v in bbox)
+    except (TypeError, ValueError):
+        return None
+    return (x0 / width, y0 / height, x1 / width, y1 / height)
 
 
 async def _run_python_runner(
