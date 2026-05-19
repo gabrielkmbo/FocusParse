@@ -2,6 +2,17 @@
 
 ## 2026-05-18
 
+- Completed the decision-grade `agentic_multi_page` full run for the trusted
+  LlamaIndex ReAct comparator with the minimal `+2` tool set
+  (`inspect_region`, `get_text_layer`) on pinned HF revision
+  `3774c67f8b814392b6d04c939e904f749a3f52eb`. Artifact:
+  `results/hf/related-work/llamaindex_react_minimal/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal`.
+  Result: **18/148 = 12.2%**, cost **$6.36**, cost/correct **$0.353**,
+  mean latency **29.9s**, page recall **0.544**, bbox IoU **0.172**,
+  evidence reward **0.0345**, lazy-answer rate **0.426**, mean tool calls
+  **3.65**. This replaces the old custom ReAct row as the main ReAct comparator
+  candidate for `+2`, but it is not competitive with FocusParse.
+
 - Added comparator `--minimal-artifacts` support for `llamaindex_react`,
   `react`, and `agent_baseline` evals. Minimal comparator runs now disable
   per-example prediction cache/resume and route protocol-required summary
