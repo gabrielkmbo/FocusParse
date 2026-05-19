@@ -20,7 +20,14 @@ def _load_monitor_module():
     return mod
 
 
-def _write_fake_run(root: Path, *, agent: str = "simple", protocol: str = "agentic_multi_page") -> Path:
+def _write_fake_run(
+    root: Path,
+    *,
+    agent: str = "simple",
+    protocol: str = "agentic_multi_page",
+    example_ids: list[str] | None = None,
+) -> Path:
+    example_ids = example_ids or ["a", "b"]
     run_dir = root / "focusparse_simple_agentic_multi_page_deadbeef"
     run_dir.mkdir(parents=True)
     (run_dir / "run.json").write_text(
@@ -31,7 +38,7 @@ def _write_fake_run(root: Path, *, agent: str = "simple", protocol: str = "agent
                 "tool_set": "full",
                 "ended_at": 1,
                 "aggregate": {
-                    "n": 2,
+                    "n": len(example_ids),
                     "accuracy": 0.5,
                     "usd_per_correct": 0.01,
                     "latency_ms_mean": 1000.0,
@@ -43,7 +50,7 @@ def _write_fake_run(root: Path, *, agent: str = "simple", protocol: str = "agent
                 },
                 "aggregate_by_domain": {
                     "_overall": {
-                        "n": 2,
+                        "n": len(example_ids),
                         "accuracy": 0.5,
                         "accuracy_ci": [0.0, 1.0],
                         "usd_per_correct": 0.01,
@@ -59,10 +66,8 @@ def _write_fake_run(root: Path, *, agent: str = "simple", protocol: str = "agent
     )
     (run_dir / "per_example.jsonl").write_text(
         "\n".join(
-            [
-                json.dumps({"example_id": "a", "answer_correct": 1}),
-                json.dumps({"example_id": "b", "answer_correct": 0}),
-            ]
+            json.dumps({"example_id": example_id, "answer_correct": idx % 2 == 0})
+            for idx, example_id in enumerate(example_ids)
         )
         + "\n"
     )
@@ -96,6 +101,7 @@ def test_scan_runs_loads_wrapper_and_per_example(tmp_path: Path) -> None:
     assert runs[0]["hf_revision"] == monitor.PINNED_HF_REVISION
     assert runs[0]["per_example_count"] == 2
     assert runs[0]["unique_example_ids"] == 2
+    assert runs[0]["duplicate_example_ids"] == {}
 
 
 def test_registry_marks_verified_when_count_and_revision_match(tmp_path: Path) -> None:
@@ -117,6 +123,31 @@ def test_registry_marks_verified_when_count_and_revision_match(tmp_path: Path) -
 
     assert rows[0]["status"] == "verified"
     assert rows[0]["run"]["aggregate"]["accuracy"] == 0.5
+
+
+def test_registry_verifies_canonical_slice_with_known_duplicate_id(tmp_path: Path) -> None:
+    monitor = _load_monitor_module()
+    root = tmp_path / "results"
+    example_ids = [f"ex-{idx:03d}" for idx in range(147)] + ["dat-DS5091D-00-0016"]
+    example_ids[16] = "dat-DS5091D-00-0016"
+    _write_fake_run(root, example_ids=example_ids)
+    runs = monitor._scan_runs([root])
+    spec = monitor.ExpectedRun(
+        method_id="fixture",
+        label="Fixture",
+        branch="codex/fixture",
+        worktree=str(tmp_path),
+        agent="simple",
+        protocol="agentic_multi_page",
+        expected_n=monitor.EXPECTED_CANONICAL_N,
+    )
+
+    rows = monitor._registry_rows([spec], runs)
+
+    assert rows[0]["status"] == "verified"
+    assert rows[0]["run"]["per_example_count"] == 148
+    assert rows[0]["run"]["unique_example_ids"] == 147
+    assert rows[0]["run"]["duplicate_example_ids"] == {"dat-DS5091D-00-0016": 2}
 
 
 def test_headline_table_preserves_missing_rows(tmp_path: Path) -> None:

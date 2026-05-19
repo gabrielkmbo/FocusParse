@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>FocusParse headline — agentic_multi_page</title>
+<style>
+table { border-collapse: collapse; font-family: -apple-system, sans-serif; font-size: 14px; }
+th, td { border: 1px solid #ccc; padding: 6px 12px; text-align: left; }
+th { background: #f4f4f4; }
+tr:nth-child(even) td { background: #fafafa; }
+caption { caption-side: bottom; padding: 8px; color: #555; }
+</style>
+</head><body>
+<h2>Headline table — protocol: <code>agentic_multi_page</code></h2>
+<table>
+<tr><th>Method</th><th>Datasheets accuracy</th><th>Finance accuracy</th><th>Datasheets $/correct</th><th>Finance $/correct</th><th>Datasheets latency</th><th>Finance latency</th><th>Overall accuracy</th><th>Overall $/correct</th><th>Overall latency</th><th>n</th></tr>
+<tr><td><b>Basic VLM</b></td><td>51.5% [41.6, 61.4]</td><td>38.3% [23.4, 51.1]</td><td>$0.0088 [$0.0074, $0.0108]</td><td>$0.0120 [$0.0089, $0.0196]</td><td>3.36s</td><td>3.52s</td><td>47.3% [39.9, 55.4]</td><td>$0.0096 [$0.0082, $0.0115]</td><td>3.41s</td><td>148</td></tr><tr><td><b>LlamaIndex ReAct +2</b></td><td>14.9% [8.9, 21.8]</td><td>6.4% [0.0, 14.9]</td><td>$0.2885 [$0.1922, $0.5146]</td><td>$0.6830 [$0.2968, $2.1374]</td><td>28.85s</td><td>31.36s</td><td>12.2% [6.8, 17.6]</td><td>$0.3542 [$0.2374, $0.6347]</td><td>29.65s</td><td>148</td></tr><tr><td><b>LlamaIndex ReAct +4</b></td><td>11.9% [5.9, 18.8]</td><td>6.4% [0.0, 14.9]</td><td>$0.4486 [$0.2844, $0.9266]</td><td>$0.8032 [$0.3443, $2.4771]</td><td>29.85s</td><td>30.74s</td><td>10.1% [5.4, 14.9]</td><td>$0.5195 [$0.3450, $0.9932]</td><td>30.13s</td><td>148</td></tr><tr><td><b>Coding Agent +4</b></td><td>32.7% [23.8, 41.6]</td><td>10.6% [2.1, 19.1]</td><td>$0.1090 [$0.0846, $0.1541]</td><td>$0.3642 [$0.1960, $0.9857]</td><td>17.41s</td><td>19.80s</td><td>25.7% [18.9, 33.1]</td><td>$0.1425 [$0.1087, $0.2008]</td><td>18.17s</td><td>148</td></tr><tr><td><b>DocLens-style</b></td><td>22.8% [15.8, 30.7]</td><td>4.3% [0.0, 10.6]</td><td>$0.1130 [$0.0837, $0.1673]</td><td>$0.5950 [$0.2337, $1.2334]</td><td>18.85s</td><td>19.78s</td><td>16.9% [11.5, 23.6]</td><td>$0.1516 [$0.1085, $0.2302]</td><td>19.14s</td><td>148</td></tr><tr><td><b>AgenticOCR-style</b></td><td>21.8% [13.9, 29.7]</td><td>4.3% [0.0, 10.6]</td><td>$0.0709 [$0.0507, $0.1125]</td><td>$0.1541 [$0.0572, $0.3858]</td><td>10.21s</td><td>4.19s</td><td>16.2% [10.1, 23.0]</td><td>$0.0778 [$0.0533, $0.1251]</td><td>8.30s</td><td>148</td></tr><tr><td><b>FocusParse +4</b></td><td>70.3%</td><td>59.6%</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>66.9%</td><td>$0.0232</td><td>3.70s</td><td>148</td></tr>
+<caption>Generated 2026-05-19T20:02:46.897496+00:00. CIs are 95% percentile-bootstrap (n_resamples=1000, seed=42).</caption>
+</table>
+</body></html>

@@ -1,5 +1,23 @@
 # Project Changelog
 
+## 2026-05-19
+
+- Cleaned the related-work monitor branch for public branch browsing and
+  reruns. Added the top-level `RELATED_WORK_EXPERIMENTS.md` runbook, committed
+  small generated monitor snapshots under
+  `docs/research/related-work-monitor/`, and taught
+  `scripts/related_work_monitor.py` to copy those snapshots with
+  `--snapshot-dir` while keeping raw `results/` gitignored. The monitor now
+  records the pinned slice's 148 rows / 147 unique IDs shape explicitly because
+  `dat-DS5091D-00-0016` appears twice, and full headline rows can be marked
+  `verified` against that expected duplicate-ID contract.
+- Updated the related-work docs to use the fixed full rerun rows as the
+  decision-grade comparator table: LlamaIndex ReAct +2 `18/148 = 12.2%`,
+  LlamaIndex ReAct +4 `15/148 = 10.1%`, Coding Agent +4 `38/148 = 25.7%`,
+  DocLens-style `25/148 = 16.9%`, AgenticOCR-style `24/148 = 16.2%`, Basic
+  VLM `70/148 = 47.3%`, and the FocusParse headline checkpoint
+  `99/148 = 66.9%`.
+
 ## 2026-05-18
 
 - Checkpointed the related-work full-run campaign on

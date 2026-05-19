@@ -1,0 +1,741 @@
+{
+  "expected": {
+    "canonical_duplicate_ids": {
+      "dat-DS5091D-00-0016": 2
+    },
+    "canonical_n": 148,
+    "canonical_unique_ids": 147,
+    "hf_repo": "gabrielbo/parser-bench",
+    "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+    "hf_split": "validation"
+  },
+  "observed_runs": [
+    {
+      "agent": "simple",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "835d8b90da8f7c1a",
+        "num_rows": 148,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {
+        "dat-DS5091D-00-0016": 2
+      },
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 148,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-basic-vlm-protocols/results/hf/related-work/basic_vlm/focusparse_simple_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 147
+    },
+    {
+      "agent": "simple",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "59072a443e78fc6a",
+        "num_rows": 1,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 1,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-basic-vlm-protocols/results/hf/related-work-smoke/basic-vlm/focusparse_simple_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 1
+    },
+    {
+      "agent": "simple",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-basic-vlm-protocols/results/hf/related-work-smoke5/basic-vlm/focusparse_simple_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "llamaindex_react",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "835d8b90da8f7c1a",
+        "num_rows": 148,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {
+        "dat-DS5091D-00-0016": 2
+      },
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 148,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_full/focusparse_llamaindex_react_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 147
+    },
+    {
+      "agent": "llamaindex_react",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "835d8b90da8f7c1a",
+        "num_rows": 148,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {
+        "dat-DS5091D-00-0016": 2
+      },
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 148,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_minimal/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal",
+      "tool_set": "minimal",
+      "unique_example_ids": 147
+    },
+    {
+      "agent": "llamaindex_react",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fix-smoke/llamaindex-react-full-pageimage-fix/focusparse_llamaindex_react_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "llamaindex_react",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fix-smoke/llamaindex-react-minimal-pageimage-fix/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal",
+      "tool_set": "minimal",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "llamaindex_react",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fix-smoke/llamaindex-react-full-layout-summary-fix/focusparse_llamaindex_react_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "llamaindex_react",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "59072a443e78fc6a",
+        "num_rows": 1,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 1,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-smoke/llamaindex-react-full/focusparse_llamaindex_react_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 1
+    },
+    {
+      "agent": "llamaindex_react",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "59072a443e78fc6a",
+        "num_rows": 1,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 1,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-smoke/llamaindex-react-minimal/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal",
+      "tool_set": "minimal",
+      "unique_example_ids": 1
+    },
+    {
+      "agent": "llamaindex_react",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "59072a443e78fc6a",
+        "num_rows": 1,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 1,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-smoke/llamaindex-react-minimal-v2/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal",
+      "tool_set": "minimal",
+      "unique_example_ids": 1
+    },
+    {
+      "agent": "llamaindex_react",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "835d8b90da8f7c1a",
+        "num_rows": 148,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {
+        "dat-DS5091D-00-0016": 2
+      },
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 148,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fixed-full/llamaindex_react_full/focusparse_llamaindex_react_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 147
+    },
+    {
+      "agent": "llamaindex_react",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "835d8b90da8f7c1a",
+        "num_rows": 148,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {
+        "dat-DS5091D-00-0016": 2
+      },
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 148,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fixed-full/llamaindex_react_minimal/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal",
+      "tool_set": "minimal",
+      "unique_example_ids": 147
+    },
+    {
+      "agent": "llamaindex_react",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-smoke5/llamaindex-react-full/focusparse_llamaindex_react_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "llamaindex_react",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-smoke5/llamaindex-react-minimal/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal",
+      "tool_set": "minimal",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "coding_agent",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "835d8b90da8f7c1a",
+        "num_rows": 148,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {
+        "dat-DS5091D-00-0016": 2
+      },
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 148,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-coding-agent/results/hf/related-work/coding_agent/focusparse_coding_agent_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 147
+    },
+    {
+      "agent": "coding_agent",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-coding-agent/results/hf/related-work-fix-smoke/coding-agent-parser-pageimage-fix/focusparse_coding_agent_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "coding_agent",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-coding-agent/results/hf/related-work-fix-smoke/coding-agent-parser-fix/focusparse_coding_agent_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "coding_agent",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-coding-agent/results/hf/related-work-fix-smoke/coding-agent-actionable-json-fix/focusparse_coding_agent_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "coding_agent",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-coding-agent/results/hf/related-work-fix-smoke/coding-agent-layout-summary-fix/focusparse_coding_agent_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "coding_agent",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "59072a443e78fc6a",
+        "num_rows": 1,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 1,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-coding-agent/results/hf/related-work-smoke/coding-agent/focusparse_coding_agent_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 1
+    },
+    {
+      "agent": "coding_agent",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "835d8b90da8f7c1a",
+        "num_rows": 148,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {
+        "dat-DS5091D-00-0016": 2
+      },
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 148,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-coding-agent/results/hf/related-work-fixed-full/coding_agent/focusparse_coding_agent_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 147
+    },
+    {
+      "agent": "coding_agent",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-coding-agent/results/hf/related-work-smoke5/coding-agent/focusparse_coding_agent_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "doclens",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "835d8b90da8f7c1a",
+        "num_rows": 148,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {
+        "dat-DS5091D-00-0016": 2
+      },
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 148,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work/doclens/focusparse_doclens_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 147
+    },
+    {
+      "agent": "doclens",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work-fix-smoke/doclens-json-parser-fix/focusparse_doclens_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "doclens",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "59072a443e78fc6a",
+        "num_rows": 1,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 1,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work-smoke/doclens/focusparse_doclens_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 1
+    },
+    {
+      "agent": "doclens",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "835d8b90da8f7c1a",
+        "num_rows": 148,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {
+        "dat-DS5091D-00-0016": 2
+      },
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 148,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work-fixed-full/doclens/focusparse_doclens_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 147
+    },
+    {
+      "agent": "doclens",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work-smoke5/doclens/focusparse_doclens_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "agentic_ocr",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "835d8b90da8f7c1a",
+        "num_rows": 148,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {
+        "dat-DS5091D-00-0016": 2
+      },
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 148,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work/agentic_ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 147
+    },
+    {
+      "agent": "agentic_ocr",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work-fix-smoke/agenticocr-json-parser-fix/focusparse_agentic_ocr_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "agentic_ocr",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work-fix-smoke/agenticocr-json-parser-fix-with-pdfs/focusparse_agentic_ocr_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "agentic_ocr",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "59072a443e78fc6a",
+        "num_rows": 1,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 1,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work-smoke/agentic-ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 1
+    },
+    {
+      "agent": "agentic_ocr",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "835d8b90da8f7c1a",
+        "num_rows": 148,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {
+        "dat-DS5091D-00-0016": 2
+      },
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 148,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work-fixed-full/agentic_ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 147
+    },
+    {
+      "agent": "agentic_ocr",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work-smoke5/agentic-ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    },
+    {
+      "agent": "focus",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "835d8b90da8f7c1a",
+        "num_rows": 148,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {
+        "dat-DS5091D-00-0016": 2
+      },
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 148,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-related-work-monitor/results/hf/related-work/focusparse_reference/focusparse_focus_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 147
+    },
+    {
+      "agent": "focus",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "59072a443e78fc6a",
+        "num_rows": 1,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 1,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-related-work-monitor/results/hf/related-work-smoke/focusparse-reference/focusparse_focus_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 1
+    },
+    {
+      "agent": "focus",
+      "dataset_fingerprint": {
+        "description": null,
+        "fingerprint": "7e731e4474ad0930",
+        "num_rows": 5,
+        "split": "validation",
+        "version": "0.0.0"
+      },
+      "duplicate_example_ids": {},
+      "hf_repo": "gabrielbo/parser-bench",
+      "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+      "hf_split": "validation",
+      "per_example_count": 5,
+      "protocol": "agentic_multi_page",
+      "run_dir": "/private/tmp/focusparse-exp-related-work-monitor/results/hf/related-work-smoke5/focusparse-reference/focusparse_focus_agentic_multi_page_0b139a04",
+      "tool_set": "full",
+      "unique_example_ids": 5
+    }
+  ]
+}

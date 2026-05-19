@@ -16,12 +16,14 @@ The current monitor matrix is pinned to:
 - split: `validation`
 - revision: `3774c67f8b814392b6d04c939e904f749a3f52eb`
 - expected canonical count: `n=148`
+- expected unique example IDs: `147` because `dat-DS5091D-00-0016`
+  appears twice in the pinned canonical slice
 
 The matrix currently contains `43` cells:
 
 | Status | Count | Meaning |
 |---|---:|---|
-| `full_complete` | 7 | Full `n=148` headline `agentic_multi_page` rows only |
+| `verified` | 7 | Full pinned headline `agentic_multi_page` rows with the expected row count, revision, and duplicate-ID shape |
 | `implemented` | 36 | Command/protocol wiring exists, but no full result artifact |
 
 So the answer to "did we do the full protocol test for each method?" is **no**.
@@ -45,8 +47,9 @@ the simple baseline.
 ## Fixed Full Rerun Results
 
 All rows below are full `n=148` reruns on `agentic_multi_page` after applying
-the method-branch fixes. These are not yet ingested into the monitor's headline
-table; they live in the worker result directories listed below.
+the method-branch fixes. They are ingested into the monitor's headline table
+and copied into the tracked snapshot at
+`docs/research/related-work-monitor/headline_table.md`.
 
 | Method | Old full row | Fixed full rerun | Accuracy change | Page recall | BBox IoU | Cost/correct | Latency |
 |---|---:|---:|---:|---:|---:|---:|---:|

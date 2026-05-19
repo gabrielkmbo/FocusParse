@@ -18,7 +18,9 @@ identity, and thesis-facing result tables.
 ## Monitor Command
 
 ```bash
-uv run python scripts/related_work_monitor.py --render
+uv run python scripts/related_work_monitor.py \
+  --render \
+  --snapshot-dir docs/research/related-work-monitor
 ```
 
 The command scans the worker worktrees for standard FocusParse outputs and
@@ -29,6 +31,8 @@ writes:
 - `results/hf/related-work-monitor/protocol_matrix.json`
 - `results/hf/related-work-monitor/headline_table.{json,md,csv,html,jsonl}`
 - `results/hf/related-work-monitor/related_work_thesis_note.md`
+- tracked copies of those small artifacts under
+  `docs/research/related-work-monitor/`
 
 Generated decision-grade commands use method-specific staging directories under
 `~/.cache/focusparse/hf_staging_related_work_full_*` so smoke runs with
@@ -47,6 +51,9 @@ are cleaned after each example.
   `3774c67f8b814392b6d04c939e904f749a3f52eb`.
 - The canonical denominator remains the post-filter `n=148` FocusParse
   subset; raw Hugging Face split counts are not the denominator.
+- The pinned canonical slice currently has 148 rows and 147 unique example IDs
+  because `dat-DS5091D-00-0016` appears twice; the monitor records that
+  duplicate explicitly and treats it as expected.
 - The FocusParse 66.9% row is the presentation headline checkpoint supplied as
   `shape-normalizer-full-run1`; keep the older 62.2% monitor reproduction
   separately labeled in provenance-sensitive audit contexts.
@@ -102,13 +109,13 @@ git.
 
 | Row | Status | Accuracy | Cost | Cost/correct | Artifact |
 | --- | --- | ---: | ---: | ---: | --- |
-| Basic VLM | full complete | 47.3% | $0.67 | $0.010 | `/private/tmp/focusparse-exp-basic-vlm-protocols/results/hf/related-work/basic_vlm/focusparse_simple_agentic_multi_page_0b139a04/` |
+| Basic VLM | verified | 47.3% | $0.67 | $0.010 | `/private/tmp/focusparse-exp-basic-vlm-protocols/results/hf/related-work/basic_vlm/focusparse_simple_agentic_multi_page_0b139a04/` |
 | FocusParse +4 | headline checkpoint | 66.9% | $2.30 | $0.0232 | `shape-normalizer-full-run1`, documented in `docs/research/2026-05-15-harness-65plus-post-evidence-iteration.md` |
-| Coding Agent +4 | fixed full complete | 25.7% | $5.42 | $0.143 | `/private/tmp/focusparse-exp-coding-agent/results/hf/related-work-fixed-full/coding_agent/focusparse_coding_agent_agentic_multi_page_0b139a04/` |
-| AgenticOCR-style | fixed full complete | 16.2% | $1.87 | $0.078 | `/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work-fixed-full/agentic_ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04/` |
-| DocLens-style | fixed full complete | 16.9% | $3.79 | $0.152 | `/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work-fixed-full/doclens/focusparse_doclens_agentic_multi_page_0b139a04/` |
-| LlamaIndex ReAct +2 | fixed full complete | 12.2% | $6.38 | $0.354 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fixed-full/llamaindex_react_minimal/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal/` |
-| LlamaIndex ReAct +4 | fixed full complete | 10.1% | $7.79 | $0.520 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fixed-full/llamaindex_react_full/focusparse_llamaindex_react_agentic_multi_page_0b139a04/` |
+| Coding Agent +4 | verified | 25.7% | $5.42 | $0.143 | `/private/tmp/focusparse-exp-coding-agent/results/hf/related-work-fixed-full/coding_agent/focusparse_coding_agent_agentic_multi_page_0b139a04/` |
+| AgenticOCR-style | verified | 16.2% | $1.87 | $0.078 | `/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work-fixed-full/agentic_ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04/` |
+| DocLens-style | verified | 16.9% | $3.79 | $0.152 | `/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work-fixed-full/doclens/focusparse_doclens_agentic_multi_page_0b139a04/` |
+| LlamaIndex ReAct +2 | verified | 12.2% | $6.38 | $0.354 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fixed-full/llamaindex_react_minimal/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal/` |
+| LlamaIndex ReAct +4 | verified | 10.1% | $7.79 | $0.520 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fixed-full/llamaindex_react_full/focusparse_llamaindex_react_agentic_multi_page_0b139a04/` |
 
 Disk note: early parallel full runs filled the local filesystem because every
 row materialized contact sheets and crops simultaneously. The monitor runbook

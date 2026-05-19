@@ -1,0 +1,460 @@
+{
+  "expected_n": 148,
+  "generated_at": "2026-05-19T20:02:46.897496+00:00",
+  "hf_repo": "gabrielbo/parser-bench",
+  "hf_revision": "3774c67f8b814392b6d04c939e904f749a3f52eb",
+  "hf_split": "validation",
+  "protocol": "agentic_multi_page",
+  "rows": [
+    {
+      "agent": "simple",
+      "by_domain": {
+        "_overall": {
+          "accuracy": 0.47297297297297297,
+          "accuracy_ci": [
+            0.39864864864864863,
+            0.5540540540540541
+          ],
+          "bbox_iou": 0.05946651042615659,
+          "evidence_reward": 0.0,
+          "latency_ms_mean": 3406.7635135135133,
+          "lazy_answer_rate": 1.0,
+          "n": 148,
+          "page_recall": 0.8952702702702703,
+          "tool_calls": 0.0,
+          "usd_per_correct": 0.009581857142857144,
+          "usd_per_correct_ci": [
+            0.008203935185185187,
+            0.011468283898305086
+          ],
+          "usd_total": 0.67073
+        },
+        "datasheet": {
+          "accuracy": 0.5148514851485149,
+          "accuracy_ci": [
+            0.4158415841584158,
+            0.6138613861386139
+          ],
+          "bbox_iou": 0.0,
+          "evidence_reward": 0.0,
+          "latency_ms_mean": 3355.861386138614,
+          "lazy_answer_rate": 1.0,
+          "n": 101,
+          "page_recall": 0.9108910891089109,
+          "tool_calls": 0.0,
+          "usd_per_correct": 0.008754278846153847,
+          "usd_per_correct_ci": [
+            0.007352023809523808,
+            0.010792827380952387
+          ],
+          "usd_total": 0.45522250000000003
+        },
+        "finance": {
+          "accuracy": 0.3829787234042553,
+          "accuracy_ci": [
+            0.23404255319148937,
+            0.5106382978723404
+          ],
+          "bbox_iou": 0.18725624559725904,
+          "evidence_reward": 0.0,
+          "latency_ms_mean": 3516.148936170213,
+          "lazy_answer_rate": 1.0,
+          "n": 47,
+          "page_recall": 0.8617021276595744,
+          "tool_calls": 0.0,
+          "usd_per_correct": 0.011972638888888889,
+          "usd_per_correct_ci": [
+            0.008947031250000001,
+            0.019562272727272727
+          ],
+          "usd_total": 0.2155075
+        }
+      },
+      "label": "Basic VLM",
+      "n_total": 148,
+      "run_dir": "/private/tmp/focusparse-exp-basic-vlm-protocols/results/hf/related-work/basic_vlm/focusparse_simple_agentic_multi_page_0b139a04",
+      "status": "verified",
+      "tool_set": "full"
+    },
+    {
+      "agent": "llamaindex_react",
+      "by_domain": {
+        "_overall": {
+          "accuracy": 0.12162162162162163,
+          "accuracy_ci": [
+            0.06756756756756757,
+            0.17567567567567569
+          ],
+          "bbox_iou": 0.194215761223316,
+          "evidence_reward": 0.03082488876783,
+          "latency_ms_mean": 29649.533783783783,
+          "lazy_answer_rate": 0.35135135135135137,
+          "n": 148,
+          "page_recall": 0.6238738738738738,
+          "tool_calls": 3.7905405405405403,
+          "usd_per_correct": 0.3542371527777778,
+          "usd_per_correct_ci": [
+            0.23737466346153852,
+            0.6346546250000001
+          ],
+          "usd_total": 6.37626875
+        },
+        "datasheet": {
+          "accuracy": 0.1485148514851485,
+          "accuracy_ci": [
+            0.0891089108910891,
+            0.21782178217821782
+          ],
+          "bbox_iou": 0.1751642283633642,
+          "evidence_reward": 0.03895341543586258,
+          "latency_ms_mean": 28853.673267326732,
+          "lazy_answer_rate": 0.3069306930693069,
+          "n": 101,
+          "page_recall": 0.6666666666666666,
+          "tool_calls": 3.762376237623762,
+          "usd_per_correct": 0.28848466666666667,
+          "usd_per_correct_ci": [
+            0.19217977272727274,
+            0.5145598611111112
+          ],
+          "usd_total": 4.32727
+        },
+        "finance": {
+          "accuracy": 0.06382978723404255,
+          "accuracy_ci": [
+            0.0,
+            0.14893617021276595
+          ],
+          "bbox_iou": 0.23515628928406346,
+          "evidence_reward": 0.013357203800355733,
+          "latency_ms_mean": 31359.787234042553,
+          "lazy_answer_rate": 0.44680851063829785,
+          "n": 47,
+          "page_recall": 0.5319148936170213,
+          "tool_calls": 3.851063829787234,
+          "usd_per_correct": 0.6829995833333333,
+          "usd_per_correct_ci": [
+            0.2967798214285714,
+            2.1373724999999992
+          ],
+          "usd_total": 2.04899875
+        }
+      },
+      "label": "LlamaIndex ReAct +2",
+      "n_total": 148,
+      "run_dir": "/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fixed-full/llamaindex_react_minimal/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal",
+      "status": "verified",
+      "tool_set": "minimal"
+    },
+    {
+      "agent": "llamaindex_react",
+      "by_domain": {
+        "_overall": {
+          "accuracy": 0.10135135135135136,
+          "accuracy_ci": [
+            0.05405405405405406,
+            0.14864864864864866
+          ],
+          "bbox_iou": 0.36940946333429064,
+          "evidence_reward": 0.053763584015543146,
+          "latency_ms_mean": 30133.952702702703,
+          "lazy_answer_rate": 0.36486486486486486,
+          "n": 148,
+          "page_recall": 0.615990990990991,
+          "tool_calls": 3.8175675675675675,
+          "usd_per_correct": 0.5195195,
+          "usd_per_correct_ci": [
+            0.3450076136363636,
+            0.9932159375000003
+          ],
+          "usd_total": 7.7927925
+        },
+        "datasheet": {
+          "accuracy": 0.1188118811881188,
+          "accuracy_ci": [
+            0.0594059405940594,
+            0.18811881188118812
+          ],
+          "bbox_iou": 0.37804989207260276,
+          "evidence_reward": 0.0638802580227653,
+          "latency_ms_mean": 29853.346534653465,
+          "lazy_answer_rate": 0.3564356435643564,
+          "n": 101,
+          "page_recall": 0.6254125412541254,
+          "tool_calls": 3.7524752475247523,
+          "usd_per_correct": 0.448604375,
+          "usd_per_correct_ci": [
+            0.284409375,
+            0.9265849999999994
+          ],
+          "usd_total": 5.3832525
+        },
+        "finance": {
+          "accuracy": 0.06382978723404255,
+          "accuracy_ci": [
+            0.0,
+            0.14893617021276595
+          ],
+          "bbox_iou": 0.3508417334923859,
+          "evidence_reward": 0.03202349731917215,
+          "latency_ms_mean": 30736.957446808512,
+          "lazy_answer_rate": 0.3829787234042553,
+          "n": 47,
+          "page_recall": 0.5957446808510638,
+          "tool_calls": 3.9574468085106385,
+          "usd_per_correct": 0.8031799999999999,
+          "usd_per_correct_ci": [
+            0.34432232142857144,
+            2.47708625
+          ],
+          "usd_total": 2.40954
+        }
+      },
+      "label": "LlamaIndex ReAct +4",
+      "n_total": 148,
+      "run_dir": "/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fixed-full/llamaindex_react_full/focusparse_llamaindex_react_agentic_multi_page_0b139a04",
+      "status": "verified",
+      "tool_set": "full"
+    },
+    {
+      "agent": "coding_agent",
+      "by_domain": {
+        "_overall": {
+          "accuracy": 0.25675675675675674,
+          "accuracy_ci": [
+            0.1891891891891892,
+            0.3310810810810811
+          ],
+          "bbox_iou": 0.4662312593381896,
+          "evidence_reward": 0.15983063949722617,
+          "latency_ms_mean": 18172.047297297297,
+          "lazy_answer_rate": 0.22297297297297297,
+          "n": 148,
+          "page_recall": 0.7556306306306306,
+          "tool_calls": 3.168918918918919,
+          "usd_per_correct": 0.14253411184210527,
+          "usd_per_correct_ci": [
+            0.10872752604166663,
+            0.200790625
+          ],
+          "usd_total": 5.41629625
+        },
+        "datasheet": {
+          "accuracy": 0.32673267326732675,
+          "accuracy_ci": [
+            0.2376237623762376,
+            0.4158415841584158
+          ],
+          "bbox_iou": 0.4976306426658354,
+          "evidence_reward": 0.19020516511467764,
+          "latency_ms_mean": 17414.881188118812,
+          "lazy_answer_rate": 0.1782178217821782,
+          "n": 101,
+          "page_recall": 0.8003300330033003,
+          "tool_calls": 2.910891089108911,
+          "usd_per_correct": 0.10895109848484848,
+          "usd_per_correct_ci": [
+            0.08461676829268291,
+            0.15413554999999993
+          ],
+          "usd_total": 3.59538625
+        },
+        "finance": {
+          "accuracy": 0.10638297872340426,
+          "accuracy_ci": [
+            0.02127659574468085,
+            0.19148936170212766
+          ],
+          "bbox_iou": 0.3987559887830358,
+          "evidence_reward": 0.0945577227448305,
+          "latency_ms_mean": 19799.14893617021,
+          "lazy_answer_rate": 0.3191489361702128,
+          "n": 47,
+          "page_recall": 0.6595744680851063,
+          "tool_calls": 3.723404255319149,
+          "usd_per_correct": 0.364182,
+          "usd_per_correct_ci": [
+            0.19597774999999995,
+            0.9856981250000001
+          ],
+          "usd_total": 1.82091
+        }
+      },
+      "label": "Coding Agent +4",
+      "n_total": 148,
+      "run_dir": "/private/tmp/focusparse-exp-coding-agent/results/hf/related-work-fixed-full/coding_agent/focusparse_coding_agent_agentic_multi_page_0b139a04",
+      "status": "verified",
+      "tool_set": "full"
+    },
+    {
+      "agent": "doclens",
+      "by_domain": {
+        "_overall": {
+          "accuracy": 0.16891891891891891,
+          "accuracy_ci": [
+            0.11486486486486487,
+            0.23648648648648649
+          ],
+          "bbox_iou": 0.6997821671022827,
+          "evidence_reward": 0.12720514243562975,
+          "latency_ms_mean": 19143.337837837837,
+          "lazy_answer_rate": 0.0,
+          "n": 148,
+          "page_recall": 0.9335585585585585,
+          "tool_calls": 3.9121621621621623,
+          "usd_per_correct": 0.15158285,
+          "usd_per_correct_ci": [
+            0.10854264705882351,
+            0.23016441176470587
+          ],
+          "usd_total": 3.78957125
+        },
+        "datasheet": {
+          "accuracy": 0.22772277227722773,
+          "accuracy_ci": [
+            0.15841584158415842,
+            0.3069306930693069
+          ],
+          "bbox_iou": 0.7478947322778331,
+          "evidence_reward": 0.17650188593927704,
+          "latency_ms_mean": 18847.346534653465,
+          "lazy_answer_rate": 0.0,
+          "n": 101,
+          "page_recall": 0.9438943894389439,
+          "tool_calls": 4.534653465346534,
+          "usd_per_correct": 0.11302706521739131,
+          "usd_per_correct_ci": [
+            0.08370919354838706,
+            0.16726484374999995
+          ],
+          "usd_total": 2.5996225
+        },
+        "finance": {
+          "accuracy": 0.0425531914893617,
+          "accuracy_ci": [
+            0.0,
+            0.10638297872340426
+          ],
+          "bbox_iou": 0.5963913355548234,
+          "evidence_reward": 0.021269587246940815,
+          "latency_ms_mean": 19779.40425531915,
+          "lazy_answer_rate": 0.0,
+          "n": 47,
+          "page_recall": 0.9113475177304965,
+          "tool_calls": 2.574468085106383,
+          "usd_per_correct": 0.594974375,
+          "usd_per_correct_ci": [
+            0.23374499999999995,
+            1.2333937499999998
+          ],
+          "usd_total": 1.18994875
+        }
+      },
+      "label": "DocLens-style",
+      "n_total": 148,
+      "run_dir": "/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work-fixed-full/doclens/focusparse_doclens_agentic_multi_page_0b139a04",
+      "status": "verified",
+      "tool_set": "full"
+    },
+    {
+      "agent": "agentic_ocr",
+      "by_domain": {
+        "_overall": {
+          "accuracy": 0.16216216216216217,
+          "accuracy_ci": [
+            0.10135135135135136,
+            0.22972972972972974
+          ],
+          "bbox_iou": 0.18287041466380183,
+          "evidence_reward": 0.032137430217701685,
+          "latency_ms_mean": 8296.54054054054,
+          "lazy_answer_rate": 0.1891891891891892,
+          "n": 148,
+          "page_recall": 0.7432432432432432,
+          "tool_calls": 2.1486486486486487,
+          "usd_per_correct": 0.07781494791666667,
+          "usd_per_correct_ci": [
+            0.053288295454545456,
+            0.12514558333333334
+          ],
+          "usd_total": 1.86755875
+        },
+        "datasheet": {
+          "accuracy": 0.21782178217821782,
+          "accuracy_ci": [
+            0.13861386138613863,
+            0.297029702970297
+          ],
+          "bbox_iou": 0.20977399308089142,
+          "evidence_reward": 0.04137106451614613,
+          "latency_ms_mean": 10208.653465346535,
+          "lazy_answer_rate": 0.0,
+          "n": 101,
+          "page_recall": 0.9158415841584159,
+          "tool_calls": 2.623762376237624,
+          "usd_per_correct": 0.0708840340909091,
+          "usd_per_correct_ci": [
+            0.05072354166666666,
+            0.11254133928571423
+          ],
+          "usd_total": 1.55944875
+        },
+        "finance": {
+          "accuracy": 0.0425531914893617,
+          "accuracy_ci": [
+            0.0,
+            0.10638297872340426
+          ],
+          "bbox_iou": 0.12505634189516254,
+          "evidence_reward": 0.012294939491257243,
+          "latency_ms_mean": 4187.531914893617,
+          "lazy_answer_rate": 0.5957446808510638,
+          "n": 47,
+          "page_recall": 0.3723404255319149,
+          "tool_calls": 1.127659574468085,
+          "usd_per_correct": 0.154055,
+          "usd_per_correct_ci": [
+            0.05723145833333332,
+            0.38579499999999994
+          ],
+          "usd_total": 0.30811
+        }
+      },
+      "label": "AgenticOCR-style",
+      "n_total": 148,
+      "run_dir": "/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work-fixed-full/agentic_ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04",
+      "status": "verified",
+      "tool_set": "full"
+    },
+    {
+      "agent": "focus",
+      "by_domain": {
+        "_overall": {
+          "accuracy": 0.668918918918919,
+          "bbox_iou": 0.881,
+          "latency_ms_mean": 3700.0,
+          "lazy_answer_rate": 0.02,
+          "n": 148,
+          "page_recall": 0.949,
+          "usd_per_correct": 0.0232,
+          "usd_total": 2.2967999999999997
+        },
+        "datasheet": {
+          "accuracy": 0.7029702970297029,
+          "n": 101
+        },
+        "finance": {
+          "accuracy": 0.5957446808510638,
+          "n": 47
+        }
+      },
+      "headline_override_provenance": "docs/research/2026-05-15-harness-65plus-post-evidence-iteration.md",
+      "headline_override_source": "shape-normalizer-full-run1 weekend Gemini-key checkpoint",
+      "label": "FocusParse +4",
+      "n_total": 148,
+      "run_dir": "/private/tmp/focusparse-exp-related-work-monitor/results/hf/related-work/focusparse_reference/focusparse_focus_agentic_multi_page_0b139a04",
+      "status": "headline_checkpoint",
+      "tool_set": "full"
+    }
+  ]
+}

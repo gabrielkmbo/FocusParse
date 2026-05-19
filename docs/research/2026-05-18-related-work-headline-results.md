@@ -28,8 +28,10 @@ ideas help only when the harness is tuned to the benchmark's evidence contract.
 | AgenticOCR-style | 21.8% | 4.3% | 16.2% | 8.30s | $1.87 | $0.078 | 148 |
 | FocusParse +4 | 70.3% | 59.6% | 66.9% | 3.70s | $2.30 | $0.0232 | 148 |
 
-The generated table with bootstrap confidence intervals is available at
-`results/hf/related-work-monitor/headline_table.md` in the monitor worktree.
+The generated table with bootstrap confidence intervals is available in the
+gitignored live output at `results/hf/related-work-monitor/headline_table.md`
+and in the committed GitHub snapshot at
+`docs/research/related-work-monitor/headline_table.md`.
 
 ## Interpretation
 
@@ -63,14 +65,18 @@ Decision-grade artifacts are gitignored but preserved locally in each worktree:
 | Row | Artifact |
 | --- | --- |
 | Basic VLM | `/private/tmp/focusparse-exp-basic-vlm-protocols/results/hf/related-work/basic_vlm/focusparse_simple_agentic_multi_page_0b139a04/` |
-| LlamaIndex ReAct +2 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_minimal/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal/` |
-| LlamaIndex ReAct +4 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_full/focusparse_llamaindex_react_agentic_multi_page_0b139a04/` |
-| Coding Agent +4 | `/private/tmp/focusparse-exp-coding-agent/results/hf/related-work/coding_agent/focusparse_coding_agent_agentic_multi_page_0b139a04/` |
-| DocLens-style | `/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work/doclens/focusparse_doclens_agentic_multi_page_0b139a04/` |
-| AgenticOCR-style | `/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work/agentic_ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04/` |
+| LlamaIndex ReAct +2 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fixed-full/llamaindex_react_minimal/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal/` |
+| LlamaIndex ReAct +4 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fixed-full/llamaindex_react_full/focusparse_llamaindex_react_agentic_multi_page_0b139a04/` |
+| Coding Agent +4 | `/private/tmp/focusparse-exp-coding-agent/results/hf/related-work-fixed-full/coding_agent/focusparse_coding_agent_agentic_multi_page_0b139a04/` |
+| DocLens-style | `/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work-fixed-full/doclens/focusparse_doclens_agentic_multi_page_0b139a04/` |
+| AgenticOCR-style | `/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work-fixed-full/agentic_ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04/` |
 | FocusParse +4 headline checkpoint | `shape-normalizer-full-run1`, documented in `docs/research/2026-05-15-harness-65plus-post-evidence-iteration.md` |
 
 The older monitor reproduction remains preserved at
 `/private/tmp/focusparse-exp-related-work-monitor/results/hf/related-work/focusparse_reference/focusparse_focus_agentic_multi_page_0b139a04/`
 with `92/148 = 62.2%`; the table above uses the stronger weekend
 `shape-normalizer-full-run1` checkpoint supplied for the presentation headline.
+
+The pinned canonical slice has 148 rows and 147 unique example IDs because
+`dat-DS5091D-00-0016` appears twice. The committed monitor snapshot records
+that duplicate in `docs/research/related-work-monitor/dataset_manifest.json`.

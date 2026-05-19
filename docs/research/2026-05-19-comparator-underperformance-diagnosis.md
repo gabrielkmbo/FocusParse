@@ -11,16 +11,17 @@ comparators versus paper-inspired proxies.
 
 All decision-grade rows below use HF revision
 `3774c67f8b814392b6d04c939e904f749a3f52eb` and the canonical `n=148`
-validation subset.
+validation subset. The comparator rows shown here are the fixed full reruns,
+not the stale pre-fix rows from the first monitor pass.
 
 | Method | Accuracy | Cost | Cost/correct | Latency | Page recall | BBox IoU | Lazy rate | Tool calls |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | Basic VLM | 70/148 = 47.3% | $0.67 | $0.010 | 3.41s | 0.895 | 0.059 | 1.000 | 0.00 |
-| LlamaIndex ReAct +2 | 18/148 = 12.2% | $6.36 | $0.353 | 29.92s | 0.544 | 0.172 | 0.426 | 3.65 |
-| LlamaIndex ReAct +4 | 9/148 = 6.1% | $8.25 | $0.917 | 34.37s | 0.416 | 0.125 | 0.574 | 3.81 |
-| Coding Agent +4 | 1/148 = 0.7% | $2.22 | $2.223 | 7.70s | 0.000 | 0.000 | 1.000 | 0.05 |
-| DocLens-style | 24/148 = 16.2% | $3.74 | $0.156 | 21.70s | 0.934 | 0.673 | 0.000 | 3.88 |
-| AgenticOCR-style | 27/148 = 18.2% | $2.13 | $0.079 | 10.21s | 0.744 | 0.205 | 0.203 | 2.12 |
+| LlamaIndex ReAct +2 | 18/148 = 12.2% | $6.38 | $0.354 | 29.65s | 0.624 | 0.194 | 0.351 | 3.79 |
+| LlamaIndex ReAct +4 | 15/148 = 10.1% | $7.79 | $0.520 | 30.13s | 0.616 | 0.369 | 0.365 | 3.82 |
+| Coding Agent +4 | 38/148 = 25.7% | $5.42 | $0.143 | 18.17s | 0.756 | 0.466 | 0.223 | 3.17 |
+| DocLens-style | 25/148 = 16.9% | $3.79 | $0.152 | 19.14s | 0.934 | 0.700 | 0.000 | 3.91 |
+| AgenticOCR-style | 24/148 = 16.2% | $1.87 | $0.078 | 8.30s | 0.743 | 0.183 | 0.189 | 2.15 |
 | FocusParse +4 | 99/148 = 66.9% | $2.30 | $0.0232 | 3.70s | 0.949 | 0.881 | 0.020 | 1.00 |
 
 The key comparison is not "tools versus no tools." Basic VLM is strong because
@@ -34,10 +35,10 @@ returning a scorer-compatible concise final answer.
 | Method | Main failure mode | Evidence |
 |---|---|---|
 | Basic VLM | No evidence trace; answer-only baseline, but low adapter risk. | 47.3% accuracy with zero tool calls and 100% lazy rate. It wins many rows by directly reading the summary image and emitting concise answers. |
-| LlamaIndex ReAct | Official ReAct loop, but the adapter was not yet a strong multimodal document agent. | The full-tool row had only 0.416 page recall, 0.125 IoU, 57.4% lazy/no-citation rows, and $0.917/correct. The previous tool wrapper also allowed page PNG paths to be cropped with source page numbers, causing page-out-of-range failures. |
-| Coding Agent | The original full run was invalid as an agentic comparator. | Tool calls averaged only 0.047/example, page recall and IoU were both 0.0, and lazy rate was 1.0. The parser often saw concatenated action JSON plus final JSON and treated the whole turn as malformed prose instead of executing the first action. |
-| DocLens-style | Localization is good; answer sampling/adjudication and evidence persistence are weak. | Page recall was 0.934 and IoU was 0.673, but accuracy was only 16.2%. That means the failure is mostly downstream of evidence localization. Finance also had missing PDF/tool-source failures in the full artifacts. |
-| AgenticOCR-style | This is a zero-shot proxy, not the trained AgenticOCR policy. | Accuracy was 18.2%, IoU only 0.205, and finance collapsed to 4.3%. The implementation lacks the trained crop policy, hard-negative training, GRPO reward, semantic `text/table/equation` modes, and reliable PDF hydration used by the paper setup. |
+| LlamaIndex ReAct | Official ReAct loop, but still not a strong multimodal document agent. | The fixed full-tool row improved to 0.616 page recall and 0.369 IoU, but accuracy stayed at 10.1% with $0.520/correct and 30.13s latency. |
+| Coding Agent | Tool execution recovered, but reasoning/output shape remains brittle. | The fixed row rose from 0.7% to 25.7%, with 0.756 page recall and 0.466 IoU, but still trails Basic VLM by 21.6 points and FocusParse by 41.2 points. |
+| DocLens-style | Localization is good; answer sampling/adjudication and evidence persistence are weak. | Page recall is 0.934 and IoU is 0.700, but accuracy is only 16.9%. That means the failure is mostly downstream of evidence localization. |
+| AgenticOCR-style | This is a zero-shot proxy, not the trained AgenticOCR policy. | Accuracy is 16.2%, IoU only 0.183, and finance remains 4.3%. The implementation lacks the trained crop policy, hard-negative training, GRPO reward, semantic `text/table/equation` modes, and reliable paper-model setup. |
 | FocusParse | Best balance of localization and final-answer discipline. | It combines high page recall (0.949), high IoU (0.881), low lazy rate (0.020), and concise answer normalization. |
 
 ## Why Basic VLM Beats The Harnessed Comparators
@@ -114,7 +115,7 @@ decision-grade `n=148` rows.
 
 | Branch smoke | Accuracy | Cost/correct | Latency | Page recall | BBox IoU | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| LlamaIndex ReAct +4, page-image/layout fix | 2/5 = 40% | $0.110 | 39.96s | 0.800 | 0.315 | Tool adapter fix makes the row plausible again on the first slice, but it is still slow and needs full rerun. |
+| LlamaIndex ReAct +4, page-image/layout fix | 2/5 = 40% | $0.110 | 39.96s | 0.800 | 0.315 | Tool adapter fix made the row plausible enough to launch the fixed full rerun. |
 | Coding Agent +4, parser/page-image/layout fix | 1/5 = 20% | $0.178 | 34.45s | 0.800 | 0.665 | Tool execution/localization recovered from the invalid 0-IoU full run, but final answers remain verbose or wrong. |
 | DocLens-style, JSON parser fix | 3/5 = 60% | $0.040 | 21.63s | 1.000 | 0.799 | Confirms localization was not the main blocker on this slice. |
 | AgenticOCR-style, JSON parser fix without PDFs | 0/5 = 0% | n/a | 0.00s | 0.000 | 0.000 | Reproduces missing-source abstention path. |
@@ -123,13 +124,12 @@ decision-grade `n=148` rows.
 ## Citable Comparator Decision
 
 - **ReAct**: use **LlamaIndex ReAct** as the main ReAct comparator. It is
-  citable as an industry-standard implementation of the ReAct pattern, but the
-  fixed branch must be rerun at `n=148` before replacing the current poor full
-  row.
+  citable as an industry-standard implementation of the ReAct pattern. The
+  fixed `n=148` reruns replace the stale initial rows in the headline table.
 - **Coding Agent**: label as a Gemini-agentic-vision-style coding-loop proxy,
   not official Gemini Agentic Vision. The tool set is reasonable for comparison
-  (`inspect_region`, `get_text_layer`, `layout_detect`, `run_python`), but the
-  row is not decision-grade until the fixed parser branch gets a full rerun.
+  (`inspect_region`, `get_text_layer`, `layout_detect`, `run_python`), and the
+  fixed row is decision-grade as a proxy implementation.
 - **DocLens**: label current row as **DocLens-style proxy**. It mirrors page
   navigation, element localization, answer sampling, and adjudication, but it is
   not an official reproduction and currently uses fewer samples plus weaker
@@ -150,11 +150,10 @@ careful:
 > are useless; they are weak because generic tool loops do not preserve the
 > document-specific evidence contract without additional architecture or training.
 
-For the paper table, keep the current pinned full rows as reproducible results,
-but annotate the weak comparator rows as "pre-fix full run" until the fixed
-branches complete `n=148` reruns. For the related-work section, cite LlamaIndex
-ReAct as the main ReAct implementation and explicitly label DocLens/AgenticOCR
-as proxies unless official code/model integration becomes available.
+For the paper table, keep the current pinned full rows as reproducible results.
+For the related-work section, cite LlamaIndex ReAct as the main ReAct
+implementation and explicitly label DocLens/AgenticOCR as proxies unless
+official code/model integration becomes available.
 
 ## External Sources To Cite
 

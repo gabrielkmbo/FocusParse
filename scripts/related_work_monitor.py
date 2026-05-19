@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -28,15 +29,15 @@ PINNED_HF_REPO = "gabrielbo/parser-bench"
 PINNED_HF_SPLIT = "validation"
 PINNED_HF_REVISION = "3774c67f8b814392b6d04c939e904f749a3f52eb"
 EXPECTED_CANONICAL_N = 148
+EXPECTED_CANONICAL_UNIQUE_IDS = 147
+EXPECTED_CANONICAL_DUPLICATE_IDS = {"dat-DS5091D-00-0016": 2}
 DEFAULT_PDFS_ROOT = "~/.cache/focusparse/pdfs"
 DEFAULT_FULL_STAGING_ROOT = "~/.cache/focusparse/hf_staging_related_work_full"
-HISTORIC_FOCUSPARSER_669_ARTIFACT = Path(
+HISTORIC_FOCUSPARSE_669_ARTIFACT = Path(
     "docs/research/2026-05-15-harness-65plus-post-evidence-iteration.md"
 )
-FOCUSPARSER_HEADLINE_CHECKPOINT_SOURCE = (
-    "shape-normalizer-full-run1 weekend Gemini-key checkpoint"
-)
-FOCUSPARSER_HEADLINE_CHECKPOINT = {
+FOCUSPARSE_HEADLINE_CHECKPOINT_SOURCE = "shape-normalizer-full-run1 weekend Gemini-key checkpoint"
+FOCUSPARSE_HEADLINE_CHECKPOINT = {
     "datasheet": {
         "n": 101,
         "accuracy": 71 / 101,
@@ -90,6 +91,7 @@ class ExpectedRun:
     appendix: bool = True
     minimal_artifacts: bool = True
     expected_n: int = EXPECTED_CANONICAL_N
+    expected_unique_ids: int | None = None
     notes: str = ""
 
     @property
@@ -201,15 +203,22 @@ def _specs() -> list[ExpectedRun]:
             headline=True,
             notes=(
                 "Headline checkpoint is 99/148 = 66.9% from "
-                f"{FOCUSPARSER_HEADLINE_CHECKPOINT_SOURCE}; provenance note is linked at "
-                f"{HISTORIC_FOCUSPARSER_669_ARTIFACT}."
+                f"{FOCUSPARSE_HEADLINE_CHECKPOINT_SOURCE}; provenance note is linked at "
+                f"{HISTORIC_FOCUSPARSE_669_ARTIFACT}."
             ),
         ),
     ]
 
     # Appendix protocol sweeps for methods that can consume image/protocol inputs.
     appendix_methods = [
-        ("basic_vlm", "Basic VLM", "codex/exp-basic-vlm-protocols", WORKTREES["basic_vlm"], "simple", "full"),
+        (
+            "basic_vlm",
+            "Basic VLM",
+            "codex/exp-basic-vlm-protocols",
+            WORKTREES["basic_vlm"],
+            "simple",
+            "full",
+        ),
         (
             "llamaindex_react_minimal",
             "LlamaIndex ReAct +2",
@@ -226,8 +235,22 @@ def _specs() -> list[ExpectedRun]:
             "llamaindex_react",
             "full",
         ),
-        ("coding_agent", "Coding Agent +4", "codex/exp-coding-agent", WORKTREES["coding_agent"], "coding_agent", "full"),
-        ("doclens", "DocLens-style", "codex/exp-doclens-baseline", WORKTREES["doclens"], "doclens", "full"),
+        (
+            "coding_agent",
+            "Coding Agent +4",
+            "codex/exp-coding-agent",
+            WORKTREES["coding_agent"],
+            "coding_agent",
+            "full",
+        ),
+        (
+            "doclens",
+            "DocLens-style",
+            "codex/exp-doclens-baseline",
+            WORKTREES["doclens"],
+            "doclens",
+            "full",
+        ),
         (
             "agentic_ocr",
             "AgenticOCR-style",
@@ -304,12 +327,25 @@ def _scan_runs(result_roots: list[Path]) -> list[dict[str, Any]]:
                     if row.get("example_id") or row.get("id")
                 }
             )
+            example_id_counts: dict[str, int] = {}
+            for row in per_example:
+                example_id = row.get("example_id") or row.get("id")
+                if example_id:
+                    key = str(example_id)
+                    example_id_counts[key] = example_id_counts.get(key, 0) + 1
+            duplicate_example_ids = {
+                example_id: count
+                for example_id, count in sorted(example_id_counts.items())
+                if count > 1
+            }
             runs.append(
                 {
                     "run_dir": str(run_dir),
                     "run_json": str(run_json),
                     "wrapper_json": str(wrapper_path) if wrapper_path.exists() else None,
-                    "per_example_jsonl": str(per_example_path) if per_example_path.exists() else None,
+                    "per_example_jsonl": str(per_example_path)
+                    if per_example_path.exists()
+                    else None,
                     "config_key": wrapper_data.get("config_key") or run_dir.name,
                     "agent": wrapper_data.get("agent") or run_data.get("agent"),
                     "protocol": wrapper_data.get("protocol") or run_data.get("protocol"),
@@ -329,6 +365,7 @@ def _scan_runs(result_roots: list[Path]) -> list[dict[str, Any]]:
                     "ended_at": run_data.get("ended_at"),
                     "per_example_count": len(per_example),
                     "unique_example_ids": len(example_ids),
+                    "duplicate_example_ids": duplicate_example_ids,
                     "example_ids": example_ids,
                 }
             )
@@ -386,10 +423,17 @@ def _is_verified(spec: ExpectedRun, run: dict[str, Any]) -> bool:
     n = int(run.get("per_example_count") or run.get("aggregate", {}).get("n") or 0)
     unique_ids = int(run.get("unique_example_ids") or 0)
     revision = run.get("hf_revision")
+    expected_unique_ids = spec.expected_unique_ids
+    if expected_unique_ids is None:
+        expected_unique_ids = (
+            EXPECTED_CANONICAL_UNIQUE_IDS
+            if spec.expected_n == EXPECTED_CANONICAL_N
+            else spec.expected_n
+        )
     return (
         n == spec.expected_n
-        and unique_ids == spec.expected_n
-        and (revision == PINNED_HF_REVISION or revision is None)
+        and unique_ids == expected_unique_ids
+        and revision == PINNED_HF_REVISION
     )
 
 
@@ -453,18 +497,16 @@ def _headline_table(registry_rows: list[dict[str, Any]], generated_at: str) -> d
             "status": row["status"],
             "n_total": run.get("aggregate", {}).get("n", run.get("per_example_count", 0)),
             "run_dir": run.get("run_dir"),
-            "by_domain": {
-                domain: _metric_cell(metrics) for domain, metrics in by_domain.items()
-            },
+            "by_domain": {domain: _metric_cell(metrics) for domain, metrics in by_domain.items()},
         }
         if row["method_id"] == "focusparse_reference":
             headline_row.update(
                 {
                     "status": "headline_checkpoint",
-                    "n_total": FOCUSPARSER_HEADLINE_CHECKPOINT["_overall"]["n"],
-                    "headline_override_source": FOCUSPARSER_HEADLINE_CHECKPOINT_SOURCE,
-                    "headline_override_provenance": str(HISTORIC_FOCUSPARSER_669_ARTIFACT),
-                    "by_domain": FOCUSPARSER_HEADLINE_CHECKPOINT,
+                    "n_total": FOCUSPARSE_HEADLINE_CHECKPOINT["_overall"]["n"],
+                    "headline_override_source": FOCUSPARSE_HEADLINE_CHECKPOINT_SOURCE,
+                    "headline_override_provenance": str(HISTORIC_FOCUSPARSE_669_ARTIFACT),
+                    "by_domain": FOCUSPARSE_HEADLINE_CHECKPOINT,
                 }
             )
         rows.append(headline_row)
@@ -495,6 +537,9 @@ def _protocol_matrix(registry_rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "headline": row["headline"],
                 "status": row["status"],
                 "n": aggregate.get("n", (run or {}).get("per_example_count", 0)),
+                "per_example_count": (run or {}).get("per_example_count", 0),
+                "unique_example_ids": (run or {}).get("unique_example_ids", 0),
+                "duplicate_example_ids": (run or {}).get("duplicate_example_ids", {}),
                 "accuracy": aggregate.get("accuracy"),
                 "usd_per_correct": aggregate.get("usd_per_correct"),
                 "latency_ms_mean": aggregate.get("latency_ms_mean"),
@@ -531,6 +576,7 @@ def _dataset_manifest(runs: list[dict[str, Any]]) -> dict[str, Any]:
                 "dataset_fingerprint": run.get("dataset_fingerprint"),
                 "per_example_count": run.get("per_example_count"),
                 "unique_example_ids": run.get("unique_example_ids"),
+                "duplicate_example_ids": run.get("duplicate_example_ids"),
                 "run_dir": run.get("run_dir"),
             }
         )
@@ -540,6 +586,8 @@ def _dataset_manifest(runs: list[dict[str, Any]]) -> dict[str, Any]:
             "hf_split": PINNED_HF_SPLIT,
             "hf_revision": PINNED_HF_REVISION,
             "canonical_n": EXPECTED_CANONICAL_N,
+            "canonical_unique_ids": EXPECTED_CANONICAL_UNIQUE_IDS,
+            "canonical_duplicate_ids": EXPECTED_CANONICAL_DUPLICATE_IDS,
         },
         "observed_runs": observed,
     }
@@ -584,15 +632,46 @@ def _write_thesis_note(output_dir: Path, registry_rows: list[dict[str, Any]]) ->
             f"- Decision-grade rows must use `{PINNED_HF_REVISION}` and `n={EXPECTED_CANONICAL_N}`.",
             (
                 "- FocusParse headline row uses the 99/148 = 66.9% "
-                f"`{FOCUSPARSER_HEADLINE_CHECKPOINT_SOURCE}`; provenance note is linked at "
-                f"`{HISTORIC_FOCUSPARSER_669_ARTIFACT}`. The older 92/148 = 62.2% "
+                f"`{FOCUSPARSE_HEADLINE_CHECKPOINT_SOURCE}`; provenance note is linked at "
+                f"`{HISTORIC_FOCUSPARSE_669_ARTIFACT}`. The older 92/148 = 62.2% "
                 "monitor reproduction remains preserved in the run registry/protocol matrix."
+            ),
+            (
+                f"- Canonical rows currently contain `{EXPECTED_CANONICAL_N}` rows and "
+                f"`{EXPECTED_CANONICAL_UNIQUE_IDS}` unique example IDs because "
+                f"`dat-DS5091D-00-0016` appears twice in the pinned slice."
             ),
             "- Results under `results/` are gitignored; tracked files should contain commands, manifests, and analysis.",
             "",
         ]
     )
     (output_dir / "related_work_thesis_note.md").write_text("\n".join(lines))
+
+
+def _write_tracked_snapshot(output_dir: Path, snapshot_dir: Path) -> None:
+    """Copy small monitor outputs into a tracked docs directory.
+
+    The raw `results/` tree stays gitignored because full runs can contain
+    large transient crops and traces. These copied artifacts are the stable
+    branch-facing summary that GitHub readers can inspect without rerunning.
+    """
+
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    artifact_names = [
+        "dataset_manifest.json",
+        "protocol_matrix.json",
+        "run_registry.json",
+        "headline_table.json",
+        "headline_table.md",
+        "headline_table.csv",
+        "headline_table.html",
+        "headline_table.jsonl",
+        "related_work_thesis_note.md",
+    ]
+    for name in artifact_names:
+        source = output_dir / name
+        if source.exists():
+            shutil.copy2(source, snapshot_dir / name)
 
 
 def _default_result_roots() -> list[Path]:
@@ -623,6 +702,15 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also render headline_table.json with scripts/render_headline_table.py.",
     )
+    parser.add_argument(
+        "--snapshot-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional tracked docs directory to receive small monitor artifacts "
+            "for GitHub viewers. Raw results still stay under --output-dir."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -643,7 +731,9 @@ def main() -> int:
         "expected_n": EXPECTED_CANONICAL_N,
         "rows": registry_rows,
     }
-    (args.output_dir / "run_registry.json").write_text(json.dumps(registry, indent=2, sort_keys=True))
+    (args.output_dir / "run_registry.json").write_text(
+        json.dumps(registry, indent=2, sort_keys=True)
+    )
     (args.output_dir / "dataset_manifest.json").write_text(
         json.dumps(_dataset_manifest(runs), indent=2, sort_keys=True)
     )
@@ -660,7 +750,12 @@ def main() -> int:
         renderer = Path(__file__).resolve().parent / "render_headline_table.py"
         subprocess.run([sys.executable, str(renderer), str(headline_path)], check=False)
 
+    if args.snapshot_dir is not None:
+        _write_tracked_snapshot(args.output_dir, args.snapshot_dir)
+
     print(f"Wrote related-work monitor artifacts to {args.output_dir}")
+    if args.snapshot_dir is not None:
+        print(f"Copied tracked monitor snapshot to {args.snapshot_dir}")
     for status in sorted({row["status"] for row in registry_rows}):
         n = sum(1 for row in registry_rows if row["status"] == status)
         print(f"{status}: {n}")
