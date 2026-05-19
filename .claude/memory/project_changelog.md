@@ -30,6 +30,13 @@
   evidence reward 0.0200, and lazy-answer rate 0.574. The full-tool ReAct row
   is worse than the minimal-tool ReAct row, reinforcing that exposed tools
   alone are not the same as a staged localization harness.
+- Rendered the final related-work monitor artifacts and added the tracked
+  thesis-facing note
+  `docs/research/2026-05-18-related-work-headline-results.md`. The generated
+  monitor outputs now distinguish the current pinned-revision FocusParse
+  reproduction row (92/148 = 62.2%) from the recovered historical May 15
+  checkpoint (99/148 = 66.9%), instead of leaving the historic row marked as
+  unrecovered.
 
 ## 2026-05-17
 

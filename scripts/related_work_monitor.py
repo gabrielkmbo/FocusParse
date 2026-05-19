@@ -30,6 +30,10 @@ PINNED_HF_REVISION = "3774c67f8b814392b6d04c939e904f749a3f52eb"
 EXPECTED_CANONICAL_N = 148
 DEFAULT_PDFS_ROOT = "~/.cache/focusparse/pdfs"
 DEFAULT_FULL_STAGING_ROOT = "~/.cache/focusparse/hf_staging_related_work_full"
+HISTORIC_FOCUSPARSER_669_ARTIFACT = Path(
+    "/Users/gabrielbo/projects/FocusParse/results/hf/sprint-2026-05-15/"
+    "answer-shape-normalizer-oai-run2/focusparse_focus_agentic_multi_page_8c5e328d.json"
+)
 
 WORKTREES = {
     "basic_vlm": Path("/private/tmp/focusparse-exp-basic-vlm-protocols"),
@@ -173,7 +177,10 @@ def _specs() -> list[ExpectedRun]:
             agent="focus",
             protocol="agentic_multi_page",
             headline=True,
-            notes="66.9% checkpoint reference; raw artifact must be reproduced or recovered.",
+            notes=(
+                "Current pinned-revision reproduction is 62.2%; historical 66.9% "
+                f"checkpoint is linked at {HISTORIC_FOCUSPARSER_669_ARTIFACT}."
+            ),
         ),
     ]
 
@@ -543,7 +550,11 @@ def _write_thesis_note(output_dir: Path, registry_rows: list[dict[str, Any]]) ->
             "## Gates",
             "",
             f"- Decision-grade rows must use `{PINNED_HF_REVISION}` and `n={EXPECTED_CANONICAL_N}`.",
-            "- FocusParse 66.9% remains gated until the raw artifact is reproduced or recovered.",
+            (
+                "- Historical FocusParse 66.9% checkpoint is linked to recovered raw "
+                f"artifact `{HISTORIC_FOCUSPARSER_669_ARTIFACT}`; headline tables use "
+                "the current pinned-revision reproduction unless explicitly labeled historical."
+            ),
             "- Results under `results/` are gitignored; tracked files should contain commands, manifests, and analysis.",
             "",
         ]
