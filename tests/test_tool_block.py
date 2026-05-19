@@ -9,6 +9,7 @@ the tool's input model — so a typo in `_EXAMPLE_CALLS` fails the build.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -18,9 +19,14 @@ from focusparse.tools import (
     INSPECT_REGION_SPEC,
     LAYOUT_DETECT_SPEC,
     RUN_PYTHON_SPEC,
+    _summarize_layout_detect,
+    _normalize_page_image_inspect_input,
+    _normalize_page_image_text_layer_input,
     format_agent_tool_block,
     resolve_tool_set,
 )
+from focusparse.tools.get_text_layer import GetTextLayerInput
+from focusparse.tools.inspect_region import InspectRegionInput
 
 
 @pytest.fixture
@@ -66,6 +72,28 @@ def test_layout_detect_pixel_to_norm_chaining_visible(careful: str) -> None:
     assert "bbox_norm" in layout_block
 
 
+def test_layout_detect_summary_includes_chainable_normalized_bboxes() -> None:
+    summary = _summarize_layout_detect(
+        {
+            "page": 3,
+            "image_width": 200,
+            "image_height": 100,
+            "n_regions": 1,
+            "regions": [
+                {
+                    "label": "Picture",
+                    "bbox": [20, 10, 100, 60],
+                    "score": 0.91,
+                    "figure_class": "line_chart",
+                }
+            ],
+        }
+    )
+
+    assert "bbox_norm=[0.100,0.100,0.500,0.600]" in summary
+    assert "figure=line_chart" in summary
+
+
 def test_run_python_chains_documented(careful: str) -> None:
     rp_idx = careful.index("### run_python")
     rp_block = careful[rp_idx:]
@@ -83,6 +111,33 @@ def test_inspect_region_post_feed_to_run_python_documented(careful: str) -> None
         ir_block = ir_block[:next_tool]
     assert "run_python" in ir_block
     assert "image_refs" in ir_block
+
+
+def test_inspect_region_runner_normalizes_rendered_page_image_page_number() -> None:
+    inp = InspectRegionInput(
+        doc_path=str(Path("/tmp/doc_page_0050_300dpi.png")),
+        page=50,
+        bbox_norm=[0.1, 0.1, 0.2, 0.2],
+        mode="image",
+    )
+
+    normalized = _normalize_page_image_inspect_input(inp)
+
+    assert normalized.page == 1
+    assert inp.page == 50
+
+
+def test_get_text_layer_runner_normalizes_rendered_page_image_page_number() -> None:
+    inp = GetTextLayerInput(
+        doc_path=str(Path("/tmp/doc_page_0046_300dpi.png")),
+        page=46,
+        bbox_norm=[0.1, 0.1, 0.2, 0.2],
+    )
+
+    normalized = _normalize_page_image_text_layer_input(inp)
+
+    assert normalized.page == 1
+    assert inp.page == 46
 
 
 def test_generic_mode_is_substantially_shorter(careful: str, generic: str) -> None:

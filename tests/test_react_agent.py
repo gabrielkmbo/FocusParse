@@ -259,6 +259,30 @@ def test_parse_react_turn_extracts_action():
     assert parsed.action_input == {"page": 1}
 
 
+def test_parse_react_turn_uses_first_object_when_model_concatenates_json():
+    text = (
+        '{"thought": "inspect first", "action": "inspect_region", '
+        '"action_input": {"page": 1}}'
+        '{"thought": "premature answer", "final_answer": "42", "citations": []}'
+    )
+    parsed = _parse_react_turn(text)
+    assert not parsed.is_final
+    assert parsed.action == "inspect_region"
+    assert parsed.action_input == {"page": 1}
+
+
+def test_parse_react_turn_skips_thought_only_object_before_action():
+    text = (
+        '{"thought": "need more evidence"}'
+        '{"thought": "inspect", "action": "layout_detect", '
+        '"action_input": {"image_path": "/tmp/page.png", "page": 3}}'
+    )
+    parsed = _parse_react_turn(text)
+    assert not parsed.is_final
+    assert parsed.action == "layout_detect"
+    assert parsed.action_input == {"image_path": "/tmp/page.png", "page": 3}
+
+
 # ---------------------------------------------------------------------------
 # AgentBaselineAgent — uses generic prompt
 # ---------------------------------------------------------------------------

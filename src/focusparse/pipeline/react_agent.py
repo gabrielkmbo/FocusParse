@@ -382,18 +382,8 @@ def _parse_react_turn(text: str) -> _ReActTurn:
     if not text:
         return _ReActTurn(is_final=True, final_answer="")
 
-    candidate = text.strip()
-    fence = _JSON_FENCE_RE.search(candidate)
-    if fence:
-        candidate = fence.group(1)
-    else:
-        start = candidate.find("{")
-        end = candidate.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            candidate = candidate[start : end + 1]
-    try:
-        obj = json.loads(candidate)
-    except json.JSONDecodeError:
+    obj = _extract_first_actionable_json_object(text)
+    if obj is None:
         return _ReActTurn(is_final=True, final_answer=text.strip())
     if not isinstance(obj, dict):
         return _ReActTurn(is_final=True, final_answer=text.strip())
@@ -416,3 +406,35 @@ def _parse_react_turn(text: str) -> _ReActTurn:
         return _ReActTurn(is_final=False, action=action, action_input=action_input)
     # Malformed — treat as final answer with whatever text is there.
     return _ReActTurn(is_final=True, final_answer=text.strip())
+
+
+def _extract_first_actionable_json_object(text: str) -> Any:
+    """Return the first action/final JSON object in a model turn.
+
+    Coding-style agents sometimes emit an action object immediately followed by
+    a speculative final-answer object in the same model response. The loop
+    should execute the first action rather than treating the concatenated JSON
+    stream as malformed prose. They also sometimes prepend a thought-only JSON
+    object; skip those and keep scanning for the first executable object.
+    """
+
+    candidate = text.strip()
+    fence = _JSON_FENCE_RE.search(candidate)
+    if fence:
+        candidate = fence.group(1).strip()
+
+    decoder = json.JSONDecoder()
+    idx = 0
+    while idx < len(candidate):
+        start = candidate.find("{", idx)
+        if start < 0:
+            return None
+        try:
+            obj, end = decoder.raw_decode(candidate[start:])
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+        if isinstance(obj, dict) and ("action" in obj or "final_answer" in obj):
+            return obj
+        idx = start + max(end, 1)
+    return None
