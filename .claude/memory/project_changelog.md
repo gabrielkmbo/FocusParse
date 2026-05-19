@@ -7,6 +7,13 @@
   routes derived tiles, crops, layout JSON, and text-layer JSON through
   per-example scratch directories while still preserving the requested protocol
   behavior and writing `run.json`, `per_example.jsonl`, and the wrapper JSON.
+- Completed the decision-grade DocLens-style faithful-proxy run on the pinned
+  parser-bench revision `3774c67f8b814392b6d04c939e904f749a3f52eb` with the
+  canonical `agentic_multi_page` n=148 set. Result:
+  `focusparse_doclens_agentic_multi_page_0b139a04` scored 24/148 = 16.2%,
+  cost $3.74, and $0.156/correct. Artifacts are gitignored under
+  `results/hf/related-work/doclens/` with `run.json`, `per_example.jsonl`, and
+  the wrapper JSON preserved.
 
 ## 2026-05-17
 
