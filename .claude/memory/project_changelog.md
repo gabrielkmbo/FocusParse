@@ -17,6 +17,13 @@
   and $0.156/correct. The result is preserved in the DocLens worktree's
   gitignored `results/hf/related-work/doclens/` directory and will be ingested
   into the final monitor tables after the remaining LlamaIndex ReAct rows.
+- Added the completed trusted LlamaIndex ReAct `+2` full row to the monitor:
+  18/148 = 12.2% on `agentic_multi_page`, $6.36 total cost, $0.353/correct,
+  mean latency 29.9s, mean tool calls 3.65, page recall 0.544, bbox IoU 0.172,
+  evidence reward 0.0345, and lazy-answer rate 0.426. The recovered historic
+  FocusParse 66.9% checkpoint remains linked to the May 15
+  `answer-shape-normalizer-oai-run2` artifact, while the pinned-revision
+  reproduction row in this monitor is 62.2%.
 
 ## 2026-05-17
 

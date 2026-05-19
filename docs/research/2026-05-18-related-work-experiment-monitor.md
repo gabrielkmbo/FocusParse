@@ -106,7 +106,7 @@ git.
 | Coding Agent +4 | full complete | 0.7% | $2.22 | $2.223 | `/private/tmp/focusparse-exp-coding-agent/results/hf/related-work/coding_agent/focusparse_coding_agent_agentic_multi_page_0b139a04/` |
 | AgenticOCR-style | full complete | 18.2% | $2.13 | $0.079 | `/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work/agentic_ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04/` |
 | DocLens-style | full complete | 16.2% | $3.74 | $0.156 | `/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work/doclens/focusparse_doclens_agentic_multi_page_0b139a04/` |
-| LlamaIndex ReAct +2 | queued | pending | pending | pending | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_minimal/` |
+| LlamaIndex ReAct +2 | full complete | 12.2% | $6.36 | $0.353 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_minimal/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal/` |
 | LlamaIndex ReAct +4 | queued | pending | pending | pending | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_full/` |
 
 Disk note: early parallel full runs filled the local filesystem because every
@@ -115,3 +115,12 @@ now treats full rows as sequential by default, deletes completed HF staging
 directories under `~/.cache/focusparse/hf_staging_related_work_full_*`, and
 keeps only `run.json`, `per_example.jsonl`, and wrapper JSON for completed
 decision-grade runs unless a qualitative audit requires richer artifacts.
+
+Historical FocusParse thesis checkpoint note: the 66.9% row remains linked to
+the recovered May 15 artifact
+`/Users/gabrielbo/projects/FocusParse/results/hf/sprint-2026-05-15/answer-shape-normalizer-oai-run2/focusparse_focus_agentic_multi_page_8c5e328d.json`
+and is documented in
+`/Users/gabrielbo/projects/FocusParse/docs/research/2026-05-15-harness-65plus-post-evidence-iteration.md`.
+The current pinned-revision reproduction in this monitor branch is 62.2%, so
+the final table should label 66.9% as the historical recovered checkpoint unless
+it is rerun exactly.
