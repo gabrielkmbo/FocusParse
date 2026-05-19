@@ -107,7 +107,7 @@ git.
 | AgenticOCR-style | full complete | 18.2% | $2.13 | $0.079 | `/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work/agentic_ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04/` |
 | DocLens-style | full complete | 16.2% | $3.74 | $0.156 | `/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work/doclens/focusparse_doclens_agentic_multi_page_0b139a04/` |
 | LlamaIndex ReAct +2 | full complete | 12.2% | $6.36 | $0.353 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_minimal/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal/` |
-| LlamaIndex ReAct +4 | queued | pending | pending | pending | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_full/` |
+| LlamaIndex ReAct +4 | full complete | 6.1% | $8.25 | $0.917 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_full/focusparse_llamaindex_react_agentic_multi_page_0b139a04/` |
 
 Disk note: early parallel full runs filled the local filesystem because every
 row materialized contact sheets and crops simultaneously. The monitor runbook

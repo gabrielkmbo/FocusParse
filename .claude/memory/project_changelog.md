@@ -24,6 +24,12 @@
   FocusParse 66.9% checkpoint remains linked to the May 15
   `answer-shape-normalizer-oai-run2` artifact, while the pinned-revision
   reproduction row in this monitor is 62.2%.
+- Added the completed trusted LlamaIndex ReAct `+4` full row to the monitor:
+  9/148 = 6.1% on `agentic_multi_page`, $8.25 total cost, $0.917/correct,
+  mean latency 34.4s, mean tool calls 3.81, page recall 0.416, bbox IoU 0.125,
+  evidence reward 0.0200, and lazy-answer rate 0.574. The full-tool ReAct row
+  is worse than the minimal-tool ReAct row, reinforcing that exposed tools
+  alone are not the same as a staged localization harness.
 
 ## 2026-05-17
 
