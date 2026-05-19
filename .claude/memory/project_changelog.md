@@ -12,6 +12,17 @@
   evidence reward **0.0345**, lazy-answer rate **0.426**, mean tool calls
   **3.65**. This replaces the old custom ReAct row as the main ReAct comparator
   candidate for `+2`, but it is not competitive with FocusParse.
+- Completed the decision-grade `agentic_multi_page` full run for trusted
+  LlamaIndex ReAct with the full `+4` tool set
+  (`inspect_region`, `get_text_layer`, `layout_detect`, `run_python`) on the
+  same pinned HF revision. Artifact:
+  `results/hf/related-work/llamaindex_react_full/focusparse_llamaindex_react_agentic_multi_page_0b139a04`.
+  Result: **9/148 = 6.1%**, cost **$8.25**, cost/correct **$0.917**,
+  mean latency **34.4s**, page recall **0.416**, bbox IoU **0.125**,
+  evidence reward **0.0200**, lazy-answer rate **0.574**, mean tool calls
+  **3.81**. More tools made the standard ReAct agent less accurate and more
+  expensive than the minimal-tool row, which is useful evidence for the paper's
+  claim that FocusParse's staged harness matters beyond simply exposing tools.
 
 - Added comparator `--minimal-artifacts` support for `llamaindex_react`,
   `react`, and `agent_baseline` evals. Minimal comparator runs now disable
