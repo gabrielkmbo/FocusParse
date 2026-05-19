@@ -12,6 +12,7 @@ from focusparse.models.base import ModelResponse
 from focusparse.pipeline.doclens_agent import (
     DocLensAgent,
     _CandidateElement,
+    _extract_json_obj,
     _parse_answer_sample,
     _parse_pages_response,
 )
@@ -172,6 +173,21 @@ def test_parse_answer_sample_maps_evidence_refs_to_citations():
             "source": "doclens",
         }
     ]
+
+
+def test_extract_json_obj_uses_first_object_when_response_concatenates_json():
+    obj = _extract_json_obj(
+        '{"pages": [2], "rationale": "candidate"}'
+        '{"pages": [3], "rationale": "extra speculative object"}'
+    )
+
+    assert obj == {"pages": [2], "rationale": "candidate"}
+
+
+def test_extract_json_obj_skips_leading_non_json_text():
+    obj = _extract_json_obj('Thought: inspect first\n{"answer": "42 mA"}')
+
+    assert obj == {"answer": "42 mA"}
 
 
 def test_run_hf_eval_argparse_accepts_doclens(monkeypatch):
