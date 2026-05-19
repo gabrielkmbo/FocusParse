@@ -781,18 +781,8 @@ def _evidence_block(crops: list[_CropRecord]) -> str:
 def _parse_action_turn(text: str) -> _ActionTurn:
     if not text:
         return _ActionTurn(is_final=True, final_answer="")
-    candidate = text.strip()
-    fence = _JSON_FENCE_RE.search(candidate)
-    if fence:
-        candidate = fence.group(1)
-    else:
-        start = candidate.find("{")
-        end = candidate.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            candidate = candidate[start : end + 1]
-    try:
-        obj = json.loads(candidate)
-    except json.JSONDecodeError:
+    obj = _extract_first_actionable_json_object(text)
+    if obj is None:
         return _ActionTurn(is_final=True, final_answer=text.strip())
     if not isinstance(obj, dict):
         return _ActionTurn(is_final=True, final_answer=text.strip())
@@ -823,6 +813,29 @@ def _parse_action_turn(text: str) -> _ActionTurn:
         bbox_norm=bbox,
         rationale=str(obj.get("rationale") or ""),
     )
+
+
+def _extract_first_actionable_json_object(text: str) -> dict[str, Any] | None:
+    candidate = text.strip()
+    fence = _JSON_FENCE_RE.search(candidate)
+    if fence:
+        candidate = fence.group(1).strip()
+
+    decoder = json.JSONDecoder()
+    idx = 0
+    while idx < len(candidate):
+        start = candidate.find("{", idx)
+        if start < 0:
+            return None
+        try:
+            obj, end = decoder.raw_decode(candidate[start:])
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+        if isinstance(obj, dict) and ("action" in obj or "final_answer" in obj):
+            return obj
+        idx = start + max(end, 1)
+    return None
 
 
 def _coerce_bbox(raw: Any) -> tuple[tuple[float, float, float, float] | None, str | None]:

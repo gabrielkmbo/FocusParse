@@ -13,7 +13,11 @@ import pytest
 
 from focusparse.eval.metrics import AggregateMetrics
 from focusparse.models.base import ModelResponse
-from focusparse.pipeline.agentic_ocr_agent import AgenticOCRStyleAgent, run_agentic_ocr_eval
+from focusparse.pipeline.agentic_ocr_agent import (
+    AgenticOCRStyleAgent,
+    _parse_action_turn,
+    run_agentic_ocr_eval,
+)
 from focusparse.pipeline.workflow import WorkflowResult
 from focusparse.tools.get_text_layer import GetTextLayerInput, GetTextLayerOutput
 from focusparse.tools.inspect_region import InspectRegionInput, InspectRegionOutput
@@ -235,6 +239,30 @@ async def test_agentic_ocr_missing_pdf_abstains(tmp_path):
     assert result.answer == "Unanswerable"
     assert result.telemetry["agentic_ocr"]["missing_pdf_path"] is True
     assert client.calls == []
+
+
+def test_parse_action_turn_uses_first_action_when_model_concatenates_json():
+    parsed = _parse_action_turn(
+        '{"thought":"zoom first","action":"region","page":2,'
+        '"bbox_norm":[0.1,0.1,0.3,0.3]}'
+        '{"thought":"premature","final_answer":"42 V","citations":[]}'
+    )
+
+    assert not parsed.is_final
+    assert parsed.action == "region"
+    assert parsed.page == 2
+    assert parsed.bbox_norm == (0.1, 0.1, 0.3, 0.3)
+
+
+def test_parse_action_turn_skips_thought_only_json_before_action():
+    parsed = _parse_action_turn(
+        '{"thought":"need evidence"}'
+        '{"action":"element","page":2,"bbox_norm":[0.2,0.2,0.4,0.5]}'
+    )
+
+    assert not parsed.is_final
+    assert parsed.action == "element"
+    assert parsed.page == 2
 
 
 def _load_script_module():
