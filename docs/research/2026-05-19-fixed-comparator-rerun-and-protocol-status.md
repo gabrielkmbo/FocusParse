@@ -61,10 +61,11 @@ Reference anchors from the monitor table remain:
 | Method | Accuracy | Page recall | BBox IoU | Cost/correct | Latency |
 |---|---:|---:|---:|---:|---:|
 | Basic VLM | 70/148 = 47.3% | 0.895 | 0.059 | $0.010 | 3.41s |
-| FocusParse +4 current reproduction | 92/148 = 62.2% | 0.921 | 0.894 | $0.024 | 4.10s |
+| FocusParse +4 headline checkpoint | 99/148 = 66.9% | 0.949 | 0.881 | $0.0232 | 3.70s |
 
-The historical `66.9%` FocusParse checkpoint remains a separate provenance row,
-not the current pinned monitor reproduction.
+The older `92/148 = 62.2%` FocusParse monitor reproduction remains preserved in
+the run registry and protocol matrix; the headline table now uses the stronger
+weekend `shape-normalizer-full-run1` checkpoint.
 
 ## Fixed Run Artifact Paths
 
@@ -114,11 +115,11 @@ This is visible in the fixed runs:
 
 | Method | Fixed accuracy | Gap vs Basic | Gap vs FocusParse | Key residual failure |
 |---|---:|---:|---:|---|
-| LlamaIndex ReAct +2 | 12.2% | -35.1 pp | -50.0 pp | Many lazy/no-citation rows plus verbose answers |
-| LlamaIndex ReAct +4 | 10.1% | -37.2 pp | -52.0 pp | Better IoU after fixes, but still poor final answers |
-| Coding Agent +4 | 25.7% | -21.6 pp | -36.5 pp | Tool use recovered, but reasoning/output shape remains brittle |
-| DocLens-style | 16.9% | -30.4 pp | -45.3 pp | Excellent page recall/localization, weak answer sampling/adjudication |
-| AgenticOCR-style | 16.2% | -31.1 pp | -45.9 pp | Zero-shot crop policy under-explores and abstains on finance |
+| LlamaIndex ReAct +2 | 12.2% | -35.1 pp | -54.7 pp | Many lazy/no-citation rows plus verbose answers |
+| LlamaIndex ReAct +4 | 10.1% | -37.2 pp | -56.8 pp | Better IoU after fixes, but still poor final answers |
+| Coding Agent +4 | 25.7% | -21.6 pp | -41.2 pp | Tool use recovered, but reasoning/output shape remains brittle |
+| DocLens-style | 16.9% | -30.4 pp | -50.0 pp | Excellent page recall/localization, weak answer sampling/adjudication |
+| AgenticOCR-style | 16.2% | -31.1 pp | -50.7 pp | Zero-shot crop policy under-explores and abstains on finance |
 
 FocusParse is ahead because it does not treat tool use as a generic loop. It
 couples page routing, evidence packet construction, crop expansion, verifier
@@ -142,7 +143,7 @@ a diagnostic, not a replacement headline row.
 This is strong evidence that output contract accounts for a meaningful slice of
 the gap. It is not enough to close the gap: even with the post-hoc normalizer,
 the best fixed comparator is Coding Agent at `35.8%`, still below Basic VLM
-at `47.3%` and far below FocusParse at `62.2%`.
+at `47.3%` and far below FocusParse at `66.9%`.
 
 ## Concrete Failure Examples
 
@@ -189,4 +190,3 @@ For the main table, use only `agentic_multi_page` rows until the 36 appendix
 protocol cells are actually run. For the related-work section, label DocLens
 and AgenticOCR rows as faithful proxies unless official code/model integration
 is added.
-

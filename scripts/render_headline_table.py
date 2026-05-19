@@ -166,7 +166,7 @@ def _to_markdown(table: dict[str, Any]) -> str:
             + [f"{_DOMAIN_LABELS.get(d, d)} $/correct" for d in _DOMAINS_ORDER if d != "_overall"]
             + [f"{_DOMAIN_LABELS.get(d, d)} latency" for d in _DOMAINS_ORDER if d != "_overall"]
         )
-        + " | Overall accuracy | Overall latency | n |"
+        + " | Overall accuracy | Overall $/correct | Overall latency | n |"
     )
     sep = "|" + "|".join(["---"] * (header.count("|") - 1)) + "|"
     lines.append(header)
@@ -191,6 +191,9 @@ def _to_markdown(table: dict[str, Any]) -> str:
             latency_cells.append(_fmt_latency(m.get("latency_ms_mean")))
         overall = by_domain.get("_overall") or {}
         overall_acc = _fmt_pct(overall.get("accuracy"), overall.get("accuracy_ci"))
+        overall_cost = _fmt_cost(
+            overall.get("usd_per_correct"), overall.get("usd_per_correct_ci")
+        )
         overall_latency = _fmt_latency(overall.get("latency_ms_mean"))
         n_total = overall.get("n", row.get("n_total", 0))
 
@@ -203,7 +206,7 @@ def _to_markdown(table: dict[str, Any]) -> str:
             + " | ".join(cost_cells)
             + " | "
             + " | ".join(latency_cells)
-            + f" | {overall_acc} | {overall_latency} | {n_total} |"
+            + f" | {overall_acc} | {overall_cost} | {overall_latency} | {n_total} |"
         )
 
     lines.append("")
@@ -220,7 +223,7 @@ def _to_html(table: dict[str, Any]) -> str:
     for row in table.get("rows", []):
         if row.get("missing"):
             rows_html.append(
-                f"<tr><td><b>{row['label']}</b></td><td colspan='9'><i>missing</i></td></tr>"
+                f"<tr><td><b>{row['label']}</b></td><td colspan='10'><i>missing</i></td></tr>"
             )
             continue
         by_domain = row.get("by_domain", {})
@@ -244,6 +247,9 @@ def _to_html(table: dict[str, Any]) -> str:
             cells.append(f"<td>{_fmt_latency(m.get('latency_ms_mean'))}</td>")
         overall = by_domain.get("_overall") or {}
         cells.append(f"<td>{_fmt_pct(overall.get('accuracy'), overall.get('accuracy_ci'))}</td>")
+        cells.append(
+            f"<td>{_fmt_cost(overall.get('usd_per_correct'), overall.get('usd_per_correct_ci'))}</td>"
+        )
         cells.append(f"<td>{_fmt_latency(overall.get('latency_ms_mean'))}</td>")
         cells.append(f"<td>{overall.get('n', row.get('n_total', 0))}</td>")
         rows_html.append("<tr>" + "".join(cells) + "</tr>")
@@ -266,7 +272,7 @@ def _to_html(table: dict[str, Any]) -> str:
             for d in _DOMAINS_ORDER
             if d != "_overall"
         )
-        + "<th>Overall accuracy</th><th>Overall latency</th><th>n</th>"
+        + "<th>Overall accuracy</th><th>Overall $/correct</th><th>Overall latency</th><th>n</th>"
         + "</tr>"
     )
 

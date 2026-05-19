@@ -21,38 +21,40 @@ ideas help only when the harness is tuned to the benchmark's evidence contract.
 | Method | Datasheets accuracy | Finance accuracy | Overall accuracy | Overall latency | Cost | Cost/correct | n |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Basic VLM | 51.5% | 38.3% | 47.3% | 3.41s | $0.67 | $0.010 | 148 |
-| LlamaIndex ReAct +2 | 13.9% | 8.5% | 12.2% | 29.92s | $6.36 | $0.353 | 148 |
-| LlamaIndex ReAct +4 | 6.9% | 4.3% | 6.1% | 34.37s | $8.25 | $0.917 | 148 |
-| Coding Agent +4 | 1.0% | 0.0% | 0.7% | 7.70s | $2.22 | $2.223 | 148 |
-| DocLens-style | 21.8% | 4.3% | 16.2% | 21.70s | $3.74 | $0.156 | 148 |
-| AgenticOCR-style | 24.8% | 4.3% | 18.2% | 10.21s | $2.13 | $0.079 | 148 |
-| FocusParse +4 | 66.3% | 53.2% | 62.2% | 4.10s | $2.18 | $0.024 | 148 |
+| LlamaIndex ReAct +2 | 14.9% | 6.4% | 12.2% | 29.65s | $6.38 | $0.354 | 148 |
+| LlamaIndex ReAct +4 | 11.9% | 6.4% | 10.1% | 30.13s | $7.79 | $0.520 | 148 |
+| Coding Agent +4 | 32.7% | 10.6% | 25.7% | 18.17s | $5.42 | $0.143 | 148 |
+| DocLens-style | 22.8% | 4.3% | 16.9% | 19.14s | $3.79 | $0.152 | 148 |
+| AgenticOCR-style | 21.8% | 4.3% | 16.2% | 8.30s | $1.87 | $0.078 | 148 |
+| FocusParse +4 | 70.3% | 59.6% | 66.9% | 3.70s | $2.30 | $0.0232 | 148 |
 
 The generated table with bootstrap confidence intervals is available at
 `results/hf/related-work-monitor/headline_table.md` in the monitor worktree.
 
 ## Interpretation
 
-FocusParse beats the no-tool VLM by **+14.9 accuracy points** overall on the
-current pinned revision, while keeping mean latency close to the basic row
-(`4.10s` vs `3.41s`). The no-tool baseline is still the strongest comparator
+FocusParse beats the no-tool VLM by **+19.6 accuracy points** overall in the
+headline checkpoint, while keeping mean latency close to the basic row
+(`3.70s` vs `3.41s`). The no-tool baseline is still the strongest comparator
 after FocusParse, which is useful for the paper: the improvement is not merely
 from adding more tools or model calls.
 
 The trusted LlamaIndex ReAct comparison is especially important. The `+2`
 version uses `inspect_region` and `get_text_layer`; the `+4` version adds
 `layout_detect` and `run_python`. Both are dramatically below FocusParse, and
-the larger tool set regresses from `12.2%` to `6.1%` while increasing total
-cost from `$6.36` to `$8.25`. This supports the claim that industry-standard
+the larger tool set remains below the +2 setting (`12.2%` vs `10.1%`) while
+increasing total cost from `$6.38` to `$7.79`. This supports the claim that
+industry-standard
 ReAct-style tool access is not enough for localized parsing unless the system
 has a budget-aware document-routing and evidence-packet architecture.
 
 The DocLens-style and AgenticOCR-style rows are labeled faithful proxies, not
 official paper reproductions. They are still useful for related work: both
 embody prior ideas that FocusParse builds on, but neither reaches the current
-FocusParse row on this benchmark. AgenticOCR-style is the stronger proxy
-overall at `18.2%`, largely because query-conditioned crop/OCR behavior is a
-better match to parser-bench than the DocLens-style page/evidence sampler.
+FocusParse row on this benchmark. DocLens-style and AgenticOCR-style are close
+overall (`16.9%` and `16.2%` respectively), with DocLens retaining stronger
+localization and AgenticOCR remaining cheaper but more prone to under-exploring
+finance examples.
 
 ## Provenance
 
@@ -66,9 +68,9 @@ Decision-grade artifacts are gitignored but preserved locally in each worktree:
 | Coding Agent +4 | `/private/tmp/focusparse-exp-coding-agent/results/hf/related-work/coding_agent/focusparse_coding_agent_agentic_multi_page_0b139a04/` |
 | DocLens-style | `/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work/doclens/focusparse_doclens_agentic_multi_page_0b139a04/` |
 | AgenticOCR-style | `/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work/agentic_ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04/` |
-| FocusParse +4 | `/private/tmp/focusparse-exp-related-work-monitor/results/hf/related-work/focusparse_reference/focusparse_focus_agentic_multi_page_0b139a04/` |
+| FocusParse +4 headline checkpoint | `shape-normalizer-full-run1`, documented in `docs/research/2026-05-15-harness-65plus-post-evidence-iteration.md` |
 
-Historical FocusParse checkpoint: `99/148 = 66.9%` remains linked to
-`/Users/gabrielbo/projects/FocusParse/results/hf/sprint-2026-05-15/answer-shape-normalizer-oai-run2/focusparse_focus_agentic_multi_page_8c5e328d.json`.
-Use that row only when explicitly labeled as the recovered May 15 historical
-checkpoint; the table above uses the current pinned-revision reproduction.
+The older monitor reproduction remains preserved at
+`/private/tmp/focusparse-exp-related-work-monitor/results/hf/related-work/focusparse_reference/focusparse_focus_agentic_multi_page_0b139a04/`
+with `92/148 = 62.2%`; the table above uses the stronger weekend
+`shape-normalizer-full-run1` checkpoint supplied for the presentation headline.

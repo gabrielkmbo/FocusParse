@@ -21,7 +21,7 @@ validation subset.
 | Coding Agent +4 | 1/148 = 0.7% | $2.22 | $2.223 | 7.70s | 0.000 | 0.000 | 1.000 | 0.05 |
 | DocLens-style | 24/148 = 16.2% | $3.74 | $0.156 | 21.70s | 0.934 | 0.673 | 0.000 | 3.88 |
 | AgenticOCR-style | 27/148 = 18.2% | $2.13 | $0.079 | 10.21s | 0.744 | 0.205 | 0.203 | 2.12 |
-| FocusParse +4 | 92/148 = 62.2% | $2.18 | $0.024 | 4.10s | 0.921 | 0.894 | 0.041 | 1.00 |
+| FocusParse +4 | 99/148 = 66.9% | $2.30 | $0.0232 | 3.70s | 0.949 | 0.881 | 0.020 | 1.00 |
 
 The key comparison is not "tools versus no tools." Basic VLM is strong because
 it directly sees the full `agentic_multi_page` image bundle and usually gives a
@@ -38,7 +38,7 @@ returning a scorer-compatible concise final answer.
 | Coding Agent | The original full run was invalid as an agentic comparator. | Tool calls averaged only 0.047/example, page recall and IoU were both 0.0, and lazy rate was 1.0. The parser often saw concatenated action JSON plus final JSON and treated the whole turn as malformed prose instead of executing the first action. |
 | DocLens-style | Localization is good; answer sampling/adjudication and evidence persistence are weak. | Page recall was 0.934 and IoU was 0.673, but accuracy was only 16.2%. That means the failure is mostly downstream of evidence localization. Finance also had missing PDF/tool-source failures in the full artifacts. |
 | AgenticOCR-style | This is a zero-shot proxy, not the trained AgenticOCR policy. | Accuracy was 18.2%, IoU only 0.205, and finance collapsed to 4.3%. The implementation lacks the trained crop policy, hard-negative training, GRPO reward, semantic `text/table/equation` modes, and reliable PDF hydration used by the paper setup. |
-| FocusParse | Best balance of localization and final-answer discipline. | It combines high page recall (0.921), much higher IoU (0.894), low lazy rate (0.041), and concise answer normalization. |
+| FocusParse | Best balance of localization and final-answer discipline. | It combines high page recall (0.949), high IoU (0.881), low lazy rate (0.020), and concise answer normalization. |
 
 ## Why Basic VLM Beats The Harnessed Comparators
 
@@ -166,4 +166,3 @@ as proxies unless official code/model integration becomes available.
   `https://arxiv.org/abs/2511.11552`
 - AgenticOCR paper:
   `https://arxiv.org/abs/2602.24134`
-

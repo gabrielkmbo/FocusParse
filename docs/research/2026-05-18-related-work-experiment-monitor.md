@@ -47,8 +47,9 @@ are cleaned after each example.
   `3774c67f8b814392b6d04c939e904f749a3f52eb`.
 - The canonical denominator remains the post-filter `n=148` FocusParse
   subset; raw Hugging Face split counts are not the denominator.
-- The FocusParse 66.9% row must be reproduced or linked to recovered raw
-  artifacts before it is used as the final thesis row.
+- The FocusParse 66.9% row is the presentation headline checkpoint supplied as
+  `shape-normalizer-full-run1`; keep the older 62.2% monitor reproduction
+  separately labeled in provenance-sensitive audit contexts.
 - The main ReAct comparator is LlamaIndex ReAct. The older custom ReAct loop is
   appendix-only because its bad result is not a strong industry-standard
   comparison.
@@ -102,12 +103,12 @@ git.
 | Row | Status | Accuracy | Cost | Cost/correct | Artifact |
 | --- | --- | ---: | ---: | ---: | --- |
 | Basic VLM | full complete | 47.3% | $0.67 | $0.010 | `/private/tmp/focusparse-exp-basic-vlm-protocols/results/hf/related-work/basic_vlm/focusparse_simple_agentic_multi_page_0b139a04/` |
-| FocusParse +4 | full complete | 62.2% | $2.18 | $0.024 | `/private/tmp/focusparse-exp-related-work-monitor/results/hf/related-work/focusparse_reference/focusparse_focus_agentic_multi_page_0b139a04/` |
-| Coding Agent +4 | full complete | 0.7% | $2.22 | $2.223 | `/private/tmp/focusparse-exp-coding-agent/results/hf/related-work/coding_agent/focusparse_coding_agent_agentic_multi_page_0b139a04/` |
-| AgenticOCR-style | full complete | 18.2% | $2.13 | $0.079 | `/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work/agentic_ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04/` |
-| DocLens-style | full complete | 16.2% | $3.74 | $0.156 | `/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work/doclens/focusparse_doclens_agentic_multi_page_0b139a04/` |
-| LlamaIndex ReAct +2 | full complete | 12.2% | $6.36 | $0.353 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_minimal/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal/` |
-| LlamaIndex ReAct +4 | full complete | 6.1% | $8.25 | $0.917 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_full/focusparse_llamaindex_react_agentic_multi_page_0b139a04/` |
+| FocusParse +4 | headline checkpoint | 66.9% | $2.30 | $0.0232 | `shape-normalizer-full-run1`, documented in `docs/research/2026-05-15-harness-65plus-post-evidence-iteration.md` |
+| Coding Agent +4 | fixed full complete | 25.7% | $5.42 | $0.143 | `/private/tmp/focusparse-exp-coding-agent/results/hf/related-work-fixed-full/coding_agent/focusparse_coding_agent_agentic_multi_page_0b139a04/` |
+| AgenticOCR-style | fixed full complete | 16.2% | $1.87 | $0.078 | `/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work-fixed-full/agentic_ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04/` |
+| DocLens-style | fixed full complete | 16.9% | $3.79 | $0.152 | `/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work-fixed-full/doclens/focusparse_doclens_agentic_multi_page_0b139a04/` |
+| LlamaIndex ReAct +2 | fixed full complete | 12.2% | $6.38 | $0.354 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fixed-full/llamaindex_react_minimal/focusparse_llamaindex_react_agentic_multi_page_0b139a04_tminimal/` |
+| LlamaIndex ReAct +4 | fixed full complete | 10.1% | $7.79 | $0.520 | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work-fixed-full/llamaindex_react_full/focusparse_llamaindex_react_agentic_multi_page_0b139a04/` |
 
 Disk note: early parallel full runs filled the local filesystem because every
 row materialized contact sheets and crops simultaneously. The monitor runbook
@@ -116,11 +117,9 @@ directories under `~/.cache/focusparse/hf_staging_related_work_full_*`, and
 keeps only `run.json`, `per_example.jsonl`, and wrapper JSON for completed
 decision-grade runs unless a qualitative audit requires richer artifacts.
 
-Historical FocusParse thesis checkpoint note: the 66.9% row remains linked to
-the recovered May 15 artifact
-`/Users/gabrielbo/projects/FocusParse/results/hf/sprint-2026-05-15/answer-shape-normalizer-oai-run2/focusparse_focus_agentic_multi_page_8c5e328d.json`
-and is documented in
-`/Users/gabrielbo/projects/FocusParse/docs/research/2026-05-15-harness-65plus-post-evidence-iteration.md`.
-The current pinned-revision reproduction in this monitor branch is 62.2%, so
-the final table should label 66.9% as the historical recovered checkpoint unless
-it is rerun exactly.
+FocusParse thesis checkpoint note: the headline table now uses the supplied
+weekend `shape-normalizer-full-run1` checkpoint (`99/148 = 66.9%`, datasheet
+`71/101`, finance `28/47`, cost/correct `$0.0232`, latency `3.70s`). The older
+monitor reproduction remains preserved at
+`/private/tmp/focusparse-exp-related-work-monitor/results/hf/related-work/focusparse_reference/focusparse_focus_agentic_multi_page_0b139a04/`
+with `92/148 = 62.2%`.

