@@ -105,7 +105,7 @@ git.
 | FocusParse +4 | full complete | 62.2% | $2.18 | $0.024 | `/private/tmp/focusparse-exp-related-work-monitor/results/hf/related-work/focusparse_reference/focusparse_focus_agentic_multi_page_0b139a04/` |
 | Coding Agent +4 | full complete | 0.7% | $2.22 | $2.223 | `/private/tmp/focusparse-exp-coding-agent/results/hf/related-work/coding_agent/focusparse_coding_agent_agentic_multi_page_0b139a04/` |
 | AgenticOCR-style | full complete | 18.2% | $2.13 | $0.079 | `/private/tmp/focusparse-exp-agenticocr-baseline/results/hf/related-work/agentic_ocr/focusparse_agentic_ocr_agentic_multi_page_0b139a04/` |
-| DocLens-style | running | pending | pending | pending | `/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work/doclens/` |
+| DocLens-style | full complete | 16.2% | $3.74 | $0.156 | `/private/tmp/focusparse-exp-doclens-baseline/results/hf/related-work/doclens/focusparse_doclens_agentic_multi_page_0b139a04/` |
 | LlamaIndex ReAct +2 | queued | pending | pending | pending | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_minimal/` |
 | LlamaIndex ReAct +4 | queued | pending | pending | pending | `/private/tmp/focusparse-exp-llamaindex-react/results/hf/related-work/llamaindex_react_full/` |
 

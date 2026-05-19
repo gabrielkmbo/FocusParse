@@ -12,6 +12,11 @@
   sequentially with `--minimal-artifacts`; completed HF staging directories are
   deleted after artifact capture to avoid repeating the earlier disk-fill
   failure from concurrent full runs.
+- Added the completed DocLens-style faithful-proxy full row to the related-work
+  monitor checkpoint: 24/148 = 16.2% on `agentic_multi_page`, $3.74 total cost,
+  and $0.156/correct. The result is preserved in the DocLens worktree's
+  gitignored `results/hf/related-work/doclens/` directory and will be ingested
+  into the final monitor tables after the remaining LlamaIndex ReAct rows.
 
 ## 2026-05-17
 
