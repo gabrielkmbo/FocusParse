@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 from focusparse.traces.recorder import RunTrace
 
@@ -122,3 +123,68 @@ def export_sft_jsonl(
             f.write(json.dumps(record, separators=(",", ":")) + "\n")
             n += 1
     return n
+
+
+def load_eval_run_traces(run_dir: Path | str) -> list[RunTrace]:
+    """Load `RunTrace` objects from a run directory's `per_example.jsonl`.
+
+    Focus eval runs persist traces inside each per-example record. The
+    export schema needs a `RunTrace`, so this adapter reconstructs the trace
+    from the cached record without re-running the model.
+    """
+    run_dir = Path(run_dir)
+    per_example_path = run_dir / "per_example.jsonl"
+    if not per_example_path.exists():
+        raise FileNotFoundError(f"per-example predictions not found: {per_example_path}")
+
+    traces: list[RunTrace] = []
+    for line in per_example_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        traces.append(_trace_from_eval_record(record))
+    return traces
+
+
+def export_eval_run_sft_jsonl(
+    run_dir: Path | str,
+    out_path: Path | str,
+    *,
+    min_coverage: float = 0.8,
+    min_iou: float = 0.3,
+    require_correct: bool = True,
+    teacher_tier: str = "frontier",
+) -> int:
+    """Export SFT JSONL directly from a FocusParse eval run directory."""
+    traces = load_eval_run_traces(run_dir)
+    return export_sft_jsonl(
+        traces,
+        out_path,
+        min_coverage=min_coverage,
+        min_iou=min_iou,
+        require_correct=require_correct,
+        teacher_tier=teacher_tier,
+    )
+
+
+def _trace_from_eval_record(record: dict[str, Any]) -> RunTrace:
+    trace = record.get("trace") if isinstance(record.get("trace"), dict) else {}
+    reward = {
+        "answer": float(record.get("answer_correct") or 0.0),
+        "coverage": float(record.get("page_recall") or 0.0),
+        "iou": float(record.get("bbox_iou") or 0.0),
+        "evidence": float(record.get("evidence_reward") or 0.0),
+    }
+    payload = {
+        "example_id": str(record.get("example_id") or ""),
+        "question": str(record.get("question") or ""),
+        "plan": record.get("plan") or {},
+        "steps": trace.get("steps") or [],
+        "final_answer": record.get("answer_pred"),
+        "final_citations": record.get("citations") or [],
+        "reward": reward,
+        "evidence_snapshot": trace.get("evidence_snapshot"),
+        "artifacts": trace.get("artifacts") or [],
+        "debug_events": trace.get("debug_events") or [],
+    }
+    return RunTrace.model_validate(payload)

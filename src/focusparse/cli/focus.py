@@ -8,8 +8,8 @@ Subcommands:
 
 Phase 1 status:
   - `focus status` works standalone (no API calls).
-  - `focus eval --agent simple` is wired to the harness stub — NotImplementedError
-    until the harness is filled in (Phase 1 final commit). Structure is stable.
+  - Public paper runs use `scripts/run_hf_eval.py` and
+    `scripts/run_headline_eval.py`.
 """
 
 from __future__ import annotations
@@ -152,10 +152,12 @@ def eval(  # noqa: A001 — command name intentionally shadows builtin
     """Run an evaluation."""
     _ = _parse_kv(budget)
     if agent == "focus":
-        typer.echo(
-            f"[focus eval] agent=focus tier={tier} protocol={protocol} split={split} limit={limit}"
+        console.print(
+            "[red]focus eval --agent focus is not the public evaluation entrypoint.[/red]\n"
+            "Use `uv run python scripts/run_hf_eval.py --agent focus ...` or "
+            "`uv run python scripts/run_headline_eval.py`."
         )
-        raise NotImplementedError("Focus workflow wired in Phase 2.")
+        raise typer.Exit(code=2)
     if agent != "simple":
         typer.echo(f"Unknown agent: {agent!r}")
         raise typer.Exit(code=2)
@@ -298,7 +300,7 @@ def _parse_kv(s: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# report + export-traces (stubs)
+# report + export-traces
 # ---------------------------------------------------------------------------
 
 
@@ -307,7 +309,10 @@ def report(
     run_dir: Path = typer.Argument(..., help="Path to a results/runs/<ts>/ directory"),
 ) -> None:
     """Render an HTML report for a completed run."""
-    raise NotImplementedError("focus report — wire in Phase 4")
+    from focusparse.eval.report import render_run_report
+
+    report_path = render_run_report(run_dir)
+    console.print(f"[green]Wrote[/green] {report_path}")
 
 
 @app.command("export-traces")
@@ -319,8 +324,16 @@ def export_traces(
     require_correct: bool = typer.Option(True),
 ) -> None:
     """Export SFT-ready JSONL trajectories from a run (Phase 6)."""
-    _ = (run_dir, out, min_coverage, min_iou, require_correct)
-    raise NotImplementedError("focus export-traces — wire in Phase 6")
+    from focusparse.traces.export import export_eval_run_sft_jsonl
+
+    n = export_eval_run_sft_jsonl(
+        run_dir,
+        out,
+        min_coverage=min_coverage,
+        min_iou=min_iou,
+        require_correct=require_correct,
+    )
+    console.print(f"[green]Wrote[/green] {n} traces to {out}")
 
 
 # ---------------------------------------------------------------------------

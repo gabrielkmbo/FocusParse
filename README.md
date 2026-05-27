@@ -12,7 +12,7 @@ same benchmark protocol.
 ## Quickstart
 
 ```bash
-git clone <repo-url> FocusParse
+git clone https://github.com/run-llama/focusparse.git FocusParse
 cd FocusParse
 git submodule update --init --recursive
 uv sync --extra dev
@@ -57,6 +57,7 @@ Outputs go under `results/`, which is intentionally gitignored.
 | File | Purpose |
 | --- | --- |
 | `docs/EXPERIMENTS.md` | Reproducible setup, smoke, and full-run commands. |
+| `docs/REPRODUCIBILITY.md` | Publication checklist for inputs, commands, and artifacts. |
 | `docs/PAPER.md` | Current paper claim, result table, and caveats. |
 | `docs/BRANCH_AUDIT.md` | What was checked from hanging branches before cleanup. |
 | `scripts/README.md` | Script map for eval, reporting, diagnostics, and demos. |

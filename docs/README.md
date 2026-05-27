@@ -5,6 +5,7 @@ Start here:
 | File | Use |
 | --- | --- |
 | `EXPERIMENTS.md` | Exact setup, smoke, and headline-table commands. |
+| `REPRODUCIBILITY.md` | Publication checklist for inputs, commands, and artifacts. |
 | `PAPER.md` | Current result table and paper-safe claim. |
 | `BRANCH_AUDIT.md` | Hanging branch review and what was promoted or skipped. |
 | `paper/focusparse-paper.md` | Submission-facing paper draft source. |

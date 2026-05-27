@@ -1,8 +1,8 @@
-"""Visual page reranker — DEFERRED per plan §8.2.
+"""Optional visual page reranker seam.
 
-v1 skips visual rerank entirely. This file exists only as a seam so future
-ablation code has a stable import path. DO NOT import in v1; router.py must
-not reference this module.
+The public paper path uses text/layout routing. This seam is retained for a
+future visual-rerank ablation behind the optional `visual-rerank` extra; router
+code should not import it by default.
 
 Phase 5 ablation options:
   (a) deploy llamaindex/vdr-2b-multi-v1 to an HF Inference Endpoint
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 
 class VisualReranker:
-    """Stub — do not import in v1."""
+    """Deferred optional visual-rerank adapter."""
 
     def __init__(self) -> None:
-        raise NotImplementedError("Visual rerank is deferred (plan §8.2). Do not import in v1.")
+        raise NotImplementedError("Visual rerank is deferred; do not import in default runs.")

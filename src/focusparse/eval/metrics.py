@@ -10,8 +10,6 @@ Two flavors:
 Both flavors carry 95% bootstrap CIs on `accuracy` and `usd_per_correct` so
 small slices (e.g. n=47 finance) report sampling noise honestly. CI seed is
 fixed at 42 for reproducibility.
-
-TODO(Phase 4): per-family / per-stress_type breakdown, `compute_diagnostic_gaps`.
 """
 
 from __future__ import annotations

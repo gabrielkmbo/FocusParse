@@ -6,7 +6,9 @@ import json
 
 from focusparse.traces.export import (
     SCHEMA_VERSION,
+    export_eval_run_sft_jsonl,
     export_sft_jsonl,
+    load_eval_run_traces,
     trace_to_sft_record,
 )
 from focusparse.traces.recorder import (
@@ -128,3 +130,59 @@ def test_step_obs_summary_and_confidence_persist_in_record() -> None:
     step = rec["trajectory"][0]
     assert step["obs_summary"] == "42"
     assert step["confidence"] == 0.9
+
+
+def test_load_eval_run_traces_from_per_example_jsonl(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    record = {
+        "example_id": "ex3",
+        "answer_pred": "42",
+        "answer_correct": 1.0,
+        "page_recall": 1.0,
+        "bbox_iou": 0.75,
+        "evidence_reward": 0.8,
+        "citations": [{"page": 1}],
+        "trace": {
+            "steps": [
+                {
+                    "step_index": 0,
+                    "stage": "answer",
+                    "tier": "frontier",
+                    "action": "llm_call",
+                    "obs_summary": "42",
+                }
+            ],
+            "evidence_snapshot": None,
+            "artifacts": [],
+            "debug_events": [],
+        },
+    }
+    (run_dir / "per_example.jsonl").write_text(json.dumps(record) + "\n")
+
+    traces = load_eval_run_traces(run_dir)
+
+    assert len(traces) == 1
+    assert traces[0].example_id == "ex3"
+    assert traces[0].final_answer == "42"
+    assert traces[0].reward == {"answer": 1.0, "coverage": 1.0, "iou": 0.75, "evidence": 0.8}
+
+
+def test_export_eval_run_sft_jsonl(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    record = {
+        "example_id": "ex4",
+        "answer_pred": "yes",
+        "answer_correct": 1.0,
+        "page_recall": 1.0,
+        "bbox_iou": 0.9,
+        "trace": {"steps": [], "artifacts": [], "debug_events": []},
+    }
+    (run_dir / "per_example.jsonl").write_text(json.dumps(record) + "\n")
+    out = tmp_path / "sft.jsonl"
+
+    n = export_eval_run_sft_jsonl(run_dir, out)
+
+    assert n == 1
+    assert json.loads(out.read_text())["example_id"] == "ex4"

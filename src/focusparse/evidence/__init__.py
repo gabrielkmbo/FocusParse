@@ -1,4 +1,4 @@
-"""Evidence packet contract + lightweight per-question evidence graph."""
+"""Evidence packet contract."""
 
 from focusparse.evidence.packet import EvidencePacket, PacketProvenance
 
