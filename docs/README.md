@@ -12,6 +12,6 @@ Start here:
 | `paper/main.tex` | Standalone LaTeX draft source. |
 | `paper/references.bib` | Bibliography for the paper source. |
 
-The public workflow does not depend on the historical archive under
-`docs/research/`; that directory is retained only until exact-path deletion is
-approved for the remaining internal research-log cleanup.
+Internal planning logs and old research scratchpads are not part of the public
+workflow. They were archived on branch
+`codex/archive-internal-history-2026-05-27` before this public cleanup.

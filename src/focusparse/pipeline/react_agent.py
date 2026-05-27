@@ -18,9 +18,9 @@ tools, the model, the prompt-effort budget, and the protocol; what
 differs is the agentic *architecture* (loop vs FocusParse's stage
 machine).
 
-Implementation note: this is intentionally minimal. We are not optimizing
-this file — see the "Development priority" note in MEMORY.md. The goal is
-honest comparator numbers, not a third product.
+Implementation note: this is intentionally minimal. The product surface is the
+FocusParse staged harness; this comparator exists for honest numbers, not as a
+third product.
 """
 
 from __future__ import annotations

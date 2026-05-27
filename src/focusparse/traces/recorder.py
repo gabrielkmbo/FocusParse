@@ -4,7 +4,7 @@ Every pipeline @step records a `TrajectoryStep`. At run end, `RunTrace` is
 serialized to JSONL for later SFT (AgenticOCR recipe) or GRPO.
 
 Schema contract: changes to TrajectoryStep / RunTrace fields require bumping
-`SCHEMA_VERSION` in `traces/export.py` and a note in MEMORY.md.
+`SCHEMA_VERSION` in `traces/export.py` and a note in `CHANGELOG.md`.
 """
 
 from __future__ import annotations

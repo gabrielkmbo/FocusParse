@@ -16,3 +16,6 @@
   path.
 - Refreshed public-facing CLI/docstrings to describe the current reproducible
   harness instead of older phase-skeleton language.
+- Archived internal planning/history files on
+  `codex/archive-internal-history-2026-05-27`, then removed those files from
+  `main` so the public branch only carries the reproducible project surface.
