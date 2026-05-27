@@ -11,5 +11,6 @@ Start here:
 | `paper/main.tex` | Standalone LaTeX draft source. |
 | `paper/references.bib` | Bibliography for the paper source. |
 
-Historical working notes remain under `docs/research/` until the owner approves
-deleting or archiving the broad research-log directories.
+The public workflow does not depend on the historical archive under
+`docs/research/`; that directory is retained only until exact-path deletion is
+approved for the remaining internal research-log cleanup.

@@ -23,6 +23,16 @@ logs/
 outputs/
 node_modules/
 
+# build artifacts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+
 # os / editor
 .DS_Store
 .vscode/
