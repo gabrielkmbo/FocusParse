@@ -24,12 +24,13 @@ class EvidenceNode:
 class EvidenceEdge:
     source: str
     target: str
-    edge_type: str                             # parser_bench EdgeType value
+    edge_type: str  # parser_bench EdgeType value
 
 
 @dataclass
 class RunEvidenceGraph:
     """Per-question graph accumulated during a workflow run."""
+
     nodes: dict[str, EvidenceNode] = field(default_factory=dict)
     edges: list[EvidenceEdge] = field(default_factory=list)
 

@@ -18,7 +18,7 @@ class ModelResponse(BaseModel):
     tokens_out: int = 0
     usd: float | None = None
     latency_ms: int = 0
-    raw: dict | None = None                    # provider-specific response for debugging
+    raw: dict | None = None  # provider-specific response for debugging
 
 
 class ModelClient(Protocol):

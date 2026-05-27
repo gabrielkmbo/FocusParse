@@ -4,7 +4,7 @@ Usage:
     uv run python scripts/diff_runs.py results/hf/<baseline>.json results/hf/<new>.json
     uv run python scripts/diff_runs.py results/hf/<baseline>/run.json results/hf/<new>/run.json
 
-The "gate" tool from `plans/2026-04-27-phase2-sota-leverage.md`. Items
+The "gate" tool for comparing two result directories. Items
 3-5 (verifier loop, region reranker, evidence graph) ship only if their
 diff against a stable baseline shows a positive delta on the metric
 they were supposed to improve. A negative or zero delta means revert

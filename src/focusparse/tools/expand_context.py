@@ -13,7 +13,7 @@ class ExpandContextInput(BaseModel):
     doc_id: str
     page: int
     bbox_norm: tuple[float, float, float, float]
-    link_hints: list[str] = []                 # e.g. ["legend", "footnote", "caption"]
+    link_hints: list[str] = []  # e.g. ["legend", "footnote", "caption"]
 
 
 class ExpandContextOutput(BaseModel):

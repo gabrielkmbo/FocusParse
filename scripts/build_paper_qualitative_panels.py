@@ -70,8 +70,20 @@ FIGURES = (
             "caption, footnote, and table context needed by the reasoner."
         ),
         picks=(
-            CropPick(page=109, label="pkt_001", role="Panel B condition", stage="inspect", kind="selected"),
-            CropPick(page=108, label="pkt_004", role="Panel A condition", stage="inspect", kind="selected"),
+            CropPick(
+                page=109,
+                label="pkt_001",
+                role="Panel B condition",
+                stage="inspect",
+                kind="selected",
+            ),
+            CropPick(
+                page=108,
+                label="pkt_004",
+                role="Panel A condition",
+                stage="inspect",
+                kind="selected",
+            ),
             CropPick(
                 page=8,
                 label="pkt_003",
@@ -131,7 +143,9 @@ def main() -> None:
     for spec in FIGURES:
         if spec.example_id not in examples:
             raise KeyError(f"Missing example in bundle: {spec.example_id}")
-        panel_path, rows = build_panel(spec, examples[spec.example_id], args.bundle_dir, args.output_dir)
+        panel_path, rows = build_panel(
+            spec, examples[spec.example_id], args.bundle_dir, args.output_dir
+        )
         inventory.extend(rows)
         inventory.append(
             inventory_row(
@@ -236,7 +250,9 @@ def build_panel(
 
     claim_box = (MARGIN, 1165, CANVAS_W - MARGIN, 1335)
     rounded_rect(draw, claim_box, fill=SURFACE, outline=LINE, width=2, radius=18)
-    draw.text((claim_box[0] + 28, claim_box[1] + 22), "Mechanism shown", fill=INK, font=fonts.card_title)
+    draw.text(
+        (claim_box[0] + 28, claim_box[1] + 22), "Mechanism shown", fill=INK, font=fonts.card_title
+    )
     draw_wrapped_text(
         draw,
         spec.claim,
@@ -367,7 +383,9 @@ def trim_whitespace(img: Image.Image, *, threshold: int = 246, pad: int = 18) ->
     return img.crop((left, top, right, bottom))
 
 
-def draw_process_strip(draw: ImageDraw.ImageDraw, stages: tuple[str, ...], *, y: int, fonts: FontSet) -> None:
+def draw_process_strip(
+    draw: ImageDraw.ImageDraw, stages: tuple[str, ...], *, y: int, fonts: FontSet
+) -> None:
     x = MARGIN
     draw.text((x, y - 50), "Evidence construction path", fill=INK, font=fonts.card_title)
     for idx, stage in enumerate(stages):
@@ -491,9 +509,7 @@ def write_presentation_handoff(rows: list[dict[str, Any]], output_dir: Path) -> 
     ]
     for spec in FIGURES:
         lines.extend([f"## {spec.title}", ""])
-        panel = next(
-            row for row in by_figure.get(spec.key, []) if row["role"] == "composed_panel"
-        )
+        panel = next(row for row in by_figure.get(spec.key, []) if row["role"] == "composed_panel")
         lines.extend(
             [
                 f"- Example: `{spec.example_id}`",

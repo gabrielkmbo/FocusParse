@@ -5,8 +5,8 @@ Submission-facing draft: 2026-05-24
 Status: conservative paper draft. This file is intended to be the clean
 submission source that can later be converted to LaTeX or a workshop template.
 It uses only claims that are either raw-artifact verified in the current
-checkout or explicitly labeled as provisional. Supporting audits live beside it
-in `docs/research/paper-draft/`.
+checkout or explicitly labeled as provisional. The public runbook and claim
+summary live in `docs/EXPERIMENTS.md` and `docs/PAPER.md`.
 
 ## Abstract
 
@@ -156,9 +156,7 @@ The most frequent question families are `axis_value_interpolation`,
 exactly where inspection and context expansion matter: visual labels must be
 read at high resolution, then connected to the surrounding document semantics.
 
-Dataset provenance is tracked in
-`docs/research/paper-draft/dataset-characterization.md` and
-`docs/research/paper-draft/pinned-dataset-provenance.md`. The current pinned
+Dataset provenance is summarized in `docs/EXPERIMENTS.md`. The current pinned
 materialization uses HF revision
 `3774c67f8b814392b6d04c939e904f749a3f52eb`, dataset fingerprint
 `835d8b90da8f7c1a`, and benchmark JSONL SHA-256
@@ -366,10 +364,9 @@ Example id: `dat-adrv9040-reference-manual-ug-2192-0032`. The gold answer is
 requested size field. Use this as an answer-shape or field-preservation
 analysis case, not as a main success figure.
 
-Figure provenance is tracked in
-`docs/research/paper-draft/qualitative-figure-manifest.md`. Same-revision
-baseline predictions for the two main qualitative examples are tracked in
-`docs/research/paper-draft/qualitative-baseline-comparisons.md`.
+Figure provenance is summarized in `docs/PAPER.md`. Same-revision baseline
+predictions for the main qualitative examples are local `results/` artifacts,
+not committed source files.
 
 ## 8. Limitations
 

@@ -14,7 +14,9 @@ Phase 1 status:
 
 from __future__ import annotations
 
+import asyncio
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +42,7 @@ def status(short: bool = typer.Option(False, "--short", help="One-line summary")
         config = load_config()
     except Exception as e:
         typer.echo(f"focusparse: config load failed: {e}")
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from e
 
     env_keys = [
         "OPENAI_API_KEY",

@@ -139,7 +139,7 @@ def looks_like_raw_transcript(text: str) -> bool:
         "action_input" in lowered
         or "final_answer" in lowered
         or "```json" in lowered
-        or lowered.count('\"action\"') >= 1
+        or lowered.count('"action"') >= 1
     )
 
 

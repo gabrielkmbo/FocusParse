@@ -125,9 +125,7 @@ def build_outputs(rows: list[dict[str, Any]], source: Path) -> dict[str, Any]:
                 }
             )
 
-    ordered_reasons = [
-        reason for reason, _count in reason_counts.most_common()
-    ]
+    ordered_reasons = [reason for reason, _count in reason_counts.most_common()]
     return {
         "source": source.as_posix(),
         "total_rows": total,

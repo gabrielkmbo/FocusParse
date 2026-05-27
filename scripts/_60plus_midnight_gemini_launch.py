@@ -52,7 +52,7 @@ def probe_gemini(env: dict[str, str], n: int = 5) -> int:
 
     client = genai.Client()
     ok = 0
-    for i in range(n):
+    for _ in range(n):
         try:
             client.models.generate_content(
                 model="gemini-2.5-flash",

@@ -1,7 +1,7 @@
 """Run the headline 4-method x 2-task x 2-metric table.
 
 Sweeps the seven method x tool-set combinations that fill the headline
-table from `plans/2026-04-29-research-driven-eval-framework.md`:
+table described in `docs/EXPERIMENTS.md`:
 
     | Method                           | Datasheets   | Finance     |
     | -------------------------------- | ------------ | ----------- |

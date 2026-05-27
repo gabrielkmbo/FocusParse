@@ -17,9 +17,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 DEFAULT_HOST = "llama-nfs"
-DEFAULT_REMOTE_ROOT = (
-    "/home/osx-user/shared-experiments/llamacloud-bench-ci/data/parser-bench"
-)
+DEFAULT_REMOTE_ROOT = "/home/osx-user/shared-experiments/llamacloud-bench-ci/data/parser-bench"
 
 
 def _rsync(src: str, dst: str, flags: list[str] | None = None) -> None:

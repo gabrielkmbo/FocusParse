@@ -66,7 +66,10 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
-ignore = ["E501"]  # line-length handled by formatter
+ignore = [
+  "E501",  # line-length handled by formatter
+  "B008",  # Typer uses function-call defaults to declare CLI parameters
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

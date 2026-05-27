@@ -16,46 +16,9 @@ DEFAULT_INTERNAL_PACKAGE_NAME = "focusparse-paper-review-package-2026-05-24-v32"
 DEFAULT_PUBLIC_METADATA_PACKAGE_NAME = "focusparse-paper-public-metadata-package-2026-05-26-v10"
 
 DOC_FILES = [
-    "README.md",
-    "focusparse-submission-draft.md",
-    "focusparse-paper-draft.md",
+    "focusparse-paper.md",
     "references.bib",
-    "submission-readiness-checklist.md",
-    "objective-completion-audit.md",
-    "ablation-plan.md",
-    "submission-review-package.md",
-    "venue-submission-plan.md",
-    "venue-template-conversion-audit.md",
-    "neurips-checklist-prep.md",
-    "compute-resource-disclosure.md",
-    "archival-snapshot-readiness.md",
-    "final-results-rerun-runbook.md",
-    "final-headline-run-summary.md",
-    "failure-taxonomy.md",
-    "ablation-summary.md",
-    "ablation-smoke-summary.md",
-    "no-expand-ablation-summary.md",
-    "no-rerank-ablation-summary.md",
-    "verifier-repair-ablation-summary.md",
-    "answer-shape-repair-ablation-summary.md",
-    "artifact-provenance-audit.md",
-    "experiments-results-audit.md",
-    "dataset-characterization.md",
-    "methods-and-dataset-code-audit.md",
-    "citation-map.md",
-    "related-work-failure-matrix.md",
-    "pinned-dataset-provenance.md",
-    "source-pdf-readiness.md",
-    "qualitative-figure-manifest.md",
-    "qualitative-figure-panels.md",
-    "qualitative-baseline-comparisons.md",
-    "source-pdf-terms-manifest.tsv",
-    "external-source-audit.md",
-    "bibliography-readiness-audit.md",
-    "source-pdf-and-asset-license-audit.md",
-    "latex/README.md",
-    "latex/main.tex",
-    "latex/main.pdf",
+    "main.tex",
 ]
 
 RESULT_FILES = [
@@ -206,8 +169,6 @@ def package_name_for_mode(release_mode: str) -> str:
 
 
 def doc_files_for_mode(release_mode: str) -> list[str]:
-    if release_mode == "public-metadata":
-        return [doc for doc in DOC_FILES if doc != "latex/main.pdf"]
     return DOC_FILES
 
 
@@ -339,7 +300,7 @@ def create_archive(package: Path) -> Path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-root", type=Path, default=DEFAULT_RESULT_ROOT)
-    parser.add_argument("--paper-doc-root", type=Path, default=Path("docs/research/paper-draft"))
+    parser.add_argument("--paper-doc-root", type=Path, default=Path("docs/paper"))
     parser.add_argument("--output-root", type=Path, default=DEFAULT_PACKAGE_ROOT)
     parser.add_argument("--package-name", default=None)
     parser.add_argument(

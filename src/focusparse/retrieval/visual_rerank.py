@@ -18,6 +18,4 @@ class VisualReranker:
     """Stub — do not import in v1."""
 
     def __init__(self) -> None:
-        raise NotImplementedError(
-            "Visual rerank is deferred (plan §8.2). Do not import in v1."
-        )
+        raise NotImplementedError("Visual rerank is deferred (plan §8.2). Do not import in v1.")

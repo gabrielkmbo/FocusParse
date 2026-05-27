@@ -7,7 +7,7 @@ escalations so we cap them at `escalation.max_steps_escalated_per_run`.
 `TierRouter` optionally wraps the returned client in a `CachingModelClient`
 so upstream stages (planner, region reranker) can be replayed deterministically
 across runs. See `LLMResponseCache` in `focusparse.cache.store` and the
-variance-harness phase of plans/2026-05-11-harness-growth-sprint.
+variance-harness experiments.
 """
 
 from __future__ import annotations

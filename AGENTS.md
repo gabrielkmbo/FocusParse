@@ -1,178 +1,97 @@
-
 # AGENTS.md
 
-Lean operational card. **Running context + scope + changelog live in [`.claude/memory/MEMORY.md`](.claude/memory/MEMORY.md)** and the files it indexes — read them on init. Product goals + architecture: [`README.md`](README.md) and the active plan in [`plans/`](plans/).
+Operational card for agents working in this repo. Keep this file short; put
+research-facing guidance in `docs/`.
 
-> **Research framework.** Every change to this repo is judged by whether it moves a cell in the headline 4-method × 2-task × 2-metric table that drives the paper claim. See **[`MEMORY.md` → "Research framework"](.claude/memory/MEMORY.md)** for the table spec, the development priority (FocusParse harness is the product; comparator methods are scaffolding), and the active plan at [`plans/2026-04-29-research-driven-eval-framework.md`](plans/2026-04-29-research-driven-eval-framework.md).
+## What This Repo Does
 
-## What this repo does
+FocusParse runs a hierarchical, budget-aware document QA workflow over
+`gabrielbo/parser-bench`. The product surface is the FocusParse harness and its
+reproducible experiment scripts. The benchmark submodule at
+`third_party/parser-bench/` is read-only.
 
-FocusParse runs a hierarchical, budget-aware agentic workflow over documents from the `gabrielbo/parser-bench` benchmark and emits citation-grounded answers + trajectory traces. Consumes `parser-bench` **read-only** as a git submodule at `third_party/parser-bench/`.
-
-## Daily commands
+## Daily Commands
 
 ```bash
 uv sync --extra dev
 uv run focus status
-uv run focus eval --agent simple --backend gemini --model gemini-3.1-pro-preview --split dev --limit 3
-
 uv run ruff check src/ tests/ scripts/
 uv run ruff format --check src/ tests/ scripts/
 uv run pytest
-uv run pytest tests/test_scoring.py::test_score_evidence_reward -v
 ```
 
-Python ≥ 3.11. Ruff line-length 100 (see `pyproject.toml`).
+Focused checks:
+
+```bash
+uv run pytest tests/test_scoring.py::test_score_evidence_reward -v
+uv run pytest tests/test_hf_eval_cli.py tests/test_workflow.py
+```
+
+Python >= 3.11. Ruff line length is 100 in `pyproject.toml`.
 
 ## Environment
 
-Copy `.env.example` → `.env` and fill. Required for most work:
+Copy `.env.example` to `.env`.
 
-- `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` — at least one reasoner provider.
-- `HF_TOKEN` — **mandatory** for HF dataset streaming.
-- `LAYOUT_EXTRACTION_V3_MODAL_TOKEN` — **mandatory** for the Modal layout
-  endpoint. `HF_TOKEN` is accepted by the client as a temporary fallback for
-  older local setups.
+Required for real evals:
+
+- `HF_TOKEN`
+- `LAYOUT_EXTRACTION_V3_MODAL_TOKEN`
+- At least one provider key among `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and
+  `GEMINI_API_KEY`
 
 Optional:
 
-- `LLAMA_CLOUD_API_KEY` — LlamaParse/LlamaExtract baseline row (Phase 5).
-- `FOCUSPARSE_LAYOUT_ENDPOINT_URL` — override the default Modal layout endpoint.
-- `FOCUSPARSE_TIER_*` — override tier assignment per role at runtime.
-- `FOCUSPARSE_MODEL_TIMEOUT_S` — per-provider model call wall-clock timeout
-  (default 180s). Keeps long evals from hanging indefinitely on a stuck API
-  request.
-- `FOCUSPARSE_MODEL_RETRY_ATTEMPTS` — total provider-call attempts for transient
-  timeouts / connection failures (default 2, max 5). Keeps flaky network rows
-  from being miscounted as harness reasoning failures.
-- `FOCUSPARSE_MODEL_RETRY_SLEEP_S` — initial retry backoff in seconds
-  (default 0.5; doubles after each retry).
+- `FOCUSPARSE_DATASET_REVISION`
+- `FOCUSPARSE_LAYOUT_ENDPOINT_URL`
+- `FOCUSPARSE_TIER_*`
+- `FOCUSPARSE_MODEL_TIMEOUT_S`
+- `FOCUSPARSE_MODEL_RETRY_ATTEMPTS`
+- `FOCUSPARSE_MODEL_RETRY_SLEEP_S`
+- `LLAMA_CLOUD_API_KEY`
 
-## Model tiers
+## Reproducible Runs
 
-Set in [`configs/default.yaml`](configs/default.yaml) under `tiers:` and `roles:`. Change models there, not in code.
+Use `docs/EXPERIMENTS.md` as the public runbook. The current paper pin is:
 
-Current defaults (tweak as pricing shifts — see `.claude/memory/MEMORY.md` for rationale):
-
-| Role             | Tier     | Provider:model             |
-| ---------------- | -------- | -------------------------- |
-| planner          | cheap    | gemini:gemini-2.5-flash    |
-| router           | cheap    | gemini:gemini-2.5-flash    |
-| localizer rerank | mid      | anthropic:Codex-haiku-4-5 |
-| reasoner         | frontier | openai:gpt-5.4             |
-| verifier         | mid      | anthropic:Codex-haiku-4-5 |
-
-Escalation is **per-stage** (one tier up on low confidence), never pipeline-wide.
-
-## External endpoints
-
-- **Layout** — `https://llamaindex--layout-v3-triton-layoutv3triton-serve.modal.run` (layout-v3 Triton on Modal). POST PNG bytes with `Authorization: Bearer $LAYOUT_EXTRACTION_V3_MODAL_TOKEN`. Rate-limit ≤ 2 req/s; cache on disk in `cache/layout/<doc_sha>.json`. `HF_TOKEN` is accepted as a temporary fallback token. Fall-back stub returns a single full-page bbox — if you see "whole page crops only", the endpoint is down or the token is wrong.
-- **HF dataset** — `gabrielbo/parser-bench` (streaming default). Pin via `FOCUSPARSE_DATASET_REVISION` when the benchmark stabilizes.
-- **LlamaCloud** (optional) — `llama-cloud` pypi package, used only behind `[llamacloud]` extra.
-
-## NFS (processed documents)
-
-Canonical team path (SSH):
-
-```
-llama-nfs:/home/osx-user/shared-experiments/llamacloud-bench-ci/data/parser-bench/
+```text
+HF revision: 3774c67f8b814392b6d04c939e904f749a3f52eb
+Protocol: agentic_multi_page
+Smoke IDs: docs/paper/smoke-example-ids.txt
 ```
 
-Use `focusparse.dataset.nfs.rsync_pull(doc_id)` to hydrate a processed doc locally; `rsync_push` to sync back. Helpers mirror parser-bench's rsync contract (macOS openrsync-safe, `-az` archive+compress, no `--delete`). Requires `llama-nfs` host alias in `~/.ssh/config`.
+## Load-Bearing Contracts
 
-## Repo layout
+- `src/focusparse/evidence/packet.py::EvidencePacket`: reasoner input is
+  packeted evidence, never raw pages.
+- `src/focusparse/eval/scoring.py::score_evidence_reward`: lazy-answer penalty
+  is part of the research claim.
+- `src/focusparse/traces/export.py::SCHEMA_VERSION`: bump on schema changes.
+- `src/focusparse/tools/inspect_region.py`: exactly three modes:
+  `image`, `element`, `region`.
+- `third_party/parser-bench/`: read-only submodule.
 
-```
-FocusParse/
-├── configs/
-│   └── default.yaml              # tiers, roles, budgets, endpoints, dataset, cache, traces
-├── plans/                        # authoritative design docs; newest plan is active
-├── scripts/                      # one-off entrypoints (reproduce_baselines, compare_tiers, export_traces, fetch_nfs_processed)
-├── src/focusparse/
-│   ├── cli/                      # `focus` typer app: status | eval | report | export-traces
-│   ├── pipeline/                 # workflow @step modules, 1:1 with the state machine
-│   │   ├── workflow.py           #   FocusWorkflow + SimpleBaselineAgent
-│   │   ├── events.py             #   typed events between steps (no dict payloads)
-│   │   └── {planner,router,localizer,inspector,expander,reasoner,verifier}.py
-│   ├── tools/                    # FunctionTool primitives (stay small and strong)
-│   │   ├── inspect_region.py     #   3 modes: image | element | region (no 4th without plan update)
-│   │   ├── run_python.py         #   sandboxed coding-zoom (subprocess + rlimit + import allowlist)
-│   │   ├── layout_detect.py      #   Modal layout endpoint client; raises on stub responses
-│   │   └── {expand_context,get_text_layer,chart_to_table}.py
-│   ├── evidence/
-│   │   ├── packet.py             #   EvidencePacket — the contract the reasoner sees (never raw pages)
-│   │   └── graph.py
-│   ├── models/                   # backend clients + tier router
-│   │   ├── base.py               #   ModelClient protocol
-│   │   ├── tiers.py              #   TierRouter (per-stage escalation, capped per run)
-│   │   └── {anthropic,openai,gemini}.py
-│   ├── retrieval/                # text_index (sqlite FTS), visual_rerank (deferred, [visual-rerank] extra)
-│   ├── dataset/
-│   │   ├── loader.py             #   BenchmarkLoader — HF streaming + local JSONL
-│   │   └── nfs.py                #   llama-nfs rsync helpers
-│   ├── cache/store.py            # content-addressed disk cache (sha256 key over tool args)
-│   ├── eval/
-│   │   ├── harness.py            #   run_simple_eval / run_focus_eval
-│   │   ├── scoring.py            #   score_answer, page_recall, max_iou_over_alternates, score_evidence_reward
-│   │   ├── metrics.py            #   aggregate metrics (accuracy, evidence_reward_mean, lazy_answer_rate, usd_per_correct)
-│   │   └── report.py             #   HTML report (Phase 4)
-│   ├── traces/
-│   │   ├── recorder.py           #   TrajectoryRecorder — one RunTrace per example
-│   │   └── export.py             #   SFT-ready JSONL; schema_version = "1"
-│   ├── utils/config.py           # FocusConfig (YAML + FOCUSPARSE_TIER_* env overrides)
-│   └── _parser_bench.py          # file-path shim that loads parser-bench's schema.py without sys.path collision
-├── tests/
-│   └── fixtures/                 # tiny_datasheet.pdf + golden outputs
-├── third_party/parser-bench/     # git submodule, READ-ONLY
-├── .Codex/
-│   ├── settings.json             # permissions, env (FOCUSPARSE_TIER_*), statusLine
-│   ├── agents/                   # project subagents: pipeline-engineer, tools-engineer, trace-exporter, eval-runner
-│   └── memory/MEMORY.md          # running agent-written context — read this on /init
-├── .mcp.json                     # project MCP servers (HF, filesystem)
-├── AGENTS.md                     # this file
-├── README.md                     # product overview
-└── pyproject.toml                # uv-managed, py ≥ 3.11, ruff line-length 100
-```
+## Write-Only Sinks
 
-### Load-bearing contracts (don't break silently)
+- `results/`
+- `cache/`
+- `logs/`
+- `outputs/`
+- `node_modules/`
 
-- `src/focusparse/evidence/packet.py::EvidencePacket` — every reasoner call sees `list[EvidencePacket]`, never raw pages.
-- `src/focusparse/eval/scoring.py::score_evidence_reward` — lazy-answer penalty. Zero if no tool calls or no predicted bboxes.
-- `src/focusparse/traces/export.py::SCHEMA_VERSION` — interface with the future FocusTrain repo. Bump on any field change and log the migration in `.claude/memory/MEMORY.md`.
-- `src/focusparse/tools/inspect_region.py` — exactly 3 modes. A 4th mode needs a plan update first.
-- `third_party/parser-bench/` — submodule, read-only. Propose benchmark changes upstream in separate PRs.
+These should not be committed.
 
-### Write-only sinks (gitignored)
+## Common Failure Modes
 
-- `cache/` — content-addressed crops, OCR, layout responses. Safe to wipe; runs will repopulate.
-- `results/` — per-run output JSONs, HTML reports, trajectories.
-
-## What not to do
-
-- **Do not modify `parser-bench`** from this repo. Propose changes upstream in separate PRs.
-- **Do not vendor** `liteparse` or `llama_index` source. Import them as libraries.
-- **Do not run `run_python`-authored code in-process.** The tool uses a subprocess with `resource.setrlimit` and an import allowlist — threat model is "research-grade sandbox", not "untrusted input". Never deploy FocusParse to accept external questions.
-- **Do not silently accept** the layout endpoint's full-page stub. `tools/layout_detect.py` should raise on that shape; callers handle the exception.
-- **Do not commit `.env`** — it's gitignored for a reason.
-
-## Keeping AGENTS.md lean
-
-This file is operational (commands / structure / contracts / failure modes). It is **not** the changelog. Running memory — recent substantive changes, scope decisions, training recipe, project facts — lives in `.claude/memory/` and is indexed by `MEMORY.md`. Update there. Only touch AGENTS.md when an operational fact changes: a new command, env var, endpoint, load-bearing contract, or failure mode.
-
-## Common failure modes
-
-| Symptom                                  | Likely cause                                                                                  |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Whole-page crops only in a run           | Layout endpoint stub fallback. Check `LAYOUT_EXTRACTION_V3_MODAL_TOKEN` and endpoint status.   |
-| `Generated 0 candidate examples`         | Dataset loader mismatch (schema drifted in parser-bench submodule); bump submodule SHA.       |
-| Empty visible response from Gemini       | Set `thinking_budget ≥ 1024`; Gemini 2.5/3.x otherwise spends all tokens on hidden reasoning. |
-| GPT-5.x "max_tokens not supported" error | Use `max_completion_tokens` (different param name than GPT-4.x).                              |
-| Multi-turn agent reports 0 tokens        | Token usage not propagated from `TokenCountingHandler` — integration test catches this.       |
+| Symptom | Likely cause |
+| --- | --- |
+| Whole-page crops only | Layout endpoint stub or bad Modal token. |
+| `Generated 0 candidate examples` | Dataset/schema mismatch with parser-bench. |
+| Empty Gemini response | `thinking_budget` too low. |
+| GPT-5.x `max_tokens` error | Use `max_completion_tokens`. |
+| Multi-turn agent reports 0 tokens | Token usage propagation broke. |
 
 ## Changelog
 
-Lives in `.claude/memory/project_changelog.md`. Append an entry there after any substantive commit (new pipeline stage, new tool, new env var, new HF endpoint, trajectory schema bump, new failure mode). Skip trivialities. Don't add changelog lines to this file.
-
----
-
-When in doubt: `README.md` for product, the active plan for design, `.claude/memory/MEMORY.md` for running context.
+Use `CHANGELOG.md` for public project changes. Skip trivial formatting-only
+edits.

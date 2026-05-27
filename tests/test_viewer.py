@@ -234,9 +234,7 @@ def test_build_view_model_uses_v3_debug_and_artifacts(tmp_path: Path, tiny_png: 
     assert "citation" in kinds
 
 
-def test_build_view_model_renders_multiscale_and_chart_csv(
-    tmp_path: Path, tiny_png: Path
-) -> None:
+def test_build_view_model_renders_multiscale_and_chart_csv(tmp_path: Path, tiny_png: Path) -> None:
     record = _record_with_snapshot(crop_ref=str(tiny_png))
     record["trace"]["evidence_snapshot"][0]["multi_scale_crops"] = [
         {"ref": str(tiny_png), "bbox_norm": [0.0, 0.0, 0.5, 0.5], "scale": "tight"}

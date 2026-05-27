@@ -37,7 +37,8 @@ class GeminiClient:
         self.thinking_budget = thinking_budget or 1024
         self.thinking_level = thinking_level
         self.media_resolution = media_resolution
-        # Accept either env var — CLAUDE.md says GOOGLE_API_KEY, some parser-bench
+        # Accept either env var: some older parser-bench setups used
+        # GOOGLE_API_KEY while FocusParse's .env.example uses GEMINI_API_KEY.
         # scripts use GEMINI_API_KEY. Prefer GEMINI_API_KEY if both set.
         self.api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 

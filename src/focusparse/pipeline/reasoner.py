@@ -1385,6 +1385,10 @@ def _normalize_option_answer_from_question(text: str, question_text: str) -> str
     if not present:
         return None
     if len(present) == 1:
+        if re.fullmatch(r"min(?:imum)?|typ(?:ical)?|max(?:imum)?", present[0], re.I) and re.search(
+            r"\d", text
+        ):
+            return None
         return _match_original_case(text, present[0]) or present[0]
 
     tail = normalized_text[-240:]
@@ -1505,11 +1509,18 @@ def _normalize_leading_single_entity_answer(text: str, question_text: str) -> st
     if not re.search(r"\b(?:which|what|during which|based on)\b", question_text, re.I):
         return None
     match = re.match(
-        r"^(?P<head>[^:.;\u2013\u2014-]{2,80})\s*(?:[:.]\s+|\s+[-\u2013\u2014]\s+).+$", text
+        r"^(?P<head>[^:.;\u2013\u2014-]{2,80})\s*"
+        r"(?:[:.]\s+|\s+[-\u2013\u2014]\s+)(?P<tail>.+)$",
+        text,
     )
     if not match:
         return None
     head = match.group("head").strip(" \"'")
+    tail = match.group("tail").strip()
+    if re.fullmatch(r"min(?:imum)?|typ(?:ical)?|max(?:imum)?", head, re.I) and re.search(
+        r"\d", tail
+    ):
+        return None
     if _looks_concise_answer_prefix(head) and not re.match(
         r"^(?:using|from|based|the|a|an)\b", head, re.I
     ):

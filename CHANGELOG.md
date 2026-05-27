@@ -1,0 +1,12 @@
+# Changelog
+
+## 2026-05-27
+
+- Checkpointed the current paper experiment state on `main`.
+- Added public navigation docs for experiments, paper status, script usage, and
+  hanging branch audit.
+- Simplified the README and agent operational card for a public research repo.
+- Removed local generated debris from the working tree and expanded ignores for
+  logs, outputs, temporary Office files, and Node artifacts.
+- Cleaned up verification blockers so lint, format, and the full local test
+  suite pass before the public-repo commit.

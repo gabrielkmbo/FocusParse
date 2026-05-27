@@ -1,7 +1,7 @@
 """ReAct loop method — the comparator that says "any agentic loop with these tools".
 
 This is **comparator scaffolding** for the headline-table research framework
-(`plans/2026-04-29-research-driven-eval-framework.md`). It exists to fill
+(`docs/EXPERIMENTS.md`). It exists to fill
 rows 2 of the table:
 
     | Method                | Datasheets | Finance |

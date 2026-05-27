@@ -13,7 +13,7 @@ fully unit-testable.
 Aggregation across examples lives in `aggregate_stage_metrics()`. Means
 for floats; rate (mean of bool→0/1) for booleans; sums for counts.
 
-Hard rule per `plans/2026-04-27-phase2-sota-leverage.md`: items 3-5 don't
+Hard rule for staged FocusParse experiments: items 3-5 don't
 ship without a positive delta on the metric they were supposed to improve,
 measured against a baseline captured before item 3 lands.
 """

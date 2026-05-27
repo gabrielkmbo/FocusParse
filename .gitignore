@@ -19,8 +19,12 @@ traces_out/
 crops_cache/
 hf_cache/
 .hf_datasets_cache/
+logs/
+outputs/
+node_modules/
 
 # os / editor
 .DS_Store
 .vscode/
 .idea/
+~$*

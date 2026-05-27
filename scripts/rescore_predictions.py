@@ -188,10 +188,7 @@ def rescore_run(run_summary_path: Path, benchmark_jsonl: Path) -> dict[str, Any]
         ex = bench[eid]
         # Reuse cached image_dims if recorded; else None (simple-agent path)
         dims = record.get("image_dims_by_page")
-        if isinstance(dims, dict):
-            dims = {int(k): tuple(v) for k, v in dims.items()}
-        else:
-            dims = None
+        dims = {int(k): tuple(v) for k, v in dims.items()} if isinstance(dims, dict) else None
         record = _rescore_one(record, ex, dims)
         pred_path.write_text(json.dumps(record, default=str, indent=2))
         per_example.append(record)

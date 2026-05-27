@@ -1,78 +1,86 @@
 # FocusParse
 
-Agentic, budget-aware evidence-localization pipeline for **high-resolution financial charts and technical datasheets**. Consumes the [`gabrielbo/parser-bench`](https://huggingface.co/datasets/gabrielbo/parser-bench) benchmark; produces citation-grounded answers, trajectory traces, and cost/latency telemetry.
+FocusParse is a research harness for high-resolution document QA. It runs a
+budget-aware, evidence-localization-first workflow over
+[`parser-bench`](https://huggingface.co/datasets/gabrielbo/parser-bench) and
+records answers, citations, traces, cost, latency, and grounding metrics.
 
-Built on [`run-llama/workflows-py`](https://github.com/run-llama/workflows-py) + [`run-llama/llama_index`](https://github.com/run-llama/llama_index) `ReActAgent`.
-
-## North star
-
-> Match frontier-VLM quality on medium/hard localized-evidence QA at a fraction of the cost, and emit trajectories suitable for later OSS distillation (Qwen3-VL) in a separate `FocusTrain` repo.
-
-See [`plans/2026-04-13-focusparse-agentic-pipeline.md`](plans/2026-04-13-focusparse-agentic-pipeline.md) for the authoritative design.
-
-## Pipeline
-
-```
-PLAN → ROUTE_PAGES → PROPOSE_REGIONS → INSPECT → EXPAND_CONTEXT → ANSWER → VERIFY
- cheap     cheap        deterministic   mid/front    det+LLM       frontier    mid
-```
-
-Per-stage model tier routing; escalation is per-stage, never pipeline-wide. Full architecture diagram in the plan §3.1.
+The core claim is simple: on dense finance and datasheet documents, a staged
+evidence harness beats a base VLM and generic tool-agent baselines under the
+same benchmark protocol.
 
 ## Quickstart
 
 ```bash
-# 1. Clone + init parser-bench as a submodule (schema source)
-git clone <this-repo> FocusParse && cd FocusParse
-git submodule add https://github.com/gabrielkmbo/parse-bench third_party/parser-bench
+git clone <repo-url> FocusParse
+cd FocusParse
 git submodule update --init --recursive
-
-# 2. Install (uv-managed, Python ≥ 3.11)
 uv sync --extra dev
-
-# 3. Secrets
 cp .env.example .env
-# Fill in: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, HF_TOKEN
-
-# 4. Smoke test — reproduce parser-bench's single-shot baseline
-uv run focus status                                         # print tier + env
-uv run focus eval --agent simple \
-  --backend gemini --model gemini-3.1-pro-preview \
-  --split dev --limit 3
-
-# 5. Run the lens workflow (after Phase 2)
-uv run focus eval --agent focus --tier balanced \
-  --budget tokens=120k,tool_calls=12,crops=8 \
-  --split dev --limit 200 \
-  --export-traces results/runs/$(date +%Y%m%d_%H%M%S)/traces.jsonl
 ```
 
-## Repo layout
+Fill `.env` with at least one model provider key, `HF_TOKEN`, and
+`LAYOUT_EXTRACTION_V3_MODAL_TOKEN`.
+
+Run local checks:
+
+```bash
+uv run focus status
+uv run ruff check src/ tests/ scripts/
+uv run pytest
+```
+
+Run a small HF smoke:
+
+```bash
+uv run python scripts/run_hf_eval.py \
+  --agent focus \
+  --protocol agentic_multi_page \
+  --tool-set full \
+  --hf-revision 3774c67f8b814392b6d04c939e904f749a3f52eb \
+  --example-ids-file docs/paper/smoke-example-ids.txt \
+  --limit 3
+```
+
+Run the seven-method paper table:
+
+```bash
+uv run python scripts/run_headline_eval.py \
+  --hf-revision 3774c67f8b814392b6d04c939e904f749a3f52eb \
+  --max-parallel 2
+```
+
+Outputs go under `results/`, which is intentionally gitignored.
+
+## What To Read
+
+| File | Purpose |
+| --- | --- |
+| `docs/EXPERIMENTS.md` | Reproducible setup, smoke, and full-run commands. |
+| `docs/PAPER.md` | Current paper claim, result table, and caveats. |
+| `docs/BRANCH_AUDIT.md` | What was checked from hanging branches before cleanup. |
+| `scripts/README.md` | Script map for eval, reporting, diagnostics, and demos. |
+| `configs/default.yaml` | Model tiers, dataset pin, endpoint settings, and budgets. |
+
+## Repo Map
 
 | Path | Role |
-|---|---|
-| `src/focusparse/pipeline/` | Workflow `@step`s — planner, router, localizer, inspector, expander, reasoner, verifier. |
-| `src/focusparse/tools/` | `FunctionTool`-wrapped primitives. `inspect_region` (3 modes), `run_python` (sandboxed coding-zoom), `get_text_layer`, `expand_context`, `chart_to_table`, `layout_detect`. |
-| `src/focusparse/evidence/` | `EvidencePacket` contract + lightweight evidence graph. |
-| `src/focusparse/models/` | Backend clients + tier routing. |
-| `src/focusparse/retrieval/` | FTS index for page routing. |
-| `src/focusparse/cache/` | Content-addressed crop/OCR/layout cache. |
-| `src/focusparse/dataset/` | HF dataset loader (streaming default) + NFS helpers. |
-| `src/focusparse/eval/` | Harness, scoring (wraps parser-bench), HTML report. |
-| `src/focusparse/traces/` | Trajectory recorder + SFT-ready JSONL export. |
-| `src/focusparse/cli/` | `focus` CLI. |
-| `configs/` | Model tiers, budgets, endpoints. |
-| `plans/` | Implementation plans — authoritative design docs. |
-| `third_party/parser-bench/` | Benchmark submodule (read-only). |
-| `.claude/` | Claude Code harness config (settings, project subagents, running memory). |
+| --- | --- |
+| `src/focusparse/pipeline/` | Focus workflow stages and comparator agents. |
+| `src/focusparse/tools/` | Small tool primitives: inspect, text layer, layout, chart, code zoom. |
+| `src/focusparse/eval/` | Harness, metrics, scoring, table rendering support. |
+| `src/focusparse/traces/` | Trajectory recording, export, and static viewers. |
+| `scripts/` | Reproducible experiment and analysis entrypoints. |
+| `tests/` | Unit and integration tests for harness contracts. |
+| `third_party/parser-bench/` | Read-only benchmark submodule. |
 
-## Non-goals
+## Result Snapshot
 
-- **Not** a benchmark generator (that's `parser-bench`).
-- **Not** a training codebase (that's a future `FocusTrain` repo; FocusParse only emits trajectory JSONL).
-- **Not** a fork of `liteparse` or `llama_index` (consumed as deps, never modified).
-- **Not** a general-purpose parser — optimized for finance charts + datasheets with citation-required QA.
+The current raw-verified matched paper run is the May 24 seven-method table on
+148 parser-bench rows. FocusParse +4 reaches 61.5% overall accuracy, 66.3% on
+datasheets, 51.1% on finance, and $0.0248 per correct answer. See
+`docs/PAPER.md` for the table and caveats.
 
 ## License
 
-Apache-2.0.
+Apache-2.0. See `LICENSE`.

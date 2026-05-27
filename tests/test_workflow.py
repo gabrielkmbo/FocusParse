@@ -2153,7 +2153,8 @@ async def test_supported_retry_can_preserve_initial_concise_answer(
                 '"citations": ["pkt_000"], "confidence": 0.95}'
             ),
             (
-                '{"answer": "Outer Write-Through; Non-Shared Normal, Write-Back Cacheable", '
+                '{"answer": "Non-Shared Normal, Write-Through Cacheable because '
+                'the unsupported row context mentions Outer Write-Through", '
                 '"citations": ["pkt_000"], "confidence": 0.84}'
             ),
         ]
@@ -2540,7 +2541,7 @@ async def test_loop_allows_contract_guard_retry(tmp_path, parser_bench_submodule
     assert "Adjudicate candidates internally" in reasoner.calls[1]["prompt"]
     assert "Same-evidence repair worksheet" in reasoner.calls[1]["prompt"]
     assert (
-        "Candidate B = same answer completed with all requested fields"
+        "Candidate B = same cited row/entity/series, repaired to include every requested field"
         in reasoner.calls[1]["prompt"]
     )
 
@@ -2730,9 +2731,9 @@ async def test_phase3b_k_equals_two_runs_two_reasoner_calls_and_picks_best(
     # Both reasoner calls were made (K=2).
     assert len(reasoner.calls) == 2
     # Sample 1 has the verbatim-grounding addendum (variant-1 prompt).
-    assert "exact span" in reasoner.calls[1]["prompt"].lower()
+    assert "document's punctuation" in reasoner.calls[1]["prompt"].lower()
     # Sample 0 does not.
-    assert "exact span" not in reasoner.calls[0]["prompt"].lower()
+    assert "document's punctuation" not in reasoner.calls[0]["prompt"].lower()
     # Picker chose sample 1 (shorter + higher confidence + same citations).
     assert result.answer == "0x3FFFF8"
     assert result.telemetry["tokens_in"] == 200

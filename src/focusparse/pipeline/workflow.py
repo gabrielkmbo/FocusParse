@@ -2541,7 +2541,7 @@ def _answer_is_concise_shape(answer: str | None) -> bool:
     text = str(answer).strip()
     if len(text) > 80:
         return False
-    return len(_answer_selection_tokens(text)) <= 5
+    return len(_answer_selection_tokens(text)) <= 6
 
 
 def _answer_looks_formula_like(answer: str | None) -> bool:

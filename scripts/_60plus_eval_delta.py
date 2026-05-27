@@ -136,13 +136,13 @@ def main() -> int:
 
     # Per-domain flips
     for dom in ["datasheet", "finance"]:
-        flips_to_correct = sum(1 for eid, b, n in flipped_to_correct if _domain_of(n) == dom)
-        flips_to_wrong = sum(1 for eid, b, n in flipped_to_wrong if _domain_of(n) == dom)
+        flips_to_correct = sum(1 for _eid, _base, n in flipped_to_correct if _domain_of(n) == dom)
+        flips_to_wrong = sum(1 for _eid, _base, n in flipped_to_wrong if _domain_of(n) == dom)
         print(f"  {dom}: +{flips_to_correct} / -{flips_to_wrong}")
 
     if flipped_to_correct:
         print("\n=== Newly correct (sample first 12) ===")
-        for eid, b, n in flipped_to_correct[:12]:
+        for eid, _base, n in flipped_to_correct[:12]:
             print(
                 f"  [{eid[:45]:45}] {_domain_of(n)}  "
                 f"pred='{(n.get('answer_pred') or '')[:40]}'  "
