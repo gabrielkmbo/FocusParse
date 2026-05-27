@@ -1,8 +1,8 @@
 """SFT-ready JSONL export for trajectory traces.
 
 Schema version 4 (2026-05-07). Changes here are breaking — bump
-`SCHEMA_VERSION` and add a dated section to `CHANGELOG.md`
-describing the migration.
+`SCHEMA_VERSION` and document the migration in the relevant release notes or
+paper artifact notes.
 
 v1 → v2: added `evidence_snapshot` (list of `EvidencePacketSummary`,
 optional). v1 records remain readable; v2 readers should treat the
