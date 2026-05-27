@@ -1,5 +1,152 @@
 # Project Changelog
 
+## 2026-05-26
+
+- Added `docs/research/paper-draft/source-pdf-terms-manifest.tsv`,
+  `docs/research/paper-draft/archival-snapshot-readiness.md`, and archive
+  checksum sidecar generation in
+  `scripts/package_paper_review_artifacts.py`. The package helper now records
+  `archive_sha256` / `archive_sha256_file` in its JSON output and writes
+  `.tar.gz.sha256` sidecars beside generated archives. The terms manifest has
+  one row per pinned source PDF and explicit source URL / terms URL / release
+  status fields. The manifest now has no remaining `TODO` source/terms fields:
+  42 rows have official web-verified source and terms URLs, one Nordic row has
+  an official PDF with embedded no-reproduction terms, and one TTP223B row is
+  backed by a distributor mirror because no original manufacturer source was
+  found. The current package targets are internal review
+  `focusparse-paper-review-package-2026-05-24-v32.tar.gz` and source-safer
+  public metadata
+  `focusparse-paper-public-metadata-package-2026-05-26-v10.tar.gz`. Generated
+  and validated those snapshots with 262/313 internal manifest/tar files and
+  106/150 public manifest/tar files; the public-metadata package still has zero
+  `.png`, `.jpg`, `.jpeg`, or `.pdf` files.
+
+## 2026-05-25
+
+- Added a `--release-mode public-metadata` option to
+  `scripts/package_paper_review_artifacts.py`. This builds a source-safer
+  package for public or double-blind artifact staging by excluding compiled
+  PDFs and source-derived page/crop/tile/figure-panel images while preserving
+  paper sources, bibliography, metrics, diagnostics, per-example rows, and
+  text/CSV analysis artifacts. Generated and validated
+  `results/paper/submission-review-package/focusparse-paper-public-metadata-package-2026-05-25-v3.tar.gz`
+  with 104 manifest-tracked files, 148 tar members, and zero `.png`, `.jpg`,
+  `.jpeg`, or `.pdf` files.
+- Added `docs/research/paper-draft/compute-resource-disclosure.md`, a
+  NeurIPS-style compute disclosure for the raw-verified seven-method headline
+  sweep. It records 1,036 example-runs, a 2.56-hour wall-clock envelope,
+  4.54 summed method-hours, max parallelism 2, provider/model roles, local host
+  details, and `$16.9441` in reported model-call cost from the repo pricing
+  table. Refreshed the slim internal v25 archive so it includes the disclosure:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v25.tar.gz`.
+
+## 2026-05-24
+
+- Added `docs/research/paper-draft/source-pdf-and-asset-license-audit.md` to
+  separate code/license facts from third-party source-document release risk.
+  The audit records the pinned slice's 44 PDFs, the v24 package's 146 derived
+  qualitative image assets, and a safer public-release posture: publish
+  metadata/scripts/run outputs by default while withholding full PDFs and
+  derived page/crop/tile images unless per-source terms permit redistribution.
+  Refreshed the slim v24 review archive so it includes the audit:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v24.tar.gz`.
+- Added `docs/research/paper-draft/neurips-checklist-prep.md`, a
+  NeurIPS-style checklist preparation artifact that maps FocusParse's current
+  claims, reproducibility package, compute/resource disclosure, artifact
+  policy, license/asset caveats, ethics/broader-impact notes, and LLM-use
+  disclosure into draft checklist answers. Refreshed the slim v22 review
+  archive so it includes the checklist prep:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v22.tar.gz`.
+- Added `docs/research/paper-draft/venue-template-conversion-audit.md` to map
+  the current article-style paper source into the next official
+  workshop/conference author kit. The audit records the NeurIPS 2026
+  main/workshop timing, template/checklist blockers, section mapping, figure
+  and table budget, and submission-ready definition. Refreshed the slim v21
+  review archive so it includes the audit:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v21.tar.gz`.
+- Refreshed `docs/research/paper-draft/venue-submission-plan.md` against
+  official CVPR, ACL, ICML, ICLR, and NeurIPS 2026 pages. The current target
+  read is that the named 2026 archival main deadlines have passed, NeurIPS 2026
+  workshop papers are the practical near-term route after accepted workshops
+  are announced on 2026-07-11, and NeurIPS 2027 Evaluations & Datasets remains
+  the strongest full-paper target.
+- Added `scripts/package_paper_review_artifacts.py` and generated a slim paper
+  review package at
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v6/`
+  plus `.tar.gz`. The package keeps the paper docs/PDF, headline tables, all
+  seven method `run.json` and `per_example.jsonl` files, diagnostics, figure
+  panels, baseline comparisons, failure-taxonomy artifacts, trace-viewer
+  qualitative assets, and checksums while excluding the 4.3 GB tile/prediction
+  payload.
+- Added the final FocusParse +4 failure taxonomy to the Markdown and LaTeX
+  paper drafts. The table records 57 errors: 26 verifier-unsupported, 12
+  partial-localization, 8 localization-miss, 7 reasoning/extraction, and 4
+  lazy/no-bbox failures.
+- Generated the final-run qualitative viewer bundle at
+  `results/agent_eyes/paper-final-headline-qualitative-focus-full/` from the
+  matched n=148 FocusParse +4 package. Refreshed
+  `docs/research/paper-draft/qualitative-figure-manifest.md` and
+  `qualitative-evidence-packets.md` so the paper qualitative examples use the
+  May 24 result package instead of the older May 15 trace. Added
+  `dat-JESD204B-Survival-Guide-0029` as the clean primary datasheet success
+  figure and demoted `dat-adrv9040-reference-manual-ug-2192-0032` to a
+  compaction/answer-shape near-miss because the final prediction omits the
+  requested `641 kb` size field.
+- Added `scripts/build_paper_qualitative_panels.py` and generated draft
+  composed paper panels under `results/paper/qualitative-figure-panels/`.
+  The panel package includes a Latvia finance evidence-binding PNG, a
+  JESD204B datasheet evidence-compaction PNG, `asset-inventory.csv`, and a
+  slide-friendly `presentation-visuals.md` handoff.
+- Added `scripts/build_qualitative_baseline_comparison.py` and generated
+  same-revision qualitative comparator artifacts under
+  `results/paper/qualitative-baseline-comparisons/`. The comparison records
+  Base VLM, ReAct +2/+4, Agent baseline +2/+4, and FocusParse +2/+4
+  predictions for the Latvia and JESD204B figure examples.
+- Added the first standalone LaTeX paper draft under
+  `docs/research/paper-draft/latex/`. The draft includes the current abstract,
+  related work, parser-bench dataset description, FocusParse method, final
+  matched result table, the two composed qualitative figures, and the existing
+  bibliography; TeX Live / latexmk compiled it successfully to `main.pdf`.
+
+## 2026-05-23
+
+- Added the paper-draft result rerun package plan in
+  `docs/research/paper-draft/final-results-rerun-runbook.md`, including pinned
+  HF materialization, source-PDF hydration, seven-spec headline runs,
+  diagnostics, qualitative viewer export, and manifest/acceptance checks.
+  Fixed `scripts/run_headline_eval.py` so merged headline tables use the
+  current config-derived `tier_sha8` instead of a stale hard-coded run path.
+  Added `bibliography-readiness-audit.md` and refreshed Zotero-status docs to
+  reflect that Zotero Desktop is not available on this profile yet. Pinned and
+  materialized the paper dataset at HF revision
+  `3774c67f8b814392b6d04c939e904f749a3f52eb`, producing 148 rows / 147 unique
+  IDs and benchmark SHA
+  `e85b4df5032bc9e49fc74e1ed7492001794fbf4b46cc0f35d31a4cf32277962b`; recorded
+  the durable summary in `docs/research/paper-draft/pinned-dataset-provenance.md`.
+  Added an NFS `archive/raw_pdfs/` fallback to `scripts/source_pdfs_from_nfs.py`
+  and hydrated the pinned slice's source-PDF cache to 44/44 PDFs, recorded in
+  `docs/research/paper-draft/source-pdf-readiness.md`. Ran a pinned 3-row
+  FocusParse +4 smoke at HF revision
+  `3774c67f8b814392b6d04c939e904f749a3f52eb`: 3/3 correct, total cost
+  `$0.01872625`, lazy rate 0, layout/model path successful, one Anthropic
+  timeout recovered by retry. Restored the shared staging back to the full 148
+  rows and updated the runbook to use `--example-ids-file` instead of `--limit`
+  for future smokes. Extended `scripts/run_headline_eval.py` to forward
+  `--example-ids-file`, then ran the seven-method headline smoke successfully:
+  all 7 rows completed, rendered `headline_table.{json,md,csv,jsonl,html}`,
+  diagnostics analyzed all specs, and shared staging remained at 148 rows.
+
+## 2026-05-19
+
+- Added a static FocusParse pipeline demo generator:
+  `scripts/build_pipeline_demo.py` and `src/focusparse/traces/pipeline_demo.py`.
+  The generator builds a Vercel-ready bundle under
+  `results/trace_viewer/pipeline-demo/` from existing `per_example.jsonl`
+  traces, audit benchmark question text, and current staged page PNGs. It
+  materializes fresh page/crop assets from recorded bboxes instead of relying
+  on stale cache paths, and renders the eight pipeline stages with overlays,
+  crops/context, tool-use summaries, verifier details, and structured logs.
+
 ## 2026-05-17
 
 - Validated the first full n=148 FocusParse harness result above the 65% target
@@ -305,3 +452,131 @@
   best full run: 87/148 = 58.78%, with finance at 22/47 and datasheet at
   65/101. The remaining gap is two rows short of 60%, so answer-shape /
   verifier-aware selection is the next likely lever.
+# 2026-05-24
+
+- Completed the first full matched seven-method paper headline run on the
+  pinned HF parser-bench revision `3774c67f8b814392b6d04c939e904f749a3f52eb`
+  and source-PDF cache `/Users/gabrielbo/.cache/focusparse/pdfs`.
+  Result package:
+  `results/hf/paper/2026-05-24-paper-headline-v1/`. Every spec has
+  `run.json`, `per_example.jsonl`, and `predictions/`; every `per_example` file
+  has 148 rows. The rendered main table reports Base VLM 43.9%, ReAct +2 18.2%,
+  ReAct +4 16.2%, Agent baseline +2 8.1%, Agent baseline +4 6.1%,
+  FocusParse +2 60.1%, and FocusParse +4 61.5% overall accuracy. FocusParse +4
+  is 66.3% on datasheets and 51.1% on finance with $0.0248/correct, page
+  recall 0.914, and BBox IoU 0.857. Diagnostics are in
+  `results/hf/paper/2026-05-24-paper-headline-v1/diagnostics/headline-diagnosis.md`.
+  The result directory also has `README.md`, `manifest.json`, a config snapshot,
+  and run-start git commit/status.
+- Refreshed the paper-draft related-work/source framing around external
+  RunLlama `ParseBench` versus Gabriel `parser-bench`, updated live HF/GitHub
+  source notes, recompiled the 7-page LaTeX draft, and generated the slim v7
+  submission-review package:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v7.tar.gz`.
+  The archive is 40M, the directory is 67M, and the manifest tracks 210 files.
+- Added a requirement-level paper objective audit and a concrete ablation plan
+  for the missing mechanism table, then generated the slim v8 review package:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v8.tar.gz`.
+  The archive is 40M, the directory is 67M, and the manifest tracks 212 files.
+- Bumped the latest review package reference to v10 after refreshing the package
+  self-description, so the newest archive contains the final metadata:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v10.tar.gz`.
+- Added paper-ablation flags for the missing mechanism table:
+  `--disable-rerank` skips the query-conditioned rerank stage while preserving
+  localizer order, and `--disable-expand-context` skips only the expansion
+  stage while keeping `run_python` available under the full tool belt. Tests pin
+  direct workflow behavior, harness forwarding, CLI parsing, trace reasons, and
+  manifest feature bits. The ablation plan now includes exact command shapes,
+  and the latest slim review archive is v10:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v10.tar.gz`.
+- Added `scripts/build_paper_ablation_summary.py` and generated the first
+  concrete paper ablation from the final matched FocusParse +2/+4 runs:
+  `results/paper/ablation-summary/focusparse-toolset-ablation.md`. The paired
+  comparison preserves the intentional duplicate example ID via
+  `(example_id, occurrence)`, covers all 148 rows, and reports +2 net correct
+  for +4 over +2 (9 recoveries, 7 regressions). The latest slim review archive
+  is v11 and includes the ablation summary artifacts:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v11.tar.gz`.
+- Completed 3-row pure-ablation smoke checks for no-expand, no-rerank, and
+  retry-off using the pinned paper HF revision and local PDF cache. Each smoke
+  run completed layout preflight and wrote minimal artifacts under
+  `results/hf/paper/ablation-smoke-{no-expand-v1,no-rerank-v1,retry-off-v1}/`.
+  The final FocusParse +4 smoke subset from the n=148 run scored 3/3, while all
+  three ablation smokes scored 2/3, so the switches are verified but still need
+  matched n=148 runs for a causal mechanism claim. Added
+  `docs/research/paper-draft/ablation-smoke-summary.md` and generated the slim
+  v12 review archive with smoke artifacts included:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v12.tar.gz`.
+- Completed the first full n=148 pure mechanism ablation:
+  `results/hf/paper/ablation-no-expand-v1/` disables only
+  `expand_context` while keeping `run_python` available under the full tool
+  belt. The run has 148 rows, HF revision
+  `3774c67f8b814392b6d04c939e904f749a3f52eb`, tier SHA `0b139a04`, 59.5%
+  overall accuracy, 62.4% datasheet, 53.2% finance, page recall 0.917, BBox IoU
+  0.847, and $0.0279/correct. Paired against final full +4, restoring
+  expansion moves 59.5% to 61.5% overall with 14 recoveries, 11 regressions,
+  and +3 net correct rows; the gain is concentrated in datasheets. Added
+  `docs/research/paper-draft/no-expand-ablation-summary.md`, generated
+  `results/paper/mechanism-ablation/no-expand-v1/`, and refreshed the slim
+  v13 review archive:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v13.tar.gz`.
+- Completed the full n=148 no-rerank mechanism ablation:
+  `results/hf/paper/ablation-no-rerank-v1/` disables only the
+  query-conditioned rerank stage while preserving full tool availability and
+  context expansion. The run has 148 rows, HF revision
+  `3774c67f8b814392b6d04c939e904f749a3f52eb`, tier SHA `0b139a04`, 56.1%
+  overall accuracy, 60.4% datasheet, 46.8% finance, page recall 0.849,
+  BBox IoU 0.738, and $0.0249/correct. Paired against final full +4, restoring
+  rerank moves 56.1% to 61.5% overall with 19 recoveries, 11 regressions, and
+  +8 net correct rows, with gains in both datasheet and finance slices. Added
+  `docs/research/paper-draft/no-rerank-ablation-summary.md`, generated
+  `results/paper/mechanism-ablation/no-rerank-v1/`, and refreshed the slim v14
+  review archive with both full no-expand and no-rerank artifacts:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v14.tar.gz`.
+- Completed the full n=148 verifier-directed repair ablation:
+  `results/hf/paper/ablation-verifier-off-v1/` sets `--max-retries 0` and
+  `--max-evidence-retries 0` while preserving the full tool belt, rerank,
+  expansion, and verifier scoring. The run has 148 rows, HF revision
+  `3774c67f8b814392b6d04c939e904f749a3f52eb`, tier SHA `0b139a04`, 62.8%
+  overall accuracy, 68.3% datasheet, 51.1% finance, page recall 0.920,
+  BBox IoU 0.898, and $0.0282/correct. Telemetry confirms
+  `retries_used=0` and `evidence_retries_used=0` for all 148 rows. Paired
+  against final full +4, restoring verifier-directed repair moves 62.8% to
+  61.5% overall with 9 recoveries, 11 regressions, and -2 net correct rows, so
+  this is a mixed/negative mechanism control rather than evidence that repair
+  carries the paper gain. Added
+  `docs/research/paper-draft/verifier-repair-ablation-summary.md`, generated
+  `results/paper/mechanism-ablation/verifier-off-v1/`, added the ablation table
+  to the Markdown and LaTeX drafts, recompiled `latex/main.pdf` to 7 pages, and
+  refreshed the slim v16 review archive:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v16.tar.gz`.
+- Added `--disable-answer-shape-repair` as a pure paper-ablation switch. It
+  disables answer-shape-specific retry hints and accepted-retry selection guards
+  while preserving full tool availability, rerank, expansion, verifier scoring,
+  and non-shape verifier repair. Targeted tests cover the workflow, harness
+  forwarding, and CLI argparse path. The full n=148 run at
+  `results/hf/paper/ablation-answer-shape-off-v1/` has 148 rows, HF revision
+  `3774c67f8b814392b6d04c939e904f749a3f52eb`, tier SHA `0b139a04`, 64.2%
+  overall accuracy, 70.3% datasheet, 51.1% finance, page recall 0.945,
+  BBox IoU 0.896, and $0.0224/correct. Paired against final full +4, restoring
+  answer-shape repair moves 64.2% to 61.5% overall with 9 recoveries,
+  13 regressions, and -4 net correct rows, so answer-shape repair is a negative
+  mechanism control rather than evidence that scorer-shape normalization carries
+  the paper gain. Added
+  `docs/research/paper-draft/answer-shape-repair-ablation-summary.md`,
+  generated `results/paper/mechanism-ablation/answer-shape-off-v1/`, updated
+  the Markdown and LaTeX ablation tables, recompiled `latex/main.pdf` to
+  7 pages, and refreshed the slim v18 review archive:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v18.tar.gz`.
+- Refreshed related work from live primary sources after the answer-shape
+  package: added `MPDocBench-Parse` (`arXiv:2605.22100`) as a current
+  multi-page parsing benchmark citation, updated `references.bib`, the
+  citation map, related-work matrix, source audit, Markdown drafts, and LaTeX
+  draft, and recorded that the public HF `gabrielbo/parser-bench` viewer now
+  shows a broader 1.54k-row surface distinct from the pinned 148-row paper
+  materialization. Zotero remains unavailable (`127.0.0.1:23119` connection
+  refused), so the bibliography is still primary-source based pending local
+  Zotero export. Recompiled `latex/main.pdf` to 7 pages and refreshed the slim
+  v20 review archive, now including `citation-map.md` and
+  `related-work-failure-matrix.md`:
+  `results/paper/submission-review-package/focusparse-paper-review-package-2026-05-24-v20.tar.gz`.

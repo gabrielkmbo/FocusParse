@@ -676,3 +676,30 @@ async def test_run_focus_eval_accepts_sprint_phase_flags(tmp_path, parser_bench_
         chart_to_table_enabled=True,
     )
     assert result_on is not None
+
+
+async def test_run_focus_eval_accepts_paper_ablation_flags(
+    tmp_path, parser_bench_submodule_present
+):
+    """Harness forwards pure mechanism-ablation flags into FocusWorkflow."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+
+    result = await run_focus_eval(
+        [_make_example("ex-ablation")],
+        backend_client=_FakeClient('{"answer": "5.5", "citations": ["pkt_000"]}'),
+        backend="fake",
+        model="fake",
+        protocol="focus_default",
+        output_dir=tmp_path / "ablation",
+        images_root=tmp_path,
+        disable_rerank=True,
+        disable_expand_context=True,
+        disable_answer_shape_repair=True,
+    )
+    assert result is not None
+    manifest = json.loads((tmp_path / "ablation" / "run.json").read_text())
+    assert manifest["focus_features"]["disable_rerank"] is True
+    assert manifest["focus_features"]["disable_expand_context"] is True
+    assert manifest["focus_features"]["disable_answer_shape_repair"] is True
+    assert manifest["available_tools"] == ["inspect_region", "get_text_layer", "run_python"]

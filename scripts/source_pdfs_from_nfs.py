@@ -1,10 +1,11 @@
 """Pull the source PDFs needed for staged benchmark examples from llama-nfs.
 
-The HF dataset (`gabrielbo/parser-bench`) ships only page images. PDFs live
-on `llama-nfs:/home/osx-user/shared-experiments/llamacloud-bench-ci/data/
-parser-bench/raw/{datasheets,finance}/`. This script reads the staged
-benchmark.jsonl, finds every unique `source_pdf` it references, and
-rsyncs each one to `~/.cache/focusparse/pdfs/` (or a custom dest).
+The HF dataset (`gabrielbo/parser-bench`) ships only page images. Most PDFs
+live on `llama-nfs:/home/osx-user/shared-experiments/llamacloud-bench-ci/data/
+parser-bench/raw/{datasheets,finance}/`; some finance PDFs live in the archive
+fallback at `.../parser-bench/archive/raw_pdfs/`. This script reads the staged
+benchmark.jsonl, finds every unique `source_pdf` it references, and rsyncs each
+one to `~/.cache/focusparse/pdfs/` (or a custom dest).
 
 Idempotent: skips PDFs that already exist locally with non-zero size.
 Reports per-doc success/failure so partial-pulls are visible at a glance.
@@ -26,6 +27,9 @@ from pathlib import Path
 
 _DEFAULT_NFS_HOST = "llama-nfs"
 _DEFAULT_NFS_ROOT = "/home/osx-user/shared-experiments/llamacloud-bench-ci/data/parser-bench/raw"
+_DEFAULT_ARCHIVE_ROOT = (
+    "/home/osx-user/shared-experiments/llamacloud-bench-ci/data/parser-bench/archive/raw_pdfs"
+)
 _DEFAULT_STAGING = Path.home() / ".cache" / "focusparse" / "hf_staging"
 _DEFAULT_DEST = Path.home() / ".cache" / "focusparse" / "pdfs"
 
@@ -68,7 +72,7 @@ def main() -> int:
 
         nfs_subdir = _DOMAIN_TO_NFS_SUBDIR.get(domain)
         if nfs_subdir is None:
-            # Try both domains as a fallback — the domain field should cover it
+            # Try both domains as a fallback; the domain field should cover it
             # but sometimes wrappers stringify the enum differently.
             for candidate in ("datasheets", "finance"):
                 if _try_rsync(
@@ -81,10 +85,18 @@ def main() -> int:
                     n_pulled += 1
                     break
             else:
-                print(
-                    f"  [fail] {pdf_name} (unknown domain {domain!r}; not in datasheets/ or finance/)"
-                )
-                n_failed += 1
+                if _try_archive_rsync(
+                    pdf_name,
+                    nfs_host=args.nfs_host,
+                    archive_root=args.archive_root,
+                    dest=args.dest,
+                ):
+                    n_pulled += 1
+                else:
+                    print(
+                        f"  [fail] {pdf_name} (unknown domain {domain!r}; not in datasheets/, finance/, or archive)"
+                    )
+                    n_failed += 1
             continue
 
         ok = _try_rsync(
@@ -94,6 +106,13 @@ def main() -> int:
             nfs_root=args.nfs_root,
             dest=args.dest,
         )
+        if not ok:
+            ok = _try_archive_rsync(
+                pdf_name,
+                nfs_host=args.nfs_host,
+                archive_root=args.archive_root,
+                dest=args.dest,
+            )
         if ok:
             n_pulled += 1
         else:
@@ -143,7 +162,7 @@ def _try_rsync(
         return False
 
     if proc.returncode != 0:
-        # 23 = "partial transfer due to error" — usually file-not-found on the
+        # 23 = "partial transfer due to error"; usually file-not-found on the
         # remote side. Surface the specific error so the user can chase it.
         msg = (proc.stderr.strip().splitlines() or [""])[-1][-200:]
         print(f"  [fail] {pdf_name} (rsync rc={proc.returncode}: {msg})")
@@ -158,12 +177,46 @@ def _try_rsync(
     return True
 
 
+def _try_archive_rsync(
+    pdf_name: str,
+    *,
+    nfs_host: str,
+    archive_root: str,
+    dest: Path,
+) -> bool:
+    """rsync one PDF from the archive fallback; return True on success."""
+    remote_path = shlex.quote(f"{archive_root}/{pdf_name}")
+    src = f"{nfs_host}:{remote_path}"
+    dst = str(dest) + "/"
+    cmd = ["rsync", "-az", src, dst]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        print(f"  [fail] {pdf_name} (archive rsync timeout after 120s)")
+        return False
+
+    if proc.returncode != 0:
+        msg = (proc.stderr.strip().splitlines() or [""])[-1][-200:]
+        print(f"  [fail] {pdf_name} (archive rsync rc={proc.returncode}: {msg})")
+        return False
+
+    local = dest / pdf_name
+    if not local.exists() or local.stat().st_size == 0:
+        print(f"  [fail] {pdf_name} (archive rsync succeeded but file missing/empty)")
+        return False
+
+    print(f"  [ok]   {pdf_name} ({local.stat().st_size:,}b from archive/raw_pdfs/)")
+    return True
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--staging-dir", type=Path, default=_DEFAULT_STAGING)
     p.add_argument("--dest", type=Path, default=_DEFAULT_DEST)
     p.add_argument("--nfs-host", type=str, default=_DEFAULT_NFS_HOST)
     p.add_argument("--nfs-root", type=str, default=_DEFAULT_NFS_ROOT)
+    p.add_argument("--archive-root", type=str, default=_DEFAULT_ARCHIVE_ROOT)
     p.add_argument(
         "--force",
         action="store_true",

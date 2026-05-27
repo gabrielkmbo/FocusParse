@@ -383,6 +383,27 @@ def test_argparse_minimal_artifacts(script_mod, monkeypatch):
     assert args.minimal_artifacts is True
 
 
+def test_argparse_paper_ablation_flags(script_mod, monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_hf_eval.py",
+            "--protocol",
+            "agentic_multi_page",
+            "--agent",
+            "focus",
+            "--disable-rerank",
+            "--disable-expand-context",
+            "--disable-answer-shape-repair",
+        ],
+    )
+    args = script_mod._parse_args()
+    assert args.disable_rerank is True
+    assert args.disable_expand_context is True
+    assert args.disable_answer_shape_repair is True
+
+
 def test_argparse_layout_preflight_flags(script_mod, monkeypatch):
     monkeypatch.setattr(
         sys,

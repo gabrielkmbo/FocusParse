@@ -333,6 +333,9 @@ async def run_focus_eval(
     use_react_inspector: bool = False,
     multi_scale_packets: bool = False,
     chart_to_table_enabled: bool = False,
+    disable_rerank: bool = False,
+    disable_expand_context: bool = False,
+    disable_answer_shape_repair: bool = False,
     strict_layout_detection: bool = False,
     layout_max_retries: int | None = None,
     layout_timeout_s: float | None = None,
@@ -430,6 +433,21 @@ async def run_focus_eval(
         # Sprint Phase 3 (2026-05-04, Phase 6 #7): chart_to_table extraction
         # gated on question_family + figure_class inside the inspector.
         workflow_kwargs["chart_to_table_enabled"] = True
+    if disable_rerank:
+        # Paper mechanism ablation: preserve localizer ordering and skip the
+        # query-conditioned reranker call.
+        workflow_kwargs["disable_rerank"] = True
+    if disable_expand_context:
+        # Paper mechanism ablation: keep the full tool belt except the
+        # context-expansion stage. Unlike tool_set=minimal this can still use
+        # run_python/auto-zoom when enabled.
+        workflow_kwargs["disable_expand_context"] = True
+    if disable_answer_shape_repair:
+        # Paper mechanism ablation: preserve verifier scoring and evidence
+        # repair budgets, but block answer-shape-specific retry/selection
+        # guards so output normalization can be isolated from evidence
+        # construction.
+        workflow_kwargs["disable_answer_shape_repair"] = True
     if reasoner_self_consistency_k != 1:
         # Phase 3b (2026-05-14 sprint): K-sample reasoner self-consistency on
         # the initial answer call. k=2 default-off; opt-in via CLI flag.
@@ -526,6 +544,9 @@ async def run_focus_eval(
             "use_react_inspector": workflow.use_react_inspector,
             "multi_scale_packets": workflow.multi_scale_packets,
             "use_evidence_graph": workflow.use_evidence_graph,
+            "disable_rerank": workflow.disable_rerank,
+            "disable_expand_context": workflow.disable_expand_context,
+            "disable_answer_shape_repair": workflow.disable_answer_shape_repair,
         },
         "backend": backend,
         "model": model,

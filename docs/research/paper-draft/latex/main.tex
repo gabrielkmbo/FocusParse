@@ -1,0 +1,359 @@
+\documentclass[10pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{tabularx}
+
+\graphicspath{{../../../../results/paper/qualitative-figure-panels/}}
+
+\title{FocusParse: Evidence Packets for High-Resolution Document Question Answering}
+\author{Anonymous submission}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+High-resolution technical and financial PDFs expose a persistent failure mode
+for multimodal document question answering: whole pages preserve context but
+compress away small labels, footnotes, and chart/table details, while tight
+crops recover readability but detach evidence from the local context needed to
+interpret it. We study this failure mode using parser-bench, a
+citation-required visual QA benchmark over finance reports and technical
+datasheets where answers are evaluated with both correctness and page/box
+grounding. We introduce FocusParse, a structured harness that routes to likely
+pages, localizes candidate regions, inspects high-resolution crops, expands
+selected evidence with role-labeled neighboring context, and answers only from
+compact evidence packets. In a matched seven-method run on the pinned 148-row
+paper slice, FocusParse +4 reaches 61.5\% overall accuracy, 66.3\% datasheet
+accuracy, and 51.1\% finance accuracy, compared with 43.9\% for a base VLM and
+6.1--18.2\% for generic tool-agent comparators. The same run shows high page
+recall (0.914), strong region overlap (0.857 mean BBox IoU), and low lazy
+answering (3.4\%). The resulting thesis is that performance on dense finance
+and datasheet documents depends not merely on bigger context windows or more
+tools, but on constructing the right evidence unit before reasoning: a readable
+region plus the captions, legends, headers, footnotes, axes, and cross-page
+references that make the region meaningful.
+\end{abstract}
+
+\section{Introduction}
+
+Document AI systems increasingly need to answer questions over high-resolution
+PDFs rather than simply transcribe them. In finance reports and technical
+datasheets, the answer often depends on small plotted labels, multi-panel
+figures, footnotes, min/typ/max tables, timing diagrams, and symbol dictionaries
+spread across multiple pages. This creates a resolution-context tradeoff. A
+full-page VLM call can preserve surrounding layout but may make fine details
+unreadable. A tight crop can make the relevant text or visual element readable
+but may lose the caption, legend, table header, or footnote that determines what
+the crop means.
+
+FocusParse is built around the claim that the useful intermediate object for
+this setting is an \emph{evidence packet}. An evidence packet binds a localized
+region to its supporting context: local crop, text/OCR snippets, role-labeled
+neighbor crops, provenance, confidence, and optional extracted structure. The
+method is deliberately narrower than a general-purpose parser. It is a harness
+for query-conditioned evidence construction in dense documents where the answer
+must be tied to supporting pages and boxes.
+
+This paper makes four contributions. First, it frames parser-bench as a
+region-grounded QA setting for concentrated finance and datasheet documents.
+Second, it describes FocusParse, an evidence-localization-first harness with
+explicit inspect and expand stages. Third, it compares base VLMs, generic ReAct
+loops, generic tool agents, and FocusParse under matched tools and scorers.
+Fourth, it analyzes answer accuracy, cost per correct, page recall, BBox IoU,
+lazy-answer rate, and qualitative packet traces.
+
+\section{Related Work}
+
+Document parsing benchmarks show that document pages contain structured visual
+regions and that parsing quality should be evaluated beyond plain OCR
+\cite{doclaynet2022,pubtabnet2020,gtefintabnet2021,omnidocbench2025,mpdocbenchparse2026,parsebench2026}.
+MPDocBench-\allowbreak Parse is useful because it moves parsing evaluation toward practical
+multi-page documents, semantic continuity, hierarchy recovery, and visual
+content preservation. External ParseBench is especially relevant because it
+evaluates agent-facing parsing along tables, charts, content faithfulness,
+semantic formatting, and visual grounding. FocusParse asks a different but
+adjacent question: not whether a page or multi-page document can be fully
+parsed, but whether a QA system can select the answer-supporting evidence for a
+query, attach the local context needed to interpret it, and cite the supporting
+page/box. Throughout this draft, \texttt{ParseBench} refers to the RunLlama
+parsing benchmark, while \texttt{parser-bench} refers to the Gabriel benchmark
+used for FocusParse evaluation.
+
+Document QA and financial QA benchmarks establish the need for multimodal and
+domain-specific reasoning. DocVQA, InfographicVQA, and MMLongBench-Doc study
+questions over document images and long multimodal contexts
+\cite{docvqa2021,infographicvqa2021,mmlongbenchdoc2024}. FinQA, TAT-QA,
+FinanceBench, and FinRAGBench-V emphasize numerical reasoning, open-book
+financial QA, and visual citations
+\cite{finqa2021,tatqa2021,financebench2023,finragbenchv2025}. Parser-bench
+differs by making high-resolution region localization, multi-piece context
+collection, and page/crop citation part of the QA contract.
+
+Chart and table QA benchmarks such as ChartQA and PlotQA show that charts
+require both visual perception and reasoning \cite{chartqa2022,plotqa2020}.
+FocusParse places this challenge inside long PDFs where chart interpretation
+often depends on neighboring captions, axes, legends, footnotes, or table
+references. The chart-reading problem is therefore inseparable from evidence
+collection: the model must read the mark and recover the nearby semantics that
+make the mark meaningful.
+
+The closest methodological neighbors are AgenticOCR and DocLens. AgenticOCR
+argues that page-level chunking introduces extraneous context and dilutes
+salient evidence, reframing OCR as query-conditioned on-demand extraction
+\cite{agenticocr2026}. DocLens identifies evidence localization as a central
+failure mode in long visual document understanding and navigates from documents
+to pages and elements before answer adjudication \cite{doclens2025}. FocusParse
+shares the active evidence-acquisition motivation, but studies a controlled
+stage machine with explicit typed evidence packets and role-labeled context
+expansion. The contrast is the object handed to the reasoner: a compact packet
+containing a readable crop plus captions, legends, headers, footnotes, axes, or
+neighboring regions, rather than a loose transcript of tool observations.
+
+Generic ReAct-style agents provide a natural baseline for tool use
+\cite{react2023}. The key comparison is not tools versus no tools. It is
+unconstrained tool use versus structured evidence construction. Generic loops
+may inspect documents, but in dense PDFs they can also terminate lazily, repeat
+irrelevant calls, or answer from noisy transcripts that contain weak citations.
+
+\section{Parser-Bench Dataset}
+
+Parser-bench is a citation-required visual QA benchmark over full-resolution
+finance reports and technical datasheets. Each example contains a question, a
+gold answer, answer-type metadata, source document metadata, rendered page
+images, supporting pages, supporting bounding boxes, optional alternate boxes,
+question-family labels, difficulty axes, and reasoning-chain metadata. The
+current paper slice is the canonical post-filter validation materialization:
+148 rows, 147 unique IDs, 44 source PDFs, 101 datasheet examples, and 47
+finance examples.
+
+\begin{table}[t]
+\centering
+\caption{Canonical parser-bench paper slice used for the final matched run.}
+\label{tab:dataset}
+\begin{tabular}{lrrrrr}
+\toprule
+Slice & Rows & Unique IDs & PDFs & Datasheet & Finance \\
+\midrule
+Canonical paper slice & 148 & 147 & 44 & 101 & 47 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The slice is small but deliberately concentrated. It contains 70 multi-region
+examples, 34 multi-page examples, 112 visually grounded examples, and 49 rows
+that are both visual and multi-region. The most frequent question families are
+axis-value interpolation, near-miss distractors, cross-page continuation,
+min/typ/max disambiguation, and chart/table cross-reference. These are exactly
+the families where inspection and context expansion matter: visual labels must
+be read at high resolution, then connected to surrounding document semantics.
+
+The current pinned materialization records a fixed Hugging Face revision,
+dataset fingerprint, and benchmark JSONL SHA-256 in the artifact manifest. The
+full identifiers are reported with the released evaluation package rather than
+treated as moving URLs.
+
+\section{Method: FocusParse}
+
+FocusParse is an eight-stage workflow:
+\begin{center}
+\texttt{PLAN $\rightarrow$ ROUTE\_PAGES $\rightarrow$ LOCALIZE $\rightarrow$ RERANK $\rightarrow$ INSPECT $\rightarrow$ EXPAND\_CONTEXT $\rightarrow$ ANSWER $\rightarrow$ VERIFY}.
+\end{center}
+The stages communicate through typed events rather than arbitrary scratchpad
+state. Planning predicts question family and evidence types. Routing chooses
+candidate pages. Localization and reranking propose visual/textual regions.
+Inspection turns selected regions into readable evidence by cropping,
+extracting text/OCR, and optionally using region-specific tools. Expansion
+attaches bounded context such as captions, legends, headers, axes, footnotes,
+and nearby table text. Answering receives evidence packets rather than raw
+pages. Verification checks whether the answer is supported, whether citations
+are grounded, and whether a bounded repair action is needed.
+
+The central contract is \texttt{EvidencePacket}. A packet contains page,
+normalized box, region type, provenance, crop references, text-layer and OCR
+snippets, linked neighbor crop references, neighbor-role labels, optional
+chart/table extraction, confidence, and selection metadata. This design creates
+an explicit bottleneck: the reasoner can only use compact evidence assembled by
+the upstream stages. That bottleneck is the mechanism the paper tests.
+
+\section{Experiments}
+
+The final matched comparison has seven rows: a base VLM, ReAct +2 tools, ReAct
++4 tools, generic agent +2 tools, generic agent +4 tools, FocusParse +2 tools,
+and FocusParse +4 tools. The +2 tool set exposes \texttt{inspect\_region} and
+\texttt{get\_text\_layer}; the +4 tool set adds \texttt{expand\_context} and
+\texttt{run\_python}. Metrics include answer accuracy with 95\% bootstrap
+confidence intervals, cost per correct answer, mean latency, page recall, mean
+BBox IoU, lazy-answer rate, and qualitative packet traces.
+
+\section{Results}
+
+\begin{table*}[t]
+\centering
+\caption{Final matched seven-method result on the pinned 148-row parser-bench slice.}
+\label{tab:main-results}
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+Method & Overall & Datasheet & Finance & \$/correct & Page recall & BBox IoU \\
+\midrule
+Base VLM & 43.9 & 47.5 & 36.2 & 0.0102 & 0.848 & 0.000 \\
+ReAct +2 & 18.2 & 22.8 & 8.5 & 0.1341 & 0.819 & 0.336 \\
+ReAct +4 & 16.2 & 20.8 & 6.4 & 0.1946 & 0.727 & 0.309 \\
+Agent baseline +2 & 8.1 & 10.9 & 2.1 & 0.1324 & 0.000 & 0.000 \\
+Agent baseline +4 & 6.1 & 7.9 & 2.1 & 0.1811 & 0.000 & 0.000 \\
+FocusParse +2 & 60.1 & 64.4 & 51.1 & 0.0282 & 0.929 & 0.897 \\
+FocusParse +4 & 61.5 & 66.3 & 51.1 & 0.0248 & 0.914 & 0.857 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+FocusParse +4 improves over the base VLM by 17.6 overall points, 18.8
+datasheet points, and 14.9 finance points. It improves over generic ReAct and
+generic agent baselines by 43--55 overall points while remaining much cheaper
+per correct than those tool-agent comparators. Base VLM remains cheapest per
+correct, so the claim is an accuracy and localization gain, not a lowest-cost
+claim.
+
+Diagnostics show that FocusParse +4 builds 1184 evidence packets, calls
+\texttt{expand\_context} on every example, attaches 9.72 neighbors on average,
+and cites packets with 100\% text coverage and 84.4\% linked-context coverage.
+Generic ReAct calls tools but does not construct evidence packets, while the
+generic agent baselines mostly terminate without useful tool use.
+
+\subsection{Mechanism Ablations}
+
+Table~\ref{tab:ablations} summarizes the current n=148 mechanism ablations.
+The strongest positive signal is query-conditioned reranking: restoring rerank
+improves accuracy from 56.1\% to 61.5\% and substantially improves grounding.
+Restoring \texttt{expand\_context} gives a smaller +2.0 point gain. In contrast,
+restoring verifier-directed repair moves 62.8\% to 61.5\% in this matched run,
+and restoring answer-shape repair moves 64.2\% to 61.5\%, so the repair
+mechanisms are best treated as mixed or negative controls rather than sources of
+the paper gain.
+
+\begin{table}[t]
+\centering
+\caption{Mechanism ablations against the final FocusParse +4 row.}
+\label{tab:ablations}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Condition pair & Baseline & Full +4 & $\Delta$ & Rec. & Reg. \\
+\midrule
+No rerank $\rightarrow$ rerank & 56.1 & 61.5 & +5.4 & 19 & 11 \\
+No \texttt{expand\_context} $\rightarrow$ expand & 59.5 & 61.5 & +2.0 & 14 & 11 \\
+Repair off $\rightarrow$ repair on & 62.8 & 61.5 & -1.4 & 9 & 11 \\
+Answer-shape repair off $\rightarrow$ on & 64.2 & 61.5 & -2.7 & 9 & 13 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Failure Taxonomy}
+
+The final FocusParse +4 row is correct on 91/148 examples and incorrect on
+57/148 examples. Table~\ref{tab:failures} summarizes the primary error buckets
+computed from the final \texttt{per\_example.jsonl}.
+
+\begin{table}[t]
+\centering
+\caption{Primary failure buckets for the final FocusParse +4 run.}
+\label{tab:failures}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Failure bucket & Count & Datasheet & Finance & Error share \\
+\midrule
+Verifier unsupported & 26 & 16 & 10 & 45.6 \\
+Partial localization & 12 & 6 & 6 & 21.1 \\
+Localization miss & 8 & 5 & 3 & 14.0 \\
+Reasoning/extraction & 7 & 4 & 3 & 12.3 \\
+Lazy/no bbox & 4 & 3 & 1 & 7.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The dominant remaining error is not generic tool laziness: only 4/57 errors are
+lazy/no-bbox failures. The largest bucket is verifier-unsupported answers after
+evidence collection, followed by incomplete or missed localization. This
+suggests that the next lift is likely better verification, evidence
+adjudication, and multi-region localization rather than simply adding tools.
+
+\section{Qualitative Analysis}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figure3-finance-latvia-evidence-binding.png}
+\caption{Finance evidence binding. The answer requires joining two chart-panel
+conditions to a country-code table. Same-revision baselines expose the failure
+mode: Base VLM returns unanswerable, generic agents often choose Estonia or
+emit raw tool transcripts, while FocusParse +4 answers \emph{Latvia} with all
+three cited pages and near-perfect region overlap.}
+\label{fig:latvia}
+\end{figure*}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figure4-datasheet-jesd204b-evidence-binding.png}
+\caption{Datasheet evidence compaction. Several baselines can state or nearly
+state the integer answer, but they fail to preserve complete page/box grounding.
+FocusParse +4 answers \emph{6} with the timing diagram and cross-page
+corroborating block diagrams retained as citable evidence packets.}
+\label{fig:jesd}
+\end{figure*}
+
+The qualitative examples make the main metric story inspectable. In the Latvia
+finance example, the answer turns on linking chart labels from pages 108 and
+109 to the \texttt{LV -> Latvia} country-code table on page 8. FocusParse +4
+has page recall 1.0, BBox IoU 0.99999, and three citations. ReAct +2 recovers
+the answer but with weak region grounding, while generic agents either choose
+Estonia or emit invalid raw transcripts. In the JESD204B datasheet example,
+baselines can sometimes state the answer \emph{6}, but FocusParse is the row
+that preserves complete page recall and near-perfect region overlap across the
+timing and block-diagram evidence.
+
+\section{Limitations}
+
+The current dataset slice is small and concentrated: 148 rows with 47 finance
+examples. The paper therefore reports confidence intervals and avoids broad
+claims about all document QA. A stronger 66.9\% FocusParse checkpoint is
+documented in research notes, but the raw run directory is not present in the
+current checkout; it is not used as a headline claim here. The qualitative
+panels and failure-taxonomy table are draft analysis artifacts; final styling
+depends on the selected venue template and page budget. Zotero export is
+currently blocked because Zotero Desktop/local API is unavailable on this
+profile. Finally, FocusParse is a research harness, not a general document
+parser or production service.
+
+\section{Conclusion}
+
+FocusParse studies a concrete mechanism for high-resolution document QA:
+construct the evidence before asking the model to answer. On the pinned 148-row
+parser-bench paper slice, FocusParse +4 reaches 61.5\% accuracy with strong
+page and region grounding, outperforming both a no-tool base VLM and generic
+tool-agent comparators. The more important mechanism signal is that structured
+inspect and expand stages produce compact packets that preserve both
+readability and interpretive context. This supports the paper's central claim:
+for dense finance and datasheet documents, better harnesses are not just models
+with larger context windows or more tools. They are systems that build the
+right evidence object before reasoning.
+
+\bibliographystyle{plain}
+\bibliography{../references}
+
+\appendix
+\section{Artifact Provenance}
+
+The main result table, composed qualitative panels, and same-revision
+qualitative baseline predictions are sourced from the May 24 result package
+recorded in the paper-draft runbook. A slim review archive is available at
+\texttt{results/paper/submission-review-package/}; the exact archive path is
+recorded in the package manifest. All claims in the abstract use that final
+matched package.
+
+\end{document}

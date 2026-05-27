@@ -2438,6 +2438,57 @@ async def test_loop_allows_verbose_numeric_shape_retry(tmp_path, parser_bench_su
     assert "Keep the answer field concise" in reasoner.calls[1]["prompt"]
 
 
+async def test_disable_answer_shape_repair_blocks_default_shape_retry(
+    tmp_path, parser_bench_submodule_present
+):
+    """Paper ablation flag keeps the first answer when only shape repair would retry."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required")
+    reasoner = _ScriptedClient(
+        [
+            (
+                '{"answer": "You might incorrectly report 10%, but the table '
+                'shows the requested percentage should be 0%.", '
+                '"citations": ["pkt_000"], "confidence": 0.72}'
+            ),
+            '{"answer": "0%", "citations": ["pkt_000"], "confidence": 0.86}',
+        ]
+    )
+    verifier = _ScriptedClient(
+        [
+            _verdict_json(
+                supported=False,
+                next_action="escalate_reasoner",
+                reason="The answer is too verbose and does not directly provide the scalar value.",
+            )
+        ]
+    )
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(verifier=verifier),
+        disable_answer_shape_repair=True,
+    )
+    example = _make_example().model_copy(
+        update={
+            "question": "What percentage should be reported?",
+            "answer_type": "numeric",
+        }
+    )
+
+    result = await workflow.run(
+        example, [tmp_path / "datasheet-A_page_0003_300dpi.png"], protocol="focus"
+    )
+
+    assert result.answer.startswith("You might incorrectly report")
+    assert result.telemetry["retries_used"] == 0
+    assert result.telemetry["evidence_retries_used"] == 0
+    assert result.telemetry["loop_terminated"] == "exhausted"
+    stage_counts = _stage_counts(result)
+    assert stage_counts["answer"] == 1
+    assert stage_counts["verify"] == 1
+    assert len(reasoner.calls) == 1
+
+
 async def test_loop_allows_contract_guard_retry(tmp_path, parser_bench_submodule_present):
     """A verifier false-accept overridden by the contract gets one retry."""
     if not parser_bench_submodule_present:
@@ -3223,6 +3274,59 @@ async def test_workflow_full_tool_set_runs_expand_context(tmp_path, parser_bench
     step = expand_steps[0]
     assert step.tier in ("deterministic", "skeleton")
     assert step.action != "passthrough"
+
+
+async def test_workflow_disable_expand_context_skips_only_expand_stage(
+    tmp_path, parser_bench_submodule_present
+):
+    """Paper ablation: full belt can keep run_python while disabling expand_context."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+
+    client = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    workflow = FocusWorkflow(
+        backend_client=client,
+        tool_set="full",
+        disable_expand_context=True,
+    )
+    images = [tmp_path / "datasheet-A_page_0003_300dpi.png"]
+    result = await workflow.run(_make_example(), images, protocol="focus")
+
+    assert result.telemetry["available_tools"] == [
+        "inspect_region",
+        "get_text_layer",
+        "run_python",
+    ]
+    expand_steps = [s for s in result.trace.steps if s.stage == "expand_context"]
+    assert len(expand_steps) == 1
+    step = expand_steps[0]
+    assert step.tier == "skipped"
+    assert step.action == "passthrough"
+    assert step.args.get("reason") == "disable_expand_context"
+
+
+async def test_workflow_disable_rerank_skips_llm_reranker(tmp_path, parser_bench_submodule_present):
+    """Paper ablation: no-rerank run keeps original localization order."""
+    if not parser_bench_submodule_present:
+        pytest.skip("parser-bench submodule required for BenchmarkExample")
+
+    reasoner = _FakeClient('{"answer": "5.5", "citations": ["pkt_000"], "confidence": 0.9}')
+    reranker = _FakeClient('{"scores": [{"region_id": "x", "relevance": 1.0}]}')
+    workflow = FocusWorkflow(
+        backend_client=reasoner,
+        tier_router=_FakeTierRouter(localizer_rerank=reranker),
+        disable_rerank=True,
+    )
+    images = [tmp_path / "datasheet-A_page_0003_300dpi.png"]
+    result = await workflow.run(_make_example(), images, protocol="focus")
+
+    assert reranker.calls == []
+    rerank_steps = [s for s in result.trace.steps if s.stage == "rerank"]
+    assert len(rerank_steps) == 1
+    step = rerank_steps[0]
+    assert step.tier == "skipped"
+    assert step.action == "passthrough"
+    assert step.args.get("reason") == "disable_rerank"
 
 
 async def test_workflow_minimal_tool_set_forces_auto_zoom_off(

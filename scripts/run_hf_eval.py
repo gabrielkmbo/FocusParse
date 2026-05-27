@@ -236,6 +236,9 @@ def main() -> int:
                 use_react_inspector=args.react_inspector,
                 multi_scale_packets=args.multi_scale_packets,
                 chart_to_table_enabled=args.chart_to_table,
+                disable_rerank=args.disable_rerank,
+                disable_expand_context=args.disable_expand_context,
+                disable_answer_shape_repair=args.disable_answer_shape_repair,
                 strict_layout_detection=not args.allow_layout_fallbacks,
                 layout_max_retries=args.layout_detect_retries,
                 layout_timeout_s=args.layout_detect_timeout_s,
@@ -479,6 +482,33 @@ def _parse_args() -> argparse.Namespace:
         "questions. The reasoner sees the extracted CSV alongside the crop. "
         "Default off; gated by question family + figure_class so cost stays "
         "bounded. Predicted +2-4pp on Finance accuracy.",
+    )
+    parser.add_argument(
+        "--disable-rerank",
+        action="store_true",
+        default=False,
+        help=(
+            "Paper ablation: skip the query-conditioned rerank stage while "
+            "keeping the rest of FocusParse unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--disable-expand-context",
+        action="store_true",
+        default=False,
+        help=(
+            "Paper ablation: skip expand_context even with --tool-set full. "
+            "Unlike --tool-set minimal, this keeps run_python available."
+        ),
+    )
+    parser.add_argument(
+        "--disable-answer-shape-repair",
+        action="store_true",
+        default=False,
+        help=(
+            "Paper ablation: keep verifier scoring and evidence construction, "
+            "but disable answer-shape-specific retry hints and selection guards."
+        ),
     )
     parser.add_argument(
         "--reasoner-self-consistency-k",

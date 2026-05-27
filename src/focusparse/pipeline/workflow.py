@@ -298,6 +298,9 @@ class FocusWorkflow:
         use_react_inspector: bool = False,
         multi_scale_packets: bool = False,
         chart_to_table_enabled: bool = False,
+        disable_rerank: bool = False,
+        disable_expand_context: bool = False,
+        disable_answer_shape_repair: bool = False,
         allow_layout_endpoint_fallback: bool = True,
         layout_max_retries: int | None = None,
         layout_timeout_s: float | None = None,
@@ -334,6 +337,16 @@ class FocusWorkflow:
         if tool_set not in ("minimal", "full"):
             raise ValueError(f"tool_set must be 'minimal' or 'full', got {tool_set!r}")
         self.tool_set = tool_set
+        # Paper ablation controls. These are narrower than `tool_set=minimal`:
+        # `disable_rerank` preserves localization order without changing later
+        # stages, while `disable_expand_context` keeps the full belt available
+        # except the context-expansion stage itself. `disable_answer_shape_repair`
+        # keeps verifier scoring but blocks answer-shape-specific retry/selection
+        # guards so paper runs can separate evidence construction from output
+        # normalization.
+        self.disable_rerank = disable_rerank
+        self.disable_expand_context = disable_expand_context
+        self.disable_answer_shape_repair = disable_answer_shape_repair
         # Phase 6 candidate #1 (Phase 1 of the 2026-05-04 sprint): LLM-driven
         # inspector dispatch. When True, _run_inspect routes through
         # `inspector_react.react_inspect` which lets a mid-tier LLM pick
@@ -764,11 +777,14 @@ class FocusWorkflow:
         while True:
             action = verdict.next_action
             if action == "accept":
-                if _should_preserve_initial_answer_on_supported_retry(
-                    initial_answer_event,
-                    answer_event,
-                    question_event=question_event,
-                    retries_used=retries_used,
+                if (
+                    not self.disable_answer_shape_repair
+                    and _should_preserve_initial_answer_on_supported_retry(
+                        initial_answer_event,
+                        answer_event,
+                        question_event=question_event,
+                        retries_used=retries_used,
+                    )
                 ):
                     _add_debug_event(
                         recorder,
@@ -855,7 +871,7 @@ class FocusWorkflow:
             # can't retry, surface the current answer + flag exhaustion so
             # the trace shows the verifier wasn't satisfied.
             retry_budget = self._retry_budget_for_action(action)
-            if _should_allow_reasoner_shape_retry(
+            if not self.disable_answer_shape_repair and _should_allow_reasoner_shape_retry(
                 action=action,
                 answer=answer_event,
                 verdict=verdict,
@@ -960,6 +976,7 @@ class FocusWorkflow:
                     answer_event=answer_event,
                     question_event=question_event,
                     evidence=retry_answer_evidence,
+                    include_answer_shape_guidance=not self.disable_answer_shape_repair,
                 )
             elif action == "escalate_reasoner":
                 # No state change — just feed the verifier's reason into the
@@ -970,6 +987,7 @@ class FocusWorkflow:
                     answer_event=answer_event,
                     question_event=question_event,
                     evidence=retry_answer_evidence,
+                    include_answer_shape_guidance=not self.disable_answer_shape_repair,
                 )
             else:
                 # Unknown action (future verifier extension) — accept the
@@ -1088,7 +1106,9 @@ class FocusWorkflow:
         """Focus-pipeline tool belt for run metadata and +2/+4 diagnostics."""
         tools = ["inspect_region", "get_text_layer"]
         if self.tool_set == "full":
-            tools.extend(["expand_context", "run_python"])
+            if not self.disable_expand_context:
+                tools.append("expand_context")
+            tools.append("run_python")
         if self.chart_to_table_enabled:
             tools.append("chart_to_table")
         return tools
@@ -1103,7 +1123,7 @@ class FocusWorkflow:
         """
         if action not in _EVIDENCE_RETRY_ACTIONS:
             return self.max_retries
-        if action == "expand_context" and self.tool_set != "full":
+        if action == "expand_context" and (self.tool_set != "full" or self.disable_expand_context):
             return self.max_retries
         return max(self.max_retries, self.max_evidence_retries)
 
@@ -1179,6 +1199,34 @@ class FocusWorkflow:
         None, so existing tests + harnesses that don't wire the rerank
         tier still see the localizer's original ordering.
         """
+        if self.disable_rerank:
+            recorder.record(
+                TrajectoryStep(
+                    step_index=step_counter.next(),
+                    stage="rerank",
+                    tier="skipped",
+                    action="passthrough",
+                    args={
+                        "n_regions": len(regions.candidates),
+                        "n_scored": 0,
+                        "reason": "disable_rerank",
+                        "retry_attempt": retry_attempt,
+                    },
+                )
+            )
+            _add_debug_event(
+                recorder,
+                stage="rerank",
+                event_type="candidate_regions",
+                retry_attempt=retry_attempt,
+                payload={
+                    "n_regions": len(regions.candidates),
+                    "n_scored": 0,
+                    "reason": "disable_rerank",
+                    "regions": [_region_to_debug(r) for r in regions.candidates[:50]],
+                },
+            )
+            return regions
         rerank_client = self._client_for("localizer_rerank")
         reranked, response = await rerank_regions(
             question_event,
@@ -1394,7 +1442,12 @@ class FocusWorkflow:
         # Tool-set ablation: when running with the +2-tools (minimal) belt
         # we skip expand_context entirely. The trace records a passthrough
         # step so per-stage metrics stay alignable across runs.
+        skip_reason: str | None = None
         if self.tool_set == "minimal":
+            skip_reason = "tool_set=minimal"
+        elif self.disable_expand_context:
+            skip_reason = "disable_expand_context"
+        if skip_reason is not None:
             recorder.record(
                 TrajectoryStep(
                     step_index=step_counter.next(),
@@ -1403,7 +1456,7 @@ class FocusWorkflow:
                     action="passthrough",
                     args={
                         "n_packets": len(evidence.packets),
-                        "reason": "tool_set=minimal",
+                        "reason": skip_reason,
                         "retry_attempt": retry_attempt,
                     },
                 )
@@ -1415,7 +1468,7 @@ class FocusWorkflow:
                 retry_attempt=retry_attempt,
                 payload={
                     "n_packets": len(evidence.packets),
-                    "reason": "tool_set=minimal",
+                    "reason": skip_reason,
                     "packets": [_packet_to_debug(p) for p in evidence.packets],
                 },
             )
@@ -2741,6 +2794,7 @@ def _build_reasoner_repair_hint(
     answer_event: AnswerEvent,
     question_event: QuestionEvent,
     evidence: EvidenceEvent | None = None,
+    include_answer_shape_guidance: bool = True,
 ) -> str:
     """Build targeted same-evidence repair guidance from verifier diagnostics."""
 
@@ -2755,6 +2809,9 @@ def _build_reasoner_repair_hint(
 
     failures = set(_verdict_answer_shape_failures(verdict))
     question = str(question_event.question or "").lower()
+
+    if not include_answer_shape_guidance:
+        return "\n".join(dict.fromkeys(parts))
 
     if _question_requests_period_range(question_event.question):
         parts.append(

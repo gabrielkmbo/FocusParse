@@ -1,6 +1,6 @@
-"""Run the headline 4-method × 2-task × 2-metric table.
+"""Run the headline 4-method x 2-task x 2-metric table.
 
-Sweeps the seven method × tool-set combinations that fill the headline
+Sweeps the seven method x tool-set combinations that fill the headline
 table from `plans/2026-04-29-research-driven-eval-framework.md`:
 
     | Method                           | Datasheets   | Finance     |
@@ -29,7 +29,8 @@ After all specs finish, aggregates per-domain into a single
 
 Usage:
     uv run python scripts/run_headline_eval.py --output-dir results/hf/headline-v1
-    uv run python scripts/run_headline_eval.py --max-parallel 4 --limit 30  # smoke
+    uv run python scripts/run_headline_eval.py --max-parallel 4 --limit 30  # limit smoke
+    uv run python scripts/run_headline_eval.py --example-ids-file smoke-ids.txt  # pinned smoke
 """
 
 from __future__ import annotations
@@ -72,6 +73,7 @@ def _build_cmd(
     output_dir: Path,
     staging_dir: Path,
     limit: int | None,
+    example_ids_file: Path | None,
     pdfs_root: Path | None,
     hf_revision: str | None,
     resume: bool,
@@ -92,6 +94,8 @@ def _build_cmd(
     ]
     if pdfs_root is not None:
         cmd += ["--pdfs-root", str(pdfs_root)]
+    if example_ids_file is not None:
+        cmd += ["--example-ids-file", str(example_ids_file)]
     if limit is not None:
         cmd += ["--limit", str(limit)]
     if hf_revision:
@@ -111,6 +115,7 @@ def _run_one_spec(
     output_dir: Path,
     staging_dir: Path,
     limit: int | None,
+    example_ids_file: Path | None,
     pdfs_root: Path | None,
     hf_revision: str | None,
     resume: bool,
@@ -121,6 +126,7 @@ def _run_one_spec(
         output_dir=output_dir,
         staging_dir=staging_dir,
         limit=limit,
+        example_ids_file=example_ids_file,
         pdfs_root=pdfs_root,
         hf_revision=hf_revision,
         resume=resume,
@@ -130,7 +136,7 @@ def _run_one_spec(
     return spec, proc.returncode
 
 
-def _config_key(spec: dict[str, str], tier_sha8: str = "7d4b816d") -> str:
+def _config_key(spec: dict[str, str], tier_sha8: str) -> str:
     """Match `run_hf_eval.py`'s deterministic config_key shape.
 
     Includes a `_t<tool_set>` suffix when tool_set != "full" so the
@@ -141,7 +147,12 @@ def _config_key(spec: dict[str, str], tier_sha8: str = "7d4b816d") -> str:
     return f"focusparse_{spec['agent']}_{_HEADLINE_PROTOCOL}_{tier_sha8}{suffix}"
 
 
-def _load_run_summary(output_dir: Path, spec: dict[str, str]) -> dict[str, Any] | None:
+def _load_run_summary(
+    output_dir: Path,
+    spec: dict[str, str],
+    *,
+    tier_sha8: str,
+) -> dict[str, Any] | None:
     """Read the per-spec run.json and aggregate_by_domain block.
 
     Spec results are keyed by `config_key` (the agent/protocol/tier_sha8
@@ -151,7 +162,7 @@ def _load_run_summary(output_dir: Path, spec: dict[str, str]) -> dict[str, Any] 
     matching spec. To make this robust, we also pin the spec into
     each run.json's `tool_set` field at write time.
     """
-    config_key = _config_key(spec)
+    config_key = _config_key(spec, tier_sha8)
     run_dir = output_dir / config_key
     summary_path = run_dir / "run.json"
     if not summary_path.exists():
@@ -173,6 +184,9 @@ def _build_headline_table(
     *,
     specs: list[dict[str, str]],
     started_at_iso: str,
+    tier_sha8: str,
+    limit: int | None,
+    example_ids_file: Path | None,
 ) -> dict[str, Any]:
     """Merge per-spec runs into the canonical headline-table JSON shape.
 
@@ -201,7 +215,7 @@ def _build_headline_table(
     """
     rows: list[dict[str, Any]] = []
     for spec in specs:
-        summary = _load_run_summary(output_dir, spec)
+        summary = _load_run_summary(output_dir, spec, tier_sha8=tier_sha8)
         if summary is None:
             rows.append(
                 {
@@ -239,9 +253,24 @@ def _build_headline_table(
     return {
         "generated_at": started_at_iso,
         "protocol": _HEADLINE_PROTOCOL,
+        "tier_sha8": tier_sha8,
+        "limit": limit,
+        "example_ids_file": str(example_ids_file) if example_ids_file else None,
         "specs": specs,
         "rows": rows,
     }
+
+
+def _current_tier_sha8() -> str:
+    """Match `run_hf_eval.py`'s tier hash for the current config/env."""
+    import hashlib
+
+    from focusparse.utils.config import load_config
+
+    config = load_config()
+    resolved = {role: config.tier_for(role).model_dump() for role in config.roles}
+    payload = json.dumps(resolved, sort_keys=True).encode()
+    return hashlib.sha256(payload).hexdigest()[:8]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -269,6 +298,16 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Cap examples per spec. Default: full split (~148).",
+    )
+    parser.add_argument(
+        "--example-ids-file",
+        type=Path,
+        default=None,
+        help=(
+            "Filter each spec to newline-delimited example IDs while preserving "
+            "the full staged benchmark.jsonl. Prefer this over --limit for "
+            "smokes that share a pinned staging dir."
+        ),
     )
     parser.add_argument(
         "--hf-revision",
@@ -318,16 +357,19 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     specs = _filter_specs(args.specs)
+    tier_sha8 = _current_tier_sha8()
     started_at = datetime.now(UTC).isoformat()
     logger.info(
-        "Running %d spec(s) with --max-parallel %d, --limit %s",
+        "Running %d spec(s) with --max-parallel %d, --limit %s, --example-ids-file %s, tier_sha8=%s",
         len(specs),
         args.max_parallel,
         args.limit,
+        args.example_ids_file,
+        tier_sha8,
     )
 
     # Spawn subprocesses with bounded parallelism. Each subprocess prints
-    # its own progress to its own stdout — we only collect returncodes
+    # its own progress to its own stdout; we only collect returncodes
     # here so the orchestrator stays simple.
     failures: list[tuple[dict[str, str], int]] = []
     with ThreadPoolExecutor(max_workers=max(1, args.max_parallel)) as executor:
@@ -338,6 +380,7 @@ def main() -> int:
                 output_dir=args.output_dir,
                 staging_dir=args.staging_dir,
                 limit=args.limit,
+                example_ids_file=args.example_ids_file,
                 pdfs_root=args.pdfs_root,
                 hf_revision=args.hf_revision,
                 resume=args.resume,
@@ -355,7 +398,14 @@ def main() -> int:
     if failures:
         logger.warning("%d / %d specs failed; merging the rest anyway.", len(failures), len(specs))
 
-    table = _build_headline_table(args.output_dir, specs=specs, started_at_iso=started_at)
+    table = _build_headline_table(
+        args.output_dir,
+        specs=specs,
+        started_at_iso=started_at,
+        tier_sha8=tier_sha8,
+        limit=args.limit,
+        example_ids_file=args.example_ids_file,
+    )
     out_path = args.output_dir / "headline_table.json"
     out_path.write_text(json.dumps(table, default=str, indent=2))
     logger.info("Wrote %s", out_path)
