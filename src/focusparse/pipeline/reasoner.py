@@ -4,8 +4,8 @@ Never the full document. The reasoner is handed one image per packet plus a
 prompt that enumerates packet ids; it emits `{answer, citations, confidence}`
 where citations are packet-id strings the verifier can look up.
 
-Phase 2 skeleton: single-shot call. Sub-phase 2f adds K=2 self-consistency
-sampling + escalation wiring.
+The workflow can run a single reasoner call or a small self-consistency bundle,
+then hands the cited packet ids to the verifier.
 """
 
 from __future__ import annotations

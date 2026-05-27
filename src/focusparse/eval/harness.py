@@ -1,8 +1,8 @@
 """Evaluation harness — runs a workflow across a benchmark slice.
 
 `run_simple_eval` runs the single-shot baseline (parser-bench reproducibility).
-`run_focus_eval` runs the agentic `FocusWorkflow` (Phase 2 skeleton wired —
-stages are deterministic placeholders with one real VLM call at the reasoner).
+`run_focus_eval` runs the agentic `FocusWorkflow`: plan, route, localize,
+inspect, expand, answer, verify, and record grounded evidence.
 
 Per-example records include: answer_correct, page_recall, bbox_iou,
 evidence_reward, tokens_in/out, usd, latency, tool_calls, is_lazy. They
@@ -361,16 +361,16 @@ async def run_focus_eval(
         protocol: Typically `focus_default`. Recorded in per-example rows.
         output_dir, images_root, limit, resume: Same semantics as `run_simple_eval`.
         config: Optional `FocusConfig` passed through to the workflow for
-            budget-aware planning. Skeleton workflow reads only `.budget`.
+            budget-aware planning and endpoint settings.
         tier_router: Optional `TierRouter`. When provided, the workflow's
             non-reasoner stages (currently: planner) resolve their clients
-            through it. When absent, those stages fall back to deterministic
-            placeholders.
+            through it. When absent, deterministic defaults are used for
+            stages that can run without model calls.
         pdfs_root: Optional directory where source PDFs live. When provided,
             the harness resolves `pdfs_root / example.source_pdf` and passes
             it to `FocusWorkflow.run(pdf_path=...)`, which feeds native text
             into the FTS router. Missing files silently degrade to the
-            skeleton router — the run keeps going.
+            image-only routing path — the run keeps going.
         strict_layout_detection: when True, layout endpoint outage/stub errors
             abort the eval instead of becoming skeleton-region examples.
         layout_max_retries / layout_timeout_s: optional overrides for the

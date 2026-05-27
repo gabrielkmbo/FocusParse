@@ -14,3 +14,5 @@
 - Added contribution, security, and reproducibility guidance for public use.
 - Removed orphaned stub files that were not part of the reproducible experiment
   path.
+- Refreshed public-facing CLI/docstrings to describe the current reproducible
+  harness instead of older phase-skeleton language.

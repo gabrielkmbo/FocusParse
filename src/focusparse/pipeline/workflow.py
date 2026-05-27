@@ -1,9 +1,8 @@
 """FocusWorkflow — the top-level workflow tying all stages together.
 
-Phase 2 skeleton (this file): `FocusWorkflow.run` wires the stages end-to-end
-using deterministic placeholders for plan / route_pages / propose_regions /
-inspect / expand_context / verify, with one real VLM call in the reasoner.
-Sub-phases 2c–2f progressively replace each placeholder.
+`FocusWorkflow.run` wires the production research path end to end: plan,
+route pages, propose regions, inspect evidence, expand context, answer, verify,
+and record the trajectory.
 
 `SimpleBaselineAgent` is the parser-bench reproducibility runner (unchanged).
 """
@@ -275,12 +274,7 @@ class WorkflowResult:
 
 
 class FocusWorkflow:
-    """The 6-stage lens workflow.
-
-    Constructor accepts `backend_client` directly for Phase 2 skeleton. Later
-    sub-phases swap this for `tier_router.client_for(role)` once escalation
-    and per-stage tiering is wired.
-    """
+    """Budget-aware evidence-localization workflow."""
 
     def __init__(
         self,

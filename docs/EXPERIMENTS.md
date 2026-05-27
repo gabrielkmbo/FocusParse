@@ -18,6 +18,9 @@ LAYOUT_EXTRACTION_V3_MODAL_TOKEN
 OPENAI_API_KEY or ANTHROPIC_API_KEY or GEMINI_API_KEY
 ```
 
+The Gemini client also accepts `GOOGLE_API_KEY`; `GEMINI_API_KEY` is preferred
+when both are present.
+
 ## Pinned Inputs
 
 ```text

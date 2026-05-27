@@ -4,7 +4,7 @@ The public paper path uses text/layout routing. This seam is retained for a
 future visual-rerank ablation behind the optional `visual-rerank` extra; router
 code should not import it by default.
 
-Phase 5 ablation options:
+Implementation options:
   (a) deploy llamaindex/vdr-2b-multi-v1 to an HF Inference Endpoint
   (b) run locally via sentence-transformers behind [visual-rerank] extra
 

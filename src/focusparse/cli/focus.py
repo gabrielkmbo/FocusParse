@@ -3,13 +3,11 @@
 Subcommands:
   focus status [--short]                            — print env + tier config
   focus eval --agent (simple|focus) ...             — run evaluation
-  focus report <run_dir>                            — render HTML report (Phase 4)
-  focus export-traces <run_dir> [--out path]        — export SFT-ready JSONL (Phase 6)
+  focus report <run_dir>                            — render an HTML run report
+  focus export-traces <run_dir> [--out path]        — export SFT-ready JSONL
 
-Phase 1 status:
-  - `focus status` works standalone (no API calls).
-  - Public paper runs use `scripts/run_hf_eval.py` and
-    `scripts/run_headline_eval.py`.
+For paper runs, prefer `scripts/run_hf_eval.py` for one method and
+`scripts/run_headline_eval.py` for the seven-method table.
 """
 
 from __future__ import annotations
@@ -48,6 +46,7 @@ def status(short: bool = typer.Option(False, "--short", help="One-line summary")
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
         "HF_TOKEN",
         "VLLM_API_KEY",
         "LLAMA_CLOUD_API_KEY",
@@ -323,7 +322,7 @@ def export_traces(
     min_iou: float = typer.Option(0.3),
     require_correct: bool = typer.Option(True),
 ) -> None:
-    """Export SFT-ready JSONL trajectories from a run (Phase 6)."""
+    """Export SFT-ready JSONL trajectories from a run."""
     from focusparse.traces.export import export_eval_run_sft_jsonl
 
     n = export_eval_run_sft_jsonl(
