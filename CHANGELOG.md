@@ -10,3 +10,4 @@
   logs, outputs, temporary Office files, and Node artifacts.
 - Cleaned up verification blockers so lint, format, and the full local test
   suite pass before the public-repo commit.
+- Added public CI and citation metadata for repository publication.

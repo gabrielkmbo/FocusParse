@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+title: "FocusParse: Evidence Packets for High-Resolution Document QA"
+message: "If you use FocusParse in your research, please cite this repository."
+type: software
+authors:
+  - family-names: Bo
+    given-names: Gabriel
+date-released: 2026-05-27
+license: Apache-2.0
+repository-code: "https://github.com/run-llama/focusparse"
+abstract: >-
+  FocusParse is a reproducible research harness for high-resolution document
+  question answering. It constructs citation-grounded evidence packets over
+  finance reports and technical datasheets, then evaluates answer correctness,
+  page recall, bounding-box grounding, cost, latency, and lazy-answer behavior
+  on parser-bench.

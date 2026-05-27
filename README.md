@@ -61,6 +61,7 @@ Outputs go under `results/`, which is intentionally gitignored.
 | `docs/BRANCH_AUDIT.md` | What was checked from hanging branches before cleanup. |
 | `scripts/README.md` | Script map for eval, reporting, diagnostics, and demos. |
 | `configs/default.yaml` | Model tiers, dataset pin, endpoint settings, and budgets. |
+| `CITATION.cff` | Citation metadata for research use. |
 
 ## Repo Map
 
