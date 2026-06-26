@@ -8,7 +8,7 @@ clearer, easier to reproduce, or easier to inspect.
 ```bash
 git submodule update --init --recursive
 uv sync --extra dev
-uv run focus status
+uv run focus status --short
 ```
 
 Real evaluations also need the environment variables described in
@@ -19,6 +19,7 @@ Real evaluations also need the environment variables described in
 Run the same checks as CI:
 
 ```bash
+uv run focus status --short
 uv run ruff check src/ tests/ scripts/
 uv run ruff format --check src/ tests/ scripts/
 uv run pytest

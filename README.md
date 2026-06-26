@@ -19,7 +19,9 @@ uv sync --extra dev
 cp .env.example .env
 ```
 
-Fill `.env` with at least one model provider key, `HF_TOKEN`, and
+Fill `.env` with the keys needed for the path you plan to run. Local status,
+lint, and unit tests do not require provider credentials. HF-backed evaluations
+need `HF_TOKEN`, and FocusParse layout detection needs
 `LAYOUT_EXTRACTION_V3_MODAL_TOKEN`.
 
 Run local checks:
@@ -27,6 +29,7 @@ Run local checks:
 ```bash
 uv run focus status
 uv run ruff check src/ tests/ scripts/
+uv run ruff format --check src/ tests/ scripts/
 uv run pytest
 ```
 
@@ -50,7 +53,9 @@ uv run python scripts/run_headline_eval.py \
   --max-parallel 2
 ```
 
-Outputs go under `results/`, which is intentionally gitignored.
+Outputs go under `results/`, which is intentionally gitignored. Keep provider
+logs, source PDFs, page images, crops, and trace payloads out of commits unless
+a release checklist explicitly says otherwise.
 
 ## What To Read
 
