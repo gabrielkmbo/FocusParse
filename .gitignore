@@ -22,6 +22,8 @@ hf_cache/
 logs/
 outputs/
 node_modules/
+package.json
+package-lock.json
 
 # build artifacts
 *.aux
@@ -37,4 +39,6 @@ node_modules/
 .DS_Store
 .vscode/
 .idea/
+.claude/
+tmp/
 ~$*
